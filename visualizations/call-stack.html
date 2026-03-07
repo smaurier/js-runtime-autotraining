@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pile d'appels (Call Stack) — Visualisation interactive</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+    padding: 1rem;
+    line-height: 1.5;
+  }
+  h1 { text-align: center; font-size: 1.6rem; margin-bottom: .3rem; color: #8be9fd; }
+  .subtitle { text-align: center; font-size: .95rem; color: #888; margin-bottom: 1rem; }
+
+  /* Controls */
+  .controls {
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .6rem;
+    margin-bottom: 1rem;
+  }
+  .controls select, .controls button {
+    font-size: .9rem; padding: .45rem 1rem; border: 1px solid #444; border-radius: 6px;
+    background: #16213e; color: #e0e0e0; cursor: pointer; transition: background .2s, border-color .2s;
+  }
+  .controls button:hover { background: #0f3460; border-color: #8be9fd; }
+  .controls button:disabled { opacity: .4; cursor: not-allowed; }
+  .controls select { min-width: 220px; }
+  .btn-play  { border-color: #50fa7b; color: #50fa7b; }
+  .btn-pause { border-color: #ffb86c; color: #ffb86c; }
+  .btn-step  { border-color: #8be9fd; color: #8be9fd; }
+  .btn-reset { border-color: #ff5555; color: #ff5555; }
+  .speed-label { font-size: .85rem; color: #888; }
+  .speed-label input { width: 80px; vertical-align: middle; }
+
+  /* Layout */
+  .main {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    gap: 1rem;
+    max-width: 1100px;
+    margin: 0 auto 1rem;
+    min-height: 520px;
+  }
+  @media (max-width: 800px) { .main { grid-template-columns: 1fr; } }
+
+  /* Code panel */
+  .code-panel {
+    background: #16213e; border-radius: 10px; padding: 1rem; border: 1px solid #333;
+    overflow-y: auto; max-height: 560px;
+  }
+  .code-panel h2 { font-size: 1rem; color: #bd93f9; margin-bottom: .6rem; }
+  .code-line {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: .82rem; padding: 2px 6px; border-radius: 3px; white-space: pre;
+    transition: background .3s;
+  }
+  .code-line.highlight { background: #44475a; color: #f8f8f2; }
+  .code-line .ln { color: #6272a4; display: inline-block; width: 24px; text-align: right; margin-right: 8px; user-select: none; }
+
+  /* Stack visualization */
+  .stack-area {
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+  .stack-container {
+    background: #16213e; border-radius: 10px; padding: 1rem; border: 1px solid #333;
+    flex: 1; display: flex; flex-direction: column;
+  }
+  .stack-container h2 { font-size: 1rem; color: #ffb86c; margin-bottom: .5rem; text-align: center; }
+  .stack-depth { text-align: center; font-size: .8rem; color: #6272a4; margin-bottom: .5rem; }
+  .stack-visual {
+    flex: 1; display: flex; flex-direction: column-reverse;
+    gap: 0; min-height: 300px; position: relative;
+    border: 2px dashed #333; border-radius: 8px; padding: 6px;
+    overflow-y: auto; max-height: 440px;
+  }
+  .frame {
+    padding: 8px 12px; border-radius: 6px; font-family: monospace; font-size: .85rem;
+    display: flex; justify-content: space-between; align-items: center;
+    animation: slideUp .35s ease-out; margin-bottom: 3px;
+    border-left: 4px solid; min-height: 38px;
+  }
+  .frame.popping { animation: slideDown .35s ease-in forwards; }
+  .frame.error-frame { background: #ff5555 !important; border-left-color: #ff0000 !important; color: #fff; }
+  @keyframes slideUp   { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes slideDown { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(30px); } }
+
+  .frame-name { font-weight: bold; }
+  .frame-args { color: #f1fa8c; font-size: .8rem; }
+  .frame-ret  { color: #50fa7b; font-size: .8rem; font-style: italic; }
+  .stack-empty-msg { color: #555; font-style: italic; text-align: center; padding: 2rem 0; }
+
+  /* Return value display */
+  .return-display {
+    background: #16213e; border-radius: 10px; padding: .8rem 1rem; border: 1px solid #333;
+  }
+  .return-display h2 { font-size: 1rem; color: #50fa7b; margin-bottom: .3rem; }
+  .return-val { font-family: monospace; font-size: 1rem; color: #f1fa8c; min-height: 1.5em; }
+
+  /* Output panel */
+  .output-panel {
+    background: #16213e; border-radius: 10px; padding: .8rem 1rem; border: 1px solid #333;
+  }
+  .output-panel h2 { font-size: 1rem; color: #8be9fd; margin-bottom: .3rem; }
+  .output-content { font-family: monospace; font-size: .9rem; color: #f1fa8c; min-height: 1.5em; }
+
+  /* Explanation */
+  .explanation {
+    max-width: 1100px; margin: 0 auto;
+    background: #16213e; border-radius: 10px; padding: 1rem 1.2rem; border: 1px solid #333;
+  }
+  .explanation h2 { font-size: 1rem; color: #ff79c6; margin-bottom: .4rem; }
+  .explanation p { font-size: .9rem; line-height: 1.6; color: #ccc; min-height: 2.4em; }
+
+  /* Color palette for frames */
+  .color-0 { background: #264653cc; border-left-color: #2a9d8f; }
+  .color-1 { background: #2a9d8faa; border-left-color: #e9c46a; }
+  .color-2 { background: #e76f51aa; border-left-color: #f4a261; }
+  .color-3 { background: #6a0572aa; border-left-color: #bd93f9; }
+  .color-4 { background: #1b4332aa; border-left-color: #52b788; }
+  .color-5 { background: #7b2d8daa; border-left-color: #ff79c6; }
+  .color-overflow { background: #ff555530; border-left-color: #ff5555; }
+</style>
+</head>
+<body>
+
+<h1>Pile d'appels (Call Stack)</h1>
+<p class="subtitle">Visualisation du mécanisme LIFO (Last In, First Out) de JavaScript</p>
+
+<div class="controls">
+  <select id="scenarioSelect">
+    <option value="0">1 — Factorielle (récursion)</option>
+    <option value="1">2 — Fonctions imbriquées</option>
+    <option value="2">3 — Stack overflow</option>
+  </select>
+  <button class="btn-play"  id="btnPlay">&#9654; Lecture</button>
+  <button class="btn-pause" id="btnPause" disabled>&#10074;&#10074; Pause</button>
+  <button class="btn-step"  id="btnStep">&#9654;| Pas</button>
+  <button class="btn-reset" id="btnReset">&#8634; Reset</button>
+  <span class="speed-label">Vitesse : <input type="range" id="speedRange" min="150" max="1500" value="600" step="50"></span>
+</div>
+
+<div class="main">
+  <div class="code-panel">
+    <h2>Code source</h2>
+    <div id="codeLines"></div>
+  </div>
+  <div class="stack-area">
+    <div class="stack-container">
+      <h2>Pile d'appels</h2>
+      <div class="stack-depth" id="stackDepth">Profondeur : 0</div>
+      <div class="stack-visual" id="stackVisual">
+        <div class="stack-empty-msg">— pile vide —</div>
+      </div>
+    </div>
+    <div class="return-display">
+      <h2>Valeur de retour</h2>
+      <div class="return-val" id="returnVal">—</div>
+    </div>
+    <div class="output-panel">
+      <h2>Sortie (console.log)</h2>
+      <div class="output-content" id="outputContent">—</div>
+    </div>
+  </div>
+</div>
+
+<div class="explanation">
+  <h2>Explication</h2>
+  <p id="explanationText">Sélectionnez un scénario et appuyez sur <strong>Lecture</strong> ou <strong>Pas</strong>.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+/* Color for function name */
+const funcColors = {};
+let colorIdx = 0;
+function getColor(name) {
+  if (name === '__overflow__') return 'color-overflow';
+  if (!funcColors[name]) { funcColors[name] = 'color-' + (colorIdx % 6); colorIdx++; }
+  return funcColors[name];
+}
+
+/* ── Scenarios ── */
+const scenarios = [
+  // 0 — Factorial
+  {
+    code: [
+      `function factorial(n) {`,
+      `  if (n <= 1) return 1;`,
+      `  return n * factorial(n - 1);`,
+      `}`,
+      ``,
+      `const result = factorial(5);`,
+      `console.log(result); // 120`,
+    ],
+    steps: [
+      // Push factorial(5)
+      { hl: 5, action: 'push', name: 'factorial', args: 'n=5', explain: 'Appel de factorial(5). Un cadre est poussé sur la pile.' },
+      { hl: 0, action: 'info', explain: 'Entrée dans factorial(5). n=5 > 1, donc on ne retourne pas encore.' },
+      { hl: 2, action: 'push', name: 'factorial', args: 'n=4', explain: 'factorial(5) appelle factorial(4). Nouveau cadre empilé.' },
+      { hl: 0, action: 'info', explain: 'Entrée dans factorial(4). n=4 > 1.' },
+      { hl: 2, action: 'push', name: 'factorial', args: 'n=3', explain: 'factorial(4) appelle factorial(3). La pile grandit.' },
+      { hl: 0, action: 'info', explain: 'Entrée dans factorial(3). n=3 > 1.' },
+      { hl: 2, action: 'push', name: 'factorial', args: 'n=2', explain: 'factorial(3) appelle factorial(2).' },
+      { hl: 0, action: 'info', explain: 'Entrée dans factorial(2). n=2 > 1.' },
+      { hl: 2, action: 'push', name: 'factorial', args: 'n=1', explain: 'factorial(2) appelle factorial(1).' },
+      { hl: 1, action: 'info', explain: 'Entrée dans factorial(1). n=1 ≤ 1 → condition de base atteinte !' },
+      // Unwind
+      { hl: 1, action: 'pop', ret: '1', explain: 'factorial(1) retourne 1. Cadre retiré de la pile.' },
+      { hl: 2, action: 'pop', ret: '2 (2×1)', explain: 'factorial(2) calcule 2×1=2 et retourne 2.' },
+      { hl: 2, action: 'pop', ret: '6 (3×2)', explain: 'factorial(3) calcule 3×2=6 et retourne 6.' },
+      { hl: 2, action: 'pop', ret: '24 (4×6)', explain: 'factorial(4) calcule 4×6=24 et retourne 24.' },
+      { hl: 2, action: 'pop', ret: '120 (5×24)', explain: 'factorial(5) calcule 5×24=120 et retourne 120.' },
+      { hl: 6, action: 'push', name: 'console.log', args: '120', explain: 'console.log(120) est appelé.' },
+      { hl: 6, action: 'pop', output: '120', explain: 'Affiche 120. Pile vide, exécution terminée.' },
+      { hl: -1, action: 'done', explain: '✅ La récursion a empilé 5 cadres puis les a dépilés un par un. Chaque retour multiplie le résultat.' },
+    ]
+  },
+
+  // 1 — Nested functions
+  {
+    code: [
+      `function a() {`,
+      `  console.log("Début a");`,
+      `  b();`,
+      `  console.log("Fin a");`,
+      `}`,
+      `function b() {`,
+      `  console.log("Début b");`,
+      `  c();`,
+      `  console.log("Fin b");`,
+      `}`,
+      `function c() {`,
+      `  console.log("Début c");`,
+      `  console.log("Fin c");`,
+      `}`,
+      ``,
+      `a();`,
+    ],
+    steps: [
+      { hl: 15, action: 'push', name: 'a', args: '', explain: 'Appel de a(). Cadre poussé.' },
+      { hl: 1, action: 'push', name: 'console.log', args: '"Début a"', explain: 'a() appelle console.log("Début a").' },
+      { hl: 1, action: 'pop', output: 'Début a', explain: 'Affiche "Début a".' },
+      { hl: 2, action: 'push', name: 'b', args: '', explain: 'a() appelle b(). Nouveau cadre empilé.' },
+      { hl: 6, action: 'push', name: 'console.log', args: '"Début b"', explain: 'b() appelle console.log("Début b").' },
+      { hl: 6, action: 'pop', output: 'Début b', explain: 'Affiche "Début b".' },
+      { hl: 7, action: 'push', name: 'c', args: '', explain: 'b() appelle c(). Pile à 3 cadres : a → b → c.' },
+      { hl: 11, action: 'push', name: 'console.log', args: '"Début c"', explain: 'c() appelle console.log("Début c").' },
+      { hl: 11, action: 'pop', output: 'Début c', explain: 'Affiche "Début c".' },
+      { hl: 12, action: 'push', name: 'console.log', args: '"Fin c"', explain: 'c() appelle console.log("Fin c").' },
+      { hl: 12, action: 'pop', output: 'Fin c', explain: 'Affiche "Fin c".' },
+      { hl: 13, action: 'pop', ret: 'undefined', explain: 'c() se termine et est retiré de la pile. Retour dans b().' },
+      { hl: 8, action: 'push', name: 'console.log', args: '"Fin b"', explain: 'b() continue : console.log("Fin b").' },
+      { hl: 8, action: 'pop', output: 'Fin b', explain: 'Affiche "Fin b".' },
+      { hl: 9, action: 'pop', ret: 'undefined', explain: 'b() se termine. Retour dans a().' },
+      { hl: 3, action: 'push', name: 'console.log', args: '"Fin a"', explain: 'a() continue : console.log("Fin a").' },
+      { hl: 3, action: 'pop', output: 'Fin a', explain: 'Affiche "Fin a".' },
+      { hl: 4, action: 'pop', ret: 'undefined', explain: 'a() se termine. La pile est vide.' },
+      { hl: -1, action: 'done', explain: '✅ Les appels imbriqués forment une pile LIFO. On doit terminer c() avant de finir b(), et b() avant a().' },
+    ]
+  },
+
+  // 2 — Stack overflow
+  {
+    code: [
+      `function recurse(n) {`,
+      `  // Pas de condition d'arrêt !`,
+      `  console.log("Appel #" + n);`,
+      `  recurse(n + 1);`,
+      `}`,
+      ``,
+      `recurse(1);`,
+    ],
+    steps: (() => {
+      const steps = [];
+      const MAX = 22;
+      for (let i = 1; i <= MAX; i++) {
+        steps.push({
+          hl: 6, action: 'push', name: 'recurse', args: `n=${i}`,
+          explain: i <= 3
+            ? `Appel de recurse(${i}). Cadre #${i} empilé.`
+            : i < MAX
+              ? `recurse(${i}) empilé. La pile grandit dangereusement (profondeur : ${i}).`
+              : `recurse(${i}) empilé. La pile a atteint sa limite !`
+        });
+        if (i < MAX) {
+          steps.push({
+            hl: 2, action: 'output', output: `Appel #${i}`,
+            explain: `Affiche "Appel #${i}".`
+          });
+        }
+      }
+      steps.push({
+        hl: 3, action: 'error',
+        explain: '💥 RangeError: Maximum call stack size exceeded ! La récursion sans condition d\'arrêt a dépassé la taille maximale de la pile.'
+      });
+      steps.push({
+        hl: -1, action: 'done',
+        explain: '✅ Un stack overflow se produit quand la récursion n\'a pas de cas de base. En Node.js, la limite est ~15 000 cadres. Toujours prévoir une condition d\'arrêt !'
+      });
+      return steps;
+    })()
+  }
+];
+
+/* ── State ── */
+let scIdx = 0, stepIdx = 0, playing = false, timer = null;
+let stack = [], outputs = [], lastReturn = '—';
+
+function speed() { return +$('speedRange').value; }
+
+function load(idx) {
+  stop();
+  scIdx = idx; stepIdx = 0;
+  stack = []; outputs = []; lastReturn = '—';
+  funcColors['a'] = undefined; funcColors['b'] = undefined; funcColors['c'] = undefined;
+  Object.keys(funcColors).forEach(k => delete funcColors[k]);
+  colorIdx = 0;
+  renderCode(); renderStack(); renderOutput();
+  $('returnVal').textContent = '—';
+  $('explanationText').innerHTML = 'Appuyez sur <strong>Lecture</strong> ou <strong>Pas</strong>.';
+  $('btnPlay').disabled = false;
+  $('btnStep').disabled = false;
+}
+
+function renderCode() {
+  const s = scenarios[scIdx];
+  $('codeLines').innerHTML = s.code.map((l, i) =>
+    `<div class="code-line" id="cl${i}"><span class="ln">${i+1}</span>${esc(l)}</div>`
+  ).join('');
+}
+
+function hl(idx) {
+  document.querySelectorAll('.code-line').forEach(e => e.classList.remove('highlight'));
+  if (idx >= 0 && $(`cl${idx}`)) $(`cl${idx}`).classList.add('highlight');
+}
+
+function renderStack() {
+  const el = $('stackVisual');
+  $('stackDepth').textContent = `Profondeur : ${stack.length}`;
+  if (!stack.length) { el.innerHTML = '<div class="stack-empty-msg">— pile vide —</div>'; return; }
+  el.innerHTML = stack.map((f, i) => {
+    const cls = f.error ? 'frame error-frame' : `frame ${getColor(f.name)}`;
+    return `<div class="${cls}">
+      <span><span class="frame-name">${esc(f.name)}</span>${f.args ? ` <span class="frame-args">(${esc(f.args)})</span>` : ''}</span>
+      ${f.ret ? `<span class="frame-ret">→ ${esc(f.ret)}</span>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderOutput() {
+  $('outputContent').textContent = outputs.length ? outputs.join(', ') : '—';
+}
+
+function execStep() {
+  const s = scenarios[scIdx];
+  if (stepIdx >= s.steps.length) { stop(); $('btnPlay').disabled = true; $('btnStep').disabled = true; return; }
+  const st = s.steps[stepIdx];
+
+  if (st.hl !== undefined) hl(st.hl);
+
+  if (st.action === 'push') {
+    stack.push({ name: st.name, args: st.args || '' });
+    renderStack();
+  } else if (st.action === 'pop') {
+    if (stack.length) {
+      if (st.ret) { lastReturn = st.ret; $('returnVal').textContent = st.ret; }
+      stack.pop();
+      renderStack();
+    }
+  } else if (st.action === 'error') {
+    stack.push({ name: 'RangeError', args: 'Maximum call stack size exceeded', error: true });
+    renderStack();
+  } else if (st.action === 'output') {
+    // just output, no stack change
+  }
+
+  if (st.output) { outputs.push(st.output); renderOutput(); }
+  if (st.explain) $('explanationText').innerHTML = st.explain;
+
+  stepIdx++;
+}
+
+function play() { if (playing) return; playing = true; $('btnPlay').disabled = true; $('btnPause').disabled = false; tick(); }
+function tick() { if (!playing) return; execStep(); const s = scenarios[scIdx]; if (stepIdx < s.steps.length) timer = setTimeout(tick, speed()); else { stop(); $('btnPlay').disabled = true; $('btnStep').disabled = true; } }
+function stop() { playing = false; clearTimeout(timer); $('btnPlay').disabled = false; $('btnPause').disabled = true; }
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+$('scenarioSelect').addEventListener('change', e => load(+e.target.value));
+$('btnPlay').addEventListener('click', play);
+$('btnPause').addEventListener('click', stop);
+$('btnStep').addEventListener('click', () => { stop(); execStep(); });
+$('btnReset').addEventListener('click', () => load(scIdx));
+
+load(0);
+</script>
+</body>
+</html>

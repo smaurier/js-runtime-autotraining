@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ramasse-miettes tri-couleur — Visualisation interactive</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+    padding: 1rem;
+    line-height: 1.5;
+  }
+  h1 { text-align: center; font-size: 1.6rem; margin-bottom: .3rem; color: #8be9fd; }
+  .subtitle { text-align: center; font-size: .95rem; color: #888; margin-bottom: 1rem; }
+
+  .controls {
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .6rem;
+    margin-bottom: 1rem;
+  }
+  .controls select, .controls button {
+    font-size: .9rem; padding: .45rem 1rem; border: 1px solid #444; border-radius: 6px;
+    background: #16213e; color: #e0e0e0; cursor: pointer; transition: background .2s, border-color .2s;
+  }
+  .controls button:hover { background: #0f3460; border-color: #8be9fd; }
+  .controls button:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-play  { border-color: #50fa7b; color: #50fa7b; }
+  .btn-pause { border-color: #ffb86c; color: #ffb86c; }
+  .btn-step  { border-color: #8be9fd; color: #8be9fd; }
+  .btn-reset { border-color: #ff5555; color: #ff5555; }
+  .speed-label { font-size: .85rem; color: #888; }
+  .speed-label input { width: 80px; vertical-align: middle; }
+
+  /* Legend */
+  .legend {
+    display: flex; justify-content: center; gap: 1.5rem; margin-bottom: 1rem; flex-wrap: wrap;
+  }
+  .legend-item { display: flex; align-items: center; gap: .4rem; font-size: .85rem; }
+  .legend-dot {
+    width: 18px; height: 18px; border-radius: 50%; border: 2px solid;
+  }
+  .dot-white   { background: #ffffff30; border-color: #ffffff80; }
+  .dot-gray    { background: #888888; border-color: #aaaaaa; }
+  .dot-black   { background: #333333; border-color: #8be9fd; }
+  .dot-swept   { background: transparent; border-color: #ff555580; border-style: dashed; }
+
+  /* Canvas area */
+  .canvas-wrapper {
+    max-width: 900px; margin: 0 auto 1rem;
+    background: #16213e; border-radius: 10px; border: 1px solid #333;
+    position: relative; overflow: hidden;
+  }
+  canvas { display: block; width: 100%; height: 480px; }
+
+  /* Phase indicator */
+  .phase {
+    text-align: center; font-size: .95rem; color: #ff79c6; margin-bottom: .5rem; min-height: 1.4em;
+  }
+
+  /* Stats bar */
+  .stats {
+    display: flex; justify-content: center; gap: 2rem; margin-bottom: 1rem; flex-wrap: wrap;
+  }
+  .stat { font-size: .85rem; }
+  .stat span { font-weight: bold; }
+  .stat .w { color: #ffffff80; }
+  .stat .g { color: #888; }
+  .stat .b { color: #8be9fd; }
+  .stat .s { color: #ff5555; }
+
+  /* Explanation */
+  .explanation {
+    max-width: 900px; margin: 0 auto;
+    background: #16213e; border-radius: 10px; padding: 1rem 1.2rem; border: 1px solid #333;
+  }
+  .explanation h2 { font-size: 1rem; color: #ff79c6; margin-bottom: .4rem; }
+  .explanation p { font-size: .9rem; line-height: 1.6; color: #ccc; min-height: 2.8em; }
+</style>
+</head>
+<body>
+
+<h1>Ramasse-miettes tri-couleur (Tri-color Marking)</h1>
+<p class="subtitle">Algorithme de marquage Mark-and-Sweep utilisé par V8</p>
+
+<div class="controls">
+  <select id="scenarioSelect">
+    <option value="0">1 — Graphe simple (6 objets)</option>
+    <option value="1">2 — Cycle détaché (collection de cycles)</option>
+  </select>
+  <button class="btn-play"  id="btnPlay">&#9654; Lecture</button>
+  <button class="btn-pause" id="btnPause" disabled>&#10074;&#10074; Pause</button>
+  <button class="btn-step"  id="btnStep">&#9654;| Pas</button>
+  <button class="btn-reset" id="btnReset">&#8634; Reset</button>
+  <span class="speed-label">Vitesse : <input type="range" id="speedRange" min="300" max="2000" value="800" step="100"></span>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot dot-white"></div> Blanc (non visité)</div>
+  <div class="legend-item"><div class="legend-dot dot-gray"></div> Gris (découvert)</div>
+  <div class="legend-item"><div class="legend-dot dot-black"></div> Noir (traité)</div>
+  <div class="legend-item"><div class="legend-dot dot-swept"></div> Balayé (libéré)</div>
+</div>
+
+<div class="phase" id="phase"></div>
+
+<div class="stats">
+  <div class="stat">Blancs : <span class="w" id="statW">0</span></div>
+  <div class="stat">Gris : <span class="g" id="statG">0</span></div>
+  <div class="stat">Noirs : <span class="b" id="statB">0</span></div>
+  <div class="stat">Balayés : <span class="s" id="statS">0</span></div>
+</div>
+
+<div class="canvas-wrapper">
+  <canvas id="canvas"></canvas>
+</div>
+
+<div class="explanation">
+  <h2>Explication</h2>
+  <p id="explanationText">Sélectionnez un scénario et appuyez sur <strong>Lecture</strong> ou <strong>Pas</strong>.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $('canvas');
+const ctx = canvas.getContext('2d');
+
+/* ── Scenarios ── */
+const scenarioDefs = [
+  // 0 — Simple graph
+  {
+    name: 'Graphe simple',
+    objects: [
+      { id: 'Root', x: 0.12, y: 0.35, root: true },
+      { id: 'A',    x: 0.32, y: 0.18 },
+      { id: 'B',    x: 0.32, y: 0.55 },
+      { id: 'C',    x: 0.55, y: 0.18 },
+      { id: 'D',    x: 0.55, y: 0.55 },
+      { id: 'E',    x: 0.78, y: 0.35 },
+      { id: 'F',    x: 0.78, y: 0.7 },
+    ],
+    edges: [
+      ['Root','A'], ['Root','B'], ['A','C'], ['B','D'], ['C','E'],
+      // F is unreachable
+    ],
+    steps: [
+      { phase: 'Phase de marquage — Initialisation', action: 'init',
+        explain: 'Tous les objets commencent en BLANC (non visités). L\'objet Root est le point de départ.' },
+      { phase: 'Marquage — Root → Gris', action: 'markGray', target: 'Root',
+        explain: 'L\'objet Root est marqué GRIS : il a été découvert mais ses références n\'ont pas encore été traitées.' },
+      { phase: 'Traitement de Root', action: 'processGray', target: 'Root', discover: ['A','B'],
+        explain: 'On traite Root : ses voisins A et B sont marqués GRIS. Root devient NOIR (toutes ses références ont été explorées).' },
+      { phase: 'Traitement de A', action: 'processGray', target: 'A', discover: ['C'],
+        explain: 'On traite A : son voisin C est marqué GRIS. A devient NOIR.' },
+      { phase: 'Traitement de B', action: 'processGray', target: 'B', discover: ['D'],
+        explain: 'On traite B : son voisin D est marqué GRIS. B devient NOIR.' },
+      { phase: 'Traitement de C', action: 'processGray', target: 'C', discover: ['E'],
+        explain: 'On traite C : son voisin E est marqué GRIS. C devient NOIR.' },
+      { phase: 'Traitement de D', action: 'processGray', target: 'D', discover: [],
+        explain: 'On traite D : pas de voisins non visités. D devient NOIR.' },
+      { phase: 'Traitement de E', action: 'processGray', target: 'E', discover: [],
+        explain: 'On traite E : pas de voisins non visités. E devient NOIR.' },
+      { phase: 'Marquage terminé', action: 'info',
+        explain: 'Plus d\'objets GRIS. Le marquage est terminé. Tous les objets accessibles sont NOIRS. F est resté BLANC.' },
+      { phase: 'Phase de balayage (Sweep)', action: 'sweep',
+        explain: '🧹 Balayage : F est BLANC → il n\'est pas accessible depuis Root → sa mémoire est libérée !' },
+      { phase: 'GC terminé ✓', action: 'done',
+        explain: '✅ Le GC tri-couleur a identifié que F est inaccessible et l\'a collecté. Les objets Root, A, B, C, D, E sont conservés.' },
+    ]
+  },
+
+  // 1 — Detached cycle
+  {
+    name: 'Cycle détaché',
+    objects: [
+      { id: 'Root', x: 0.1,  y: 0.4, root: true },
+      { id: 'A',    x: 0.3,  y: 0.25 },
+      { id: 'B',    x: 0.3,  y: 0.6 },
+      // Detached cycle
+      { id: 'X',    x: 0.62, y: 0.2 },
+      { id: 'Y',    x: 0.82, y: 0.2 },
+      { id: 'Z',    x: 0.72, y: 0.45 },
+      // Another unreachable
+      { id: 'W',    x: 0.72, y: 0.75 },
+    ],
+    edges: [
+      ['Root','A'], ['Root','B'], ['A','B'],
+      // Cycle: X→Y→Z→X
+      ['X','Y'], ['Y','Z'], ['Z','X'],
+      // W references Z but nothing references W from root
+      ['W','Z'],
+    ],
+    steps: [
+      { phase: 'Initialisation', action: 'init',
+        explain: 'X, Y, Z forment un cycle (X→Y→Z→X) qui n\'est PAS accessible depuis Root. W pointe vers Z mais n\'est pas non plus accessible.' },
+      { phase: 'Root → Gris', action: 'markGray', target: 'Root',
+        explain: 'Root est marqué GRIS.' },
+      { phase: 'Traitement de Root', action: 'processGray', target: 'Root', discover: ['A','B'],
+        explain: 'Root est traité : A et B sont marqués GRIS. Root → NOIR.' },
+      { phase: 'Traitement de A', action: 'processGray', target: 'A', discover: [],
+        explain: 'A est traité. B est déjà GRIS. A → NOIR.' },
+      { phase: 'Traitement de B', action: 'processGray', target: 'B', discover: [],
+        explain: 'B est traité. Pas de nouveaux voisins. B → NOIR.' },
+      { phase: 'Marquage terminé', action: 'info',
+        explain: 'Plus de GRIS. X, Y, Z et W restent BLANCS malgré le cycle X→Y→Z→X. Le comptage de références échouerait ici, mais le tri-couleur réussit !' },
+      { phase: 'Balayage (Sweep)', action: 'sweep',
+        explain: '🧹 Balayage : X, Y, Z, W sont BLANCS → tous collectés ! Le cycle détaché est correctement identifié comme garbage.' },
+      { phase: 'GC terminé ✓', action: 'done',
+        explain: '✅ Le cycle X→Y→Z→X a été collecté malgré les références circulaires. C\'est l\'avantage du mark-and-sweep par rapport au comptage de références.' },
+    ]
+  }
+];
+
+/* ── State ── */
+let scIdx = 0, stepIdx = 0, playing = false, timer = null;
+let objects = [], edges = [], colors = {}; // color: 'white'|'gray'|'black'|'swept'
+
+function speed() { return +$('speedRange').value; }
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  canvas.width  = r.width * devicePixelRatio;
+  canvas.height = r.height * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  draw();
+}
+
+function load(idx) {
+  stop();
+  scIdx = idx; stepIdx = 0;
+  const s = scenarioDefs[scIdx];
+  objects = s.objects.map(o => ({ ...o }));
+  edges = s.edges.map(e => [...e]);
+  colors = {};
+  objects.forEach(o => colors[o.id] = 'white');
+  $('phase').textContent = '';
+  $('explanationText').innerHTML = 'Appuyez sur <strong>Lecture</strong> ou <strong>Pas</strong>.';
+  $('btnPlay').disabled = false;
+  $('btnStep').disabled = false;
+  updateStats();
+  draw();
+}
+
+function updateStats() {
+  let w=0,g=0,b=0,s=0;
+  Object.values(colors).forEach(c => { if(c==='white')w++; if(c==='gray')g++; if(c==='black')b++; if(c==='swept')s++; });
+  $('statW').textContent=w; $('statG').textContent=g; $('statB').textContent=b; $('statS').textContent=s;
+}
+
+/* ── Drawing ── */
+function draw() {
+  const W = canvas.width / devicePixelRatio;
+  const H = canvas.height / devicePixelRatio;
+  ctx.clearRect(0,0,W,H);
+
+  const R = 28;
+
+  // Draw edges
+  edges.forEach(([from, to]) => {
+    const a = objects.find(o => o.id === from);
+    const b = objects.find(o => o.id === to);
+    if (!a || !b) return;
+    const ax = a.x*W, ay = a.y*H, bx = b.x*W, by = b.y*H;
+
+    // If swept, draw dashed
+    const fromSwept = colors[from] === 'swept';
+    const toSwept   = colors[to] === 'swept';
+
+    ctx.save();
+    ctx.beginPath();
+    if (fromSwept || toSwept) {
+      ctx.setLineDash([4,4]);
+      ctx.strokeStyle = '#ff555540';
+    } else {
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#555';
+    }
+    ctx.lineWidth = 2;
+
+    // Arrow from edge of circle to edge of circle
+    const dx = bx - ax, dy = by - ay;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist < 1) { ctx.restore(); return; }
+    const ux = dx/dist, uy = dy/dist;
+    const sx = ax + ux*(R+2), sy = ay + uy*(R+2);
+    const ex = bx - ux*(R+6), ey = by - uy*(R+6);
+
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+
+    // Arrowhead
+    const aLen = 10, aAngle = Math.PI/6;
+    const angle = Math.atan2(ey-sy, ex-sx);
+    ctx.beginPath();
+    ctx.setLineDash([]);
+    ctx.fillStyle = fromSwept||toSwept ? '#ff555540' : '#555';
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - aLen*Math.cos(angle-aAngle), ey - aLen*Math.sin(angle-aAngle));
+    ctx.lineTo(ex - aLen*Math.cos(angle+aAngle), ey - aLen*Math.sin(angle+aAngle));
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  });
+
+  // Draw objects
+  objects.forEach(o => {
+    const cx = o.x*W, cy = o.y*H;
+    const c = colors[o.id];
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI*2);
+
+    // Fill
+    if (c === 'white')  { ctx.fillStyle = '#ffffff18'; }
+    else if (c === 'gray')  { ctx.fillStyle = '#888888'; }
+    else if (c === 'black') { ctx.fillStyle = '#333333'; }
+    else if (c === 'swept') { ctx.fillStyle = 'transparent'; }
+    ctx.fill();
+
+    // Border
+    ctx.lineWidth = 3;
+    if (c === 'white')       ctx.strokeStyle = '#ffffff60';
+    else if (c === 'gray')   ctx.strokeStyle = '#cccccc';
+    else if (c === 'black')  ctx.strokeStyle = '#8be9fd';
+    else if (c === 'swept')  { ctx.strokeStyle = '#ff555580'; ctx.setLineDash([4,4]); }
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Label
+    ctx.fillStyle = c === 'swept' ? '#ff555580' : (c === 'black' ? '#8be9fd' : '#f8f8f2');
+    ctx.font = 'bold 14px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (c === 'swept') {
+      ctx.fillText(o.id, cx, cy - 2);
+      // Strikethrough
+      const tw = ctx.measureText(o.id).width;
+      ctx.beginPath(); ctx.moveTo(cx-tw/2-2, cy-1); ctx.lineTo(cx+tw/2+2, cy-1);
+      ctx.strokeStyle = '#ff5555'; ctx.lineWidth = 2; ctx.stroke();
+    } else {
+      ctx.fillText(o.id, cx, cy);
+    }
+
+    // Root label
+    if (o.root) {
+      ctx.font = '11px sans-serif';
+      ctx.fillStyle = '#ff79c6';
+      ctx.fillText('racine', cx, cy + R + 14);
+    }
+  });
+}
+
+/* ── Step execution ── */
+function execStep() {
+  const s = scenarioDefs[scIdx];
+  if (stepIdx >= s.steps.length) { stop(); $('btnPlay').disabled=true; $('btnStep').disabled=true; return; }
+  const st = s.steps[stepIdx];
+
+  if (st.phase) $('phase').textContent = st.phase;
+  if (st.explain) $('explanationText').innerHTML = st.explain;
+
+  if (st.action === 'markGray') {
+    colors[st.target] = 'gray';
+  } else if (st.action === 'processGray') {
+    colors[st.target] = 'black';
+    (st.discover || []).forEach(id => { if (colors[id] === 'white') colors[id] = 'gray'; });
+  } else if (st.action === 'sweep') {
+    Object.keys(colors).forEach(id => { if (colors[id] === 'white') colors[id] = 'swept'; });
+  }
+
+  updateStats();
+  draw();
+  stepIdx++;
+}
+
+function play() { if(playing)return; playing=true; $('btnPlay').disabled=true; $('btnPause').disabled=false; tick(); }
+function tick() { if(!playing)return; execStep(); if(stepIdx<scenarioDefs[scIdx].steps.length) timer=setTimeout(tick,speed()); else{stop();$('btnPlay').disabled=true;$('btnStep').disabled=true;} }
+function stop() { playing=false; clearTimeout(timer); $('btnPlay').disabled=false; $('btnPause').disabled=true; }
+
+$('scenarioSelect').addEventListener('change', e => load(+e.target.value));
+$('btnPlay').addEventListener('click', play);
+$('btnPause').addEventListener('click', stop);
+$('btnStep').addEventListener('click', () => { stop(); execStep(); });
+$('btnReset').addEventListener('click', () => load(scIdx));
+window.addEventListener('resize', resize);
+
+load(0);
+resize();
+</script>
+</body>
+</html>

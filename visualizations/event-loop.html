@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Event Loop — Visualisation interactive</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+    padding: 1rem;
+    line-height: 1.5;
+  }
+  h1 { text-align: center; font-size: 1.6rem; margin-bottom: .5rem; color: #8be9fd; }
+  .subtitle { text-align: center; font-size: .95rem; color: #888; margin-bottom: 1rem; }
+
+  /* ── Controls ── */
+  .controls {
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: .6rem;
+    margin-bottom: 1rem;
+  }
+  .controls select, .controls button {
+    font-size: .9rem; padding: .45rem 1rem; border: 1px solid #444; border-radius: 6px;
+    background: #16213e; color: #e0e0e0; cursor: pointer; transition: background .2s, border-color .2s;
+  }
+  .controls button:hover { background: #0f3460; border-color: #8be9fd; }
+  .controls button:disabled { opacity: .4; cursor: not-allowed; }
+  .controls select { min-width: 220px; }
+  .btn-play  { border-color: #50fa7b; color: #50fa7b; }
+  .btn-pause { border-color: #ffb86c; color: #ffb86c; }
+  .btn-step  { border-color: #8be9fd; color: #8be9fd; }
+  .btn-reset { border-color: #ff5555; color: #ff5555; }
+  .speed-label { font-size: .85rem; color: #888; }
+  .speed-label input { width: 80px; vertical-align: middle; }
+
+  /* ── Main grid ── */
+  .main {
+    display: grid;
+    grid-template-columns: 280px 1fr 260px;
+    gap: 1rem;
+    max-width: 1200px;
+    margin: 0 auto 1rem;
+    min-height: 480px;
+  }
+  @media (max-width: 900px) {
+    .main { grid-template-columns: 1fr; min-height: auto; }
+  }
+
+  /* ── Code panel ── */
+  .code-panel {
+    background: #16213e; border-radius: 10px; padding: 1rem; border: 1px solid #333;
+    overflow-y: auto; max-height: 520px;
+  }
+  .code-panel h2 { font-size: 1rem; color: #bd93f9; margin-bottom: .6rem; }
+  .code-line {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: .82rem; padding: 2px 6px; border-radius: 3px; white-space: pre;
+    transition: background .3s, color .3s;
+  }
+  .code-line.highlight { background: #44475a; color: #f8f8f2; }
+  .code-line .line-num { color: #6272a4; display: inline-block; width: 22px; text-align: right; margin-right: 8px; user-select: none; }
+
+  /* ── Center: stack + output ── */
+  .center-col { display: flex; flex-direction: column; gap: 1rem; }
+
+  .call-stack-container {
+    background: #16213e; border-radius: 10px; padding: 1rem; border: 1px solid #333;
+    flex: 1; display: flex; flex-direction: column;
+  }
+  .call-stack-container h2 { font-size: 1rem; color: #ffb86c; margin-bottom: .5rem; text-align: center; }
+  .call-stack {
+    flex: 1; display: flex; flex-direction: column-reverse; gap: 4px;
+    min-height: 120px; position: relative;
+  }
+  .stack-frame {
+    background: #4444ff; color: #fff; padding: 6px 10px; border-radius: 6px;
+    font-family: monospace; font-size: .85rem; text-align: center;
+    animation: framePush .35s ease-out;
+  }
+  .stack-frame.popping { animation: framePop .35s ease-in forwards; }
+  @keyframes framePush { from { opacity: 0; transform: translateY(20px) scaleY(.7); } to { opacity: 1; transform: translateY(0) scaleY(1); } }
+  @keyframes framePop  { from { opacity: 1; transform: translateY(0) scaleY(1); } to { opacity: 0; transform: translateY(20px) scaleY(.5); } }
+
+  .stack-empty {
+    color: #555; font-style: italic; text-align: center; padding: 2rem 0;
+  }
+
+  .output-panel {
+    background: #16213e; border-radius: 10px; padding: 1rem; border: 1px solid #333;
+  }
+  .output-panel h2 { font-size: 1rem; color: #50fa7b; margin-bottom: .4rem; }
+  .output-content {
+    font-family: monospace; font-size: .9rem; min-height: 28px; color: #f1fa8c;
+  }
+
+  /* ── Queues panel ── */
+  .queues-panel {
+    display: flex; flex-direction: column; gap: .7rem;
+  }
+  .queue-box {
+    background: #16213e; border-radius: 10px; padding: .7rem; border: 1px solid #333;
+    flex: 1;
+  }
+  .queue-box h3 { font-size: .85rem; margin-bottom: .4rem; }
+  .queue-box.nexttick  h3 { color: #ff4444; }
+  .queue-box.microtask h3 { color: #44ff44; }
+  .queue-box.macrotask h3 { color: #ff8844; }
+  .queue-box.sync      h3 { color: #4444ff; }
+  .queue-items { display: flex; flex-wrap: wrap; gap: 4px; min-height: 26px; }
+  .queue-item {
+    padding: 3px 8px; border-radius: 4px; font-family: monospace; font-size: .78rem;
+    animation: queueIn .3s ease-out; color: #fff;
+  }
+  .queue-item.removing { animation: queueOut .3s ease-in forwards; }
+  @keyframes queueIn  { from { opacity: 0; transform: scale(.7); } to { opacity: 1; transform: scale(1); } }
+  @keyframes queueOut { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(.7); } }
+
+  .queue-box.nexttick  .queue-item { background: #ff444488; border: 1px solid #ff4444; }
+  .queue-box.microtask .queue-item { background: #44ff4444; border: 1px solid #44ff44; }
+  .queue-box.macrotask .queue-item { background: #ff884444; border: 1px solid #ff8844; }
+  .queue-box.sync      .queue-item { background: #4444ff55; border: 1px solid #4444ff; }
+
+  /* ── Phase indicator ── */
+  .phase-indicator {
+    text-align: center; margin-bottom: .5rem; font-size: .9rem; color: #ff79c6;
+    min-height: 1.4em;
+  }
+
+  /* ── Explanation panel ── */
+  .explanation {
+    max-width: 1200px; margin: 0 auto;
+    background: #16213e; border-radius: 10px; padding: 1rem 1.2rem; border: 1px solid #333;
+  }
+  .explanation h2 { font-size: 1rem; color: #ff79c6; margin-bottom: .4rem; }
+  .explanation p { font-size: .9rem; line-height: 1.6; color: #ccc; min-height: 2.4em; }
+</style>
+</head>
+<body>
+
+<h1>Boucle d'événements (Event Loop)</h1>
+<p class="subtitle">Visualisation du modèle d'exécution asynchrone de Node.js / JavaScript</p>
+
+<div class="controls">
+  <label>
+    <select id="scenarioSelect">
+      <option value="0">1 — Bases (sync + setTimeout + Promise)</option>
+      <option value="1">2 — nextTick vs microtasks</option>
+      <option value="2">3 — Mélange complexe</option>
+    </select>
+  </label>
+  <button class="btn-play"  id="btnPlay"  title="Lecture automatique">&#9654; Lecture</button>
+  <button class="btn-pause" id="btnPause" title="Pause" disabled>&#10074;&#10074; Pause</button>
+  <button class="btn-step"  id="btnStep"  title="Avancer d'un pas">&#9654;| Pas</button>
+  <button class="btn-reset" id="btnReset" title="Réinitialiser">&#8634; Reset</button>
+  <span class="speed-label">Vitesse : <input type="range" id="speedRange" min="200" max="2000" value="900" step="100"></span>
+</div>
+
+<div class="phase-indicator" id="phaseIndicator"></div>
+
+<div class="main">
+  <!-- Code panel -->
+  <div class="code-panel">
+    <h2>Code source</h2>
+    <div id="codeLines"></div>
+  </div>
+
+  <!-- Center: call stack + output -->
+  <div class="center-col">
+    <div class="call-stack-container">
+      <h2>Pile d'appels (Call Stack)</h2>
+      <div class="call-stack" id="callStack">
+        <div class="stack-empty">— vide —</div>
+      </div>
+    </div>
+    <div class="output-panel">
+      <h2>Sortie (console.log)</h2>
+      <div class="output-content" id="outputContent"></div>
+    </div>
+  </div>
+
+  <!-- Queues panel -->
+  <div class="queues-panel">
+    <div class="queue-box nexttick">
+      <h3>process.nextTick Queue</h3>
+      <div class="queue-items" id="queueNextTick"></div>
+    </div>
+    <div class="queue-box microtask">
+      <h3>Microtask Queue (Promise)</h3>
+      <div class="queue-items" id="queueMicrotask"></div>
+    </div>
+    <div class="queue-box macrotask">
+      <h3>Macrotask Queue (setTimeout…)</h3>
+      <div class="queue-items" id="queueMacrotask"></div>
+    </div>
+    <div class="queue-box sync">
+      <h3>Code synchrone</h3>
+      <div class="queue-items" id="queueSync"></div>
+    </div>
+  </div>
+</div>
+
+<div class="explanation">
+  <h2>Explication</h2>
+  <p id="explanationText">Sélectionnez un scénario et appuyez sur <strong>Lecture</strong> ou <strong>Pas</strong> pour commencer.</p>
+</div>
+
+<script>
+/* ============================================================
+   DATA: Scenarios
+   ============================================================ */
+const scenarios = [
+  // ── Scenario 0: Bases ──
+  {
+    name: 'Bases',
+    code: [
+      `console.log("A");`,
+      `setTimeout(() => {`,
+      `  console.log("B");`,
+      `}, 0);`,
+      `Promise.resolve().then(() => {`,
+      `  console.log("C");`,
+      `});`,
+      `console.log("D");`,
+    ],
+    steps: [
+      { hl: 0, push: 'console.log("A")', stackColor: '#4444ff',
+        explanation: 'Exécution synchrone : console.log("A") est poussé sur la pile.' },
+      { hl: 0, pop: true, output: 'A',
+        explanation: 'console.log("A") s\'exécute et affiche "A", puis est retiré de la pile.' },
+      { hl: 1, push: 'setTimeout(cb, 0)', stackColor: '#ff8844',
+        explanation: 'setTimeout est appelé. Le callback est enregistré dans la Macrotask Queue après 0 ms.' },
+      { hl: 1, pop: true, addQueue: { queue: 'macrotask', label: 'cb → "B"' },
+        explanation: 'setTimeout est retiré de la pile. Son callback est placé dans la Macrotask Queue.' },
+      { hl: 4, push: 'Promise.resolve().then(cb)', stackColor: '#44ff44',
+        explanation: 'Promise.resolve().then() est appelé. Le callback .then est enregistré dans la Microtask Queue.' },
+      { hl: 4, pop: true, addQueue: { queue: 'microtask', label: 'cb → "C"' },
+        explanation: 'Promise.then est retiré de la pile. Son callback est placé dans la Microtask Queue.' },
+      { hl: 7, push: 'console.log("D")', stackColor: '#4444ff',
+        explanation: 'Exécution synchrone : console.log("D") est poussé sur la pile.' },
+      { hl: 7, pop: true, output: 'D',
+        explanation: 'console.log("D") s\'exécute et affiche "D". Fin du code synchrone.' },
+      { hl: -1, phase: 'Drain des microtasks',
+        explanation: '⏳ La pile est vide. Avant de passer aux macrotasks, l\'event loop draine TOUTES les microtasks.' },
+      { hl: 5, removeQueue: 'microtask', push: 'cb → console.log("C")', stackColor: '#44ff44',
+        explanation: 'Le callback de Promise.then est retiré de la Microtask Queue et poussé sur la pile.' },
+      { hl: 5, pop: true, output: 'C',
+        explanation: 'console.log("C") s\'exécute et affiche "C". La Microtask Queue est maintenant vide.' },
+      { hl: -1, phase: 'Passage aux macrotasks',
+        explanation: '⏳ Microtask Queue vide → l\'event loop passe à la Macrotask Queue.' },
+      { hl: 2, removeQueue: 'macrotask', push: 'cb → console.log("B")', stackColor: '#ff8844',
+        explanation: 'Le callback de setTimeout est retiré de la Macrotask Queue et poussé sur la pile.' },
+      { hl: 2, pop: true, output: 'B',
+        explanation: 'console.log("B") s\'exécute et affiche "B". Résultat final : A, D, C, B.' },
+      { hl: -1, phase: 'Terminé ✓',
+        explanation: '✅ Ordre d\'exécution : A → D → C → B. Le synchrone d\'abord, puis microtasks, puis macrotasks.' },
+    ],
+  },
+
+  // ── Scenario 1: nextTick vs microtasks ──
+  {
+    name: 'nextTick vs microtasks',
+    code: [
+      `Promise.resolve().then(() => {`,
+      `  console.log("A");  // Promise`,
+      `});`,
+      `queueMicrotask(() => {`,
+      `  console.log("B");  // Microtask`,
+      `});`,
+      `process.nextTick(() => {`,
+      `  console.log("C");  // nextTick`,
+      `});`,
+      `console.log("D");    // Sync`,
+    ],
+    steps: [
+      { hl: 0, push: 'Promise.resolve().then(cb)', stackColor: '#44ff44',
+        explanation: 'Promise.resolve().then() enregistre un callback dans la Microtask Queue.' },
+      { hl: 0, pop: true, addQueue: { queue: 'microtask', label: 'cb → "A"' },
+        explanation: 'Callback placé dans la Microtask Queue.' },
+      { hl: 3, push: 'queueMicrotask(cb)', stackColor: '#44ff44',
+        explanation: 'queueMicrotask() enregistre aussi un callback dans la Microtask Queue.' },
+      { hl: 3, pop: true, addQueue: { queue: 'microtask', label: 'cb → "B"' },
+        explanation: 'Callback placé dans la Microtask Queue (après le précédent).' },
+      { hl: 6, push: 'process.nextTick(cb)', stackColor: '#ff4444',
+        explanation: 'process.nextTick() enregistre un callback dans la nextTick Queue.' },
+      { hl: 6, pop: true, addQueue: { queue: 'nexttick', label: 'cb → "C"' },
+        explanation: 'Callback placé dans la nextTick Queue. Cette queue est drainée AVANT les microtasks !' },
+      { hl: 9, push: 'console.log("D")', stackColor: '#4444ff',
+        explanation: 'Exécution synchrone : console.log("D") est poussé sur la pile.' },
+      { hl: 9, pop: true, output: 'D',
+        explanation: 'console.log("D") affiche "D". Fin du code synchrone.' },
+      { hl: -1, phase: 'Drain de la nextTick Queue',
+        explanation: '⏳ La nextTick Queue est drainée EN PREMIER, avant les microtasks Promise.' },
+      { hl: 7, removeQueue: 'nexttick', push: 'cb → console.log("C")', stackColor: '#ff4444',
+        explanation: 'Le callback nextTick est exécuté en premier.' },
+      { hl: 7, pop: true, output: 'C',
+        explanation: 'console.log("C") affiche "C". nextTick Queue vide.' },
+      { hl: -1, phase: 'Drain des microtasks',
+        explanation: '⏳ Maintenant les microtasks (Promise + queueMicrotask) sont drainées dans l\'ordre FIFO.' },
+      { hl: 1, removeQueue: 'microtask', push: 'cb → console.log("A")', stackColor: '#44ff44',
+        explanation: 'Premier callback microtask (Promise.then) exécuté.' },
+      { hl: 1, pop: true, output: 'A',
+        explanation: 'console.log("A") affiche "A".' },
+      { hl: 4, removeQueue: 'microtask', push: 'cb → console.log("B")', stackColor: '#44ff44',
+        explanation: 'Deuxième callback microtask (queueMicrotask) exécuté.' },
+      { hl: 4, pop: true, output: 'B',
+        explanation: 'console.log("B") affiche "B".' },
+      { hl: -1, phase: 'Terminé ✓',
+        explanation: '✅ Ordre : D → C → A → B. nextTick a priorité sur les microtasks Promise.' },
+    ],
+  },
+
+  // ── Scenario 2: Mélange complexe ──
+  {
+    name: 'Mélange complexe',
+    code: [
+      `console.log("1 — sync");`,
+      `setTimeout(() => {`,
+      `  console.log("2 — timeout 1");`,
+      `  Promise.resolve().then(() =>`,
+      `    console.log("3 — promise inside timeout")`,
+      `  );`,
+      `}, 0);`,
+      `Promise.resolve().then(() => {`,
+      `  console.log("4 — promise 1");`,
+      `  process.nextTick(() =>`,
+      `    console.log("5 — nextTick inside promise")`,
+      `  );`,
+      `});`,
+      `process.nextTick(() => {`,
+      `  console.log("6 — nextTick 1");`,
+      `});`,
+      `queueMicrotask(() => {`,
+      `  console.log("7 — queueMicrotask");`,
+      `});`,
+      `console.log("8 — sync");`,
+    ],
+    steps: [
+      { hl: 0, push: 'console.log("1")', stackColor: '#4444ff',
+        explanation: 'Exécution synchrone de console.log("1 — sync").' },
+      { hl: 0, pop: true, output: '1 — sync',
+        explanation: 'Affiche "1 — sync".' },
+      { hl: 1, push: 'setTimeout(cb, 0)', stackColor: '#ff8844',
+        explanation: 'setTimeout enregistre son callback dans la Macrotask Queue.' },
+      { hl: 1, pop: true, addQueue: { queue: 'macrotask', label: 'timeout1' },
+        explanation: 'Callback placé dans la Macrotask Queue.' },
+      { hl: 7, push: 'Promise.resolve().then(cb)', stackColor: '#44ff44',
+        explanation: 'Promise.then enregistre son callback dans la Microtask Queue.' },
+      { hl: 7, pop: true, addQueue: { queue: 'microtask', label: 'promise1' },
+        explanation: 'Callback placé dans la Microtask Queue.' },
+      { hl: 13, push: 'process.nextTick(cb)', stackColor: '#ff4444',
+        explanation: 'process.nextTick enregistre son callback dans la nextTick Queue.' },
+      { hl: 13, pop: true, addQueue: { queue: 'nexttick', label: 'nextTick1' },
+        explanation: 'Callback placé dans la nextTick Queue.' },
+      { hl: 16, push: 'queueMicrotask(cb)', stackColor: '#44ff44',
+        explanation: 'queueMicrotask enregistre son callback dans la Microtask Queue.' },
+      { hl: 16, pop: true, addQueue: { queue: 'microtask', label: 'qMicro' },
+        explanation: 'Callback placé dans la Microtask Queue (après promise1).' },
+      { hl: 19, push: 'console.log("8")', stackColor: '#4444ff',
+        explanation: 'Exécution synchrone de console.log("8 — sync").' },
+      { hl: 19, pop: true, output: '8 — sync',
+        explanation: 'Affiche "8 — sync". Fin du code synchrone.' },
+      // ── Drain nextTick ──
+      { hl: -1, phase: 'Drain nextTick Queue',
+        explanation: '⏳ Pile vide → on draine la nextTick Queue en premier.' },
+      { hl: 14, removeQueue: 'nexttick', push: 'cb → console.log("6")', stackColor: '#ff4444',
+        explanation: 'Exécution du callback nextTick.' },
+      { hl: 14, pop: true, output: '6 — nextTick 1',
+        explanation: 'Affiche "6 — nextTick 1".' },
+      // ── Drain microtasks ──
+      { hl: -1, phase: 'Drain Microtask Queue',
+        explanation: '⏳ nextTick vide → on draine les microtasks.' },
+      { hl: 8, removeQueue: 'microtask', push: 'promise1 → console.log("4")', stackColor: '#44ff44',
+        explanation: 'Exécution du callback Promise.then (promise1).' },
+      { hl: 8, pop: true, output: '4 — promise 1',
+        explanation: 'Affiche "4 — promise 1". Ce callback appelle aussi process.nextTick !' },
+      { hl: 9, push: 'process.nextTick(cb inside promise)', stackColor: '#ff4444',
+        explanation: 'À l\'intérieur du callback, process.nextTick enregistre un nouveau callback.' },
+      { hl: 9, pop: true, addQueue: { queue: 'nexttick', label: 'nT→"5"' },
+        explanation: 'Nouveau callback ajouté à la nextTick Queue.' },
+      // ── Re-drain nextTick (interleaved) ──
+      { hl: -1, phase: 'Re-drain nextTick (imbriqué)',
+        explanation: '⏳ Avant de continuer les microtasks, on re-draine la nextTick Queue !' },
+      { hl: 10, removeQueue: 'nexttick', push: 'cb → console.log("5")', stackColor: '#ff4444',
+        explanation: 'Exécution du nextTick imbriqué.' },
+      { hl: 10, pop: true, output: '5 — nextTick inside promise',
+        explanation: 'Affiche "5 — nextTick inside promise".' },
+      // ── Continue microtasks ──
+      { hl: -1, phase: 'Suite des microtasks',
+        explanation: '⏳ nextTick re-drainé → on continue avec les microtasks restantes.' },
+      { hl: 17, removeQueue: 'microtask', push: 'qMicro → console.log("7")', stackColor: '#44ff44',
+        explanation: 'Exécution du callback queueMicrotask.' },
+      { hl: 17, pop: true, output: '7 — queueMicrotask',
+        explanation: 'Affiche "7 — queueMicrotask". Microtask Queue vide.' },
+      // ── Macrotask ──
+      { hl: -1, phase: 'Macrotask Queue',
+        explanation: '⏳ Toutes les microtasks/nextTick vides → passage aux macrotasks.' },
+      { hl: 2, removeQueue: 'macrotask', push: 'timeout1 → console.log("2")', stackColor: '#ff8844',
+        explanation: 'Exécution du callback setTimeout.' },
+      { hl: 2, pop: true, output: '2 — timeout 1',
+        explanation: 'Affiche "2 — timeout 1". Ce callback crée aussi une Promise.then !' },
+      { hl: 3, push: 'Promise.resolve().then(cb)', stackColor: '#44ff44',
+        explanation: 'Promise.then à l\'intérieur du setTimeout enregistre un callback.' },
+      { hl: 3, pop: true, addQueue: { queue: 'microtask', label: 'p→"3"' },
+        explanation: 'Callback placé dans la Microtask Queue.' },
+      // ── Drain microtasks after macrotask ──
+      { hl: -1, phase: 'Drain microtasks (post-macrotask)',
+        explanation: '⏳ Après chaque macrotask, on re-draine les microtasks.' },
+      { hl: 4, removeQueue: 'microtask', push: 'cb → console.log("3")', stackColor: '#44ff44',
+        explanation: 'Exécution du callback Promise.then imbriqué dans setTimeout.' },
+      { hl: 4, pop: true, output: '3 — promise inside timeout',
+        explanation: 'Affiche "3 — promise inside timeout".' },
+      { hl: -1, phase: 'Terminé ✓',
+        explanation: '✅ Ordre final : 1, 8, 6, 4, 5, 7, 2, 3. La hiérarchie : sync → nextTick → microtasks → macrotasks, avec re-drain à chaque étape.' },
+    ],
+  },
+];
+
+/* ============================================================
+   ENGINE
+   ============================================================ */
+const $ = id => document.getElementById(id);
+let currentScenario = 0;
+let stepIndex = 0;
+let playing = false;
+let timerId = null;
+let outputLines = [];
+let stackFrames = []; // { label, color }
+let queues = { nexttick: [], microtask: [], macrotask: [], sync: [] };
+
+function getSpeed() { return parseInt($('speedRange').value, 10); }
+
+function loadScenario(idx) {
+  stopPlaying();
+  currentScenario = idx;
+  stepIndex = 0;
+  outputLines = [];
+  stackFrames = [];
+  queues = { nexttick: [], microtask: [], macrotask: [], sync: [] };
+  renderCode();
+  renderStack();
+  renderQueues();
+  renderOutput();
+  $('phaseIndicator').textContent = '';
+  $('explanationText').innerHTML = 'Appuyez sur <strong>Lecture</strong> ou <strong>Pas</strong> pour commencer.';
+  $('btnPlay').disabled = false;
+  $('btnStep').disabled = false;
+}
+
+function renderCode() {
+  const s = scenarios[currentScenario];
+  $('codeLines').innerHTML = s.code.map((line, i) =>
+    `<div class="code-line" id="codeLine${i}"><span class="line-num">${i + 1}</span>${escapeHtml(line)}</div>`
+  ).join('');
+}
+
+function highlightLine(idx) {
+  document.querySelectorAll('.code-line').forEach(el => el.classList.remove('highlight'));
+  if (idx >= 0) {
+    const el = $(`codeLine${idx}`);
+    if (el) el.classList.add('highlight');
+  }
+}
+
+function renderStack() {
+  const el = $('callStack');
+  if (stackFrames.length === 0) {
+    el.innerHTML = '<div class="stack-empty">— vide —</div>';
+  } else {
+    el.innerHTML = stackFrames.map((f, i) =>
+      `<div class="stack-frame" style="background:${f.color}">${escapeHtml(f.label)}</div>`
+    ).join('');
+  }
+}
+
+function renderQueues() {
+  ['nexttick', 'microtask', 'macrotask', 'sync'].forEach(q => {
+    const el = $('queue' + q.charAt(0).toUpperCase() + q.slice(1).replace('tick', 'Tick').replace('task', 'task'));
+    // Simpler ID mapping
+  });
+  $('queueNextTick').innerHTML = queues.nexttick.map(l => `<div class="queue-item">${escapeHtml(l)}</div>`).join('');
+  $('queueMicrotask').innerHTML = queues.microtask.map(l => `<div class="queue-item">${escapeHtml(l)}</div>`).join('');
+  $('queueMacrotask').innerHTML = queues.macrotask.map(l => `<div class="queue-item">${escapeHtml(l)}</div>`).join('');
+  $('queueSync').innerHTML = queues.sync.map(l => `<div class="queue-item">${escapeHtml(l)}</div>`).join('');
+}
+
+function renderOutput() {
+  $('outputContent').textContent = outputLines.length ? outputLines.join(', ') : '—';
+}
+
+function executeStep() {
+  const s = scenarios[currentScenario];
+  if (stepIndex >= s.steps.length) {
+    stopPlaying();
+    $('btnPlay').disabled = true;
+    $('btnStep').disabled = true;
+    return;
+  }
+
+  const step = s.steps[stepIndex];
+
+  // Highlight code line
+  if (step.hl !== undefined) highlightLine(step.hl);
+
+  // Phase indicator
+  if (step.phase) $('phaseIndicator').textContent = step.phase;
+
+  // Push to stack
+  if (step.push) {
+    stackFrames.push({ label: step.push, color: step.stackColor || '#4444ff' });
+    renderStack();
+  }
+
+  // Pop from stack
+  if (step.pop) {
+    stackFrames.pop();
+    renderStack();
+  }
+
+  // Add to queue
+  if (step.addQueue) {
+    queues[step.addQueue.queue].push(step.addQueue.label);
+    renderQueues();
+  }
+
+  // Remove from queue (first item)
+  if (step.removeQueue) {
+    queues[step.removeQueue].shift();
+    renderQueues();
+  }
+
+  // Output
+  if (step.output) {
+    outputLines.push(step.output);
+    renderOutput();
+  }
+
+  // Explanation
+  if (step.explanation) {
+    $('explanationText').innerHTML = step.explanation;
+  }
+
+  stepIndex++;
+
+  if (stepIndex >= s.steps.length) {
+    // Will stop on next call
+  }
+}
+
+function startPlaying() {
+  if (playing) return;
+  playing = true;
+  $('btnPlay').disabled = true;
+  $('btnPause').disabled = false;
+  tick();
+}
+
+function tick() {
+  if (!playing) return;
+  executeStep();
+  const s = scenarios[currentScenario];
+  if (stepIndex < s.steps.length) {
+    timerId = setTimeout(tick, getSpeed());
+  } else {
+    stopPlaying();
+    $('btnPlay').disabled = true;
+    $('btnStep').disabled = true;
+  }
+}
+
+function stopPlaying() {
+  playing = false;
+  clearTimeout(timerId);
+  $('btnPlay').disabled = false;
+  $('btnPause').disabled = true;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/* ── Event listeners ── */
+$('scenarioSelect').addEventListener('change', e => loadScenario(+e.target.value));
+$('btnPlay').addEventListener('click', startPlaying);
+$('btnPause').addEventListener('click', stopPlaying);
+$('btnStep').addEventListener('click', () => { stopPlaying(); executeStep(); });
+$('btnReset').addEventListener('click', () => loadScenario(currentScenario));
+
+/* ── Init ── */
+loadScenario(0);
+</script>
+</body>
+</html>

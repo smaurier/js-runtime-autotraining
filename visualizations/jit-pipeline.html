@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline JIT de V8</title>
+<style>
+  /* ── Reset & Base ───────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    overflow-x: hidden;
+  }
+
+  /* ── Title ──────────────────────────────────────────────── */
+  h1 {
+    margin: 28px 0 8px;
+    font-size: 2rem;
+    letter-spacing: 1px;
+    text-align: center;
+    background: linear-gradient(90deg, #6c63ff, #ff6584);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .subtitle {
+    font-size: 0.9rem;
+    color: #888;
+    margin-bottom: 22px;
+    text-align: center;
+  }
+
+  /* ── Pipeline Container ─────────────────────────────────── */
+  .pipeline-wrap {
+    width: 95%;
+    max-width: 1200px;
+    overflow-x: auto;
+    padding: 18px 0;
+  }
+
+  .pipeline {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    min-width: 900px;
+    padding: 10px 20px;
+  }
+
+  /* ── Pipeline Stage Box ─────────────────────────────────── */
+  .stage {
+    position: relative;
+    width: 110px;
+    min-height: 80px;
+    border: 2px solid #333;
+    border-radius: 10px;
+    background: #16213e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 6px;
+    text-align: center;
+    transition: border-color 0.5s, box-shadow 0.5s, background 0.5s, transform 0.3s;
+    flex-shrink: 0;
+    z-index: 2;
+  }
+
+  .stage .label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    transition: color 0.4s;
+  }
+
+  .stage .detail {
+    font-size: 0.65rem;
+    margin-top: 4px;
+    color: #777;
+    transition: color 0.4s;
+  }
+
+  .stage .icon {
+    font-size: 1.4rem;
+    margin-bottom: 4px;
+  }
+
+  /* ── Stage Active Glows ─────────────────────────────────── */
+  .stage.active-source   { border-color: #b388ff; box-shadow: 0 0 18px #b388ff55; background: #1e1745; }
+  .stage.active-scanner  { border-color: #80cbc4; box-shadow: 0 0 18px #80cbc455; background: #14302e; }
+  .stage.active-parser   { border-color: #80cbc4; box-shadow: 0 0 18px #80cbc455; background: #14302e; }
+  .stage.active-ast      { border-color: #ce93d8; box-shadow: 0 0 18px #ce93d855; background: #271435; }
+  .stage.active-ignition { border-color: #42a5f5; box-shadow: 0 0 22px #42a5f566; background: #0d253f; transform: scale(1.05); }
+  .stage.active-sparkplug{ border-color: #66bb6a; box-shadow: 0 0 22px #66bb6a66; background: #1b3a1b; transform: scale(1.05); }
+  .stage.active-maglev   { border-color: #fdd835; box-shadow: 0 0 22px #fdd83566; background: #3a3510; transform: scale(1.05); }
+  .stage.active-turbofan { border-color: #ef5350; box-shadow: 0 0 28px #ef535088; background: #3e1212; transform: scale(1.08); }
+
+  .stage.active-ignition .label  { color: #64b5f6; }
+  .stage.active-sparkplug .label { color: #81c784; }
+  .stage.active-maglev .label    { color: #fff176; }
+  .stage.active-turbofan .label  { color: #ef9a9a; }
+
+  /* ── Arrows between stages ──────────────────────────────── */
+  .arrow {
+    width: 38px;
+    height: 2px;
+    position: relative;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .arrow svg {
+    width: 38px;
+    height: 20px;
+    overflow: visible;
+  }
+
+  .arrow-line {
+    stroke: #444;
+    stroke-width: 2;
+    stroke-dasharray: 6 4;
+    stroke-dashoffset: 0;
+    transition: stroke 0.4s;
+  }
+
+  .arrow-head {
+    fill: #444;
+    transition: fill 0.4s;
+  }
+
+  .arrow.lit .arrow-line { stroke: #aaa; animation: dash-flow 0.6s linear infinite; }
+  .arrow.lit .arrow-head { fill: #aaa; }
+
+  .arrow.lit-ignition .arrow-line { stroke: #42a5f5; }
+  .arrow.lit-ignition .arrow-head { fill: #42a5f5; }
+  .arrow.lit-sparkplug .arrow-line { stroke: #66bb6a; }
+  .arrow.lit-sparkplug .arrow-head { fill: #66bb6a; }
+  .arrow.lit-maglev .arrow-line { stroke: #fdd835; }
+  .arrow.lit-maglev .arrow-head { fill: #fdd835; }
+  .arrow.lit-turbofan .arrow-line { stroke: #ef5350; }
+  .arrow.lit-turbofan .arrow-head { fill: #ef5350; }
+
+  @keyframes dash-flow {
+    to { stroke-dashoffset: -10; }
+  }
+
+  /* ── Deopt Backward Arrow ───────────────────────────────── */
+  .deopt-arrow-container {
+    position: relative;
+    width: 95%;
+    max-width: 1200px;
+    height: 50px;
+    margin-top: -10px;
+    overflow: visible;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+
+  .deopt-arrow-container.visible {
+    opacity: 1;
+  }
+
+  .deopt-path {
+    stroke: #ef5350;
+    stroke-width: 3;
+    stroke-dasharray: 8 5;
+    fill: none;
+    animation: deopt-dash 0.4s linear infinite;
+  }
+
+  .deopt-head {
+    fill: #ef5350;
+  }
+
+  @keyframes deopt-dash {
+    to { stroke-dashoffset: -13; }
+  }
+
+  .deopt-label {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #ef535022;
+    border: 1px solid #ef5350;
+    border-radius: 6px;
+    padding: 4px 14px;
+    font-size: 0.8rem;
+    color: #ef9a9a;
+    white-space: nowrap;
+    animation: deopt-pulse 0.6s ease-in-out infinite alternate;
+  }
+
+  @keyframes deopt-pulse {
+    from { opacity: 0.7; }
+    to   { opacity: 1; }
+  }
+
+  /* ── Code Snippet Box ───────────────────────────────────── */
+  .code-box {
+    width: 95%;
+    max-width: 1200px;
+    background: #0f3460;
+    border: 1px solid #1a4a8a;
+    border-radius: 8px;
+    padding: 12px 18px;
+    margin-top: 4px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.85rem;
+    color: #a8d8ff;
+    overflow-x: auto;
+    transition: border-color 0.4s, box-shadow 0.4s;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+
+  .code-box.highlight {
+    border-color: #42a5f5;
+    box-shadow: 0 0 14px #42a5f533;
+  }
+
+  .code-box .keyword  { color: #c792ea; }
+  .code-box .func     { color: #82aaff; }
+  .code-box .param    { color: #f78c6c; }
+  .code-box .op       { color: #89ddff; }
+  .code-box .string   { color: #c3e88d; }
+
+  /* ── Counter & Tier ─────────────────────────────────────── */
+  .info-bar {
+    width: 95%;
+    max-width: 1200px;
+    display: flex;
+    justify-content: center;
+    gap: 40px;
+    margin: 16px 0 6px;
+    flex-wrap: wrap;
+  }
+
+  .info-item {
+    text-align: center;
+  }
+
+  .info-item .info-label {
+    font-size: 0.75rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 2px;
+  }
+
+  .info-item .info-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    transition: color 0.4s;
+  }
+
+  .counter-val { color: #64b5f6; }
+  .tier-val    { color: #888; }
+
+  .tier-interp   { color: #90caf9; }
+  .tier-baseline  { color: #81c784; }
+  .tier-mid       { color: #fff176; }
+  .tier-optimized { color: #ef9a9a; }
+
+  /* ── Explanation Panel ──────────────────────────────────── */
+  .explanation {
+    width: 95%;
+    max-width: 1200px;
+    background: #16213e;
+    border: 1px solid #253555;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin: 12px 0 16px;
+    min-height: 90px;
+    transition: border-color 0.5s;
+  }
+
+  .explanation h3 {
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+    color: #b388ff;
+  }
+
+  .explanation p {
+    font-size: 0.85rem;
+    line-height: 1.55;
+    color: #bbb;
+  }
+
+  .explanation.deopt-highlight {
+    border-color: #ef5350;
+  }
+
+  /* ── Controls ───────────────────────────────────────────── */
+  .controls {
+    width: 95%;
+    max-width: 1200px;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    padding: 16px 0 28px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    padding: 10px 22px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    transition: background 0.25s, transform 0.15s, box-shadow 0.25s;
+  }
+
+  .btn:active { transform: scale(0.96); }
+
+  .btn-play {
+    background: #4caf50;
+    color: #fff;
+  }
+  .btn-play:hover { background: #66bb6a; box-shadow: 0 0 12px #66bb6a44; }
+
+  .btn-pause {
+    background: #ff9800;
+    color: #fff;
+  }
+  .btn-pause:hover { background: #ffa726; box-shadow: 0 0 12px #ffa72644; }
+
+  .btn-step {
+    background: #2196f3;
+    color: #fff;
+  }
+  .btn-step:hover { background: #42a5f5; box-shadow: 0 0 12px #42a5f544; }
+
+  .btn-reset {
+    background: #555;
+    color: #e0e0e0;
+  }
+  .btn-reset:hover { background: #666; box-shadow: 0 0 12px #66666644; }
+
+  .btn-deopt {
+    background: linear-gradient(135deg, #d32f2f, #b71c1c);
+    color: #fff;
+    position: relative;
+    overflow: hidden;
+  }
+  .btn-deopt:hover { box-shadow: 0 0 16px #ef535066; }
+  .btn-deopt::after {
+    content: '';
+    position: absolute;
+    top: 0; left: -100%;
+    width: 100%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+    transition: left 0.5s;
+  }
+  .btn-deopt:hover::after { left: 100%; }
+
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none !important;
+  }
+
+  /* ── Token animation inside scanner ─────────────────────── */
+  @keyframes token-flash {
+    0%, 100% { opacity: 0.4; }
+    50%      { opacity: 1; }
+  }
+
+  .token-anim {
+    animation: token-flash 0.35s ease-in-out;
+  }
+
+  /* ── Particle effect for compilation tiers ──────────────── */
+  .particles {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    border-radius: 10px;
+  }
+
+  .particle {
+    position: absolute;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    opacity: 0;
+    animation: particle-rise 1s ease-out forwards;
+  }
+
+  @keyframes particle-rise {
+    0%   { opacity: 1; transform: translateY(0) scale(1); }
+    100% { opacity: 0; transform: translateY(-30px) scale(0.3); }
+  }
+
+  /* ── Responsive ─────────────────────────────────────────── */
+  @media (max-width: 700px) {
+    h1 { font-size: 1.4rem; }
+    .stage { width: 85px; min-height: 64px; padding: 6px 4px; }
+    .stage .label { font-size: 0.65rem; }
+    .stage .icon  { font-size: 1.1rem; }
+    .arrow svg    { width: 24px; }
+    .arrow        { width: 24px; }
+    .btn          { padding: 8px 14px; font-size: 0.78rem; }
+  }
+</style>
+</head>
+<body>
+
+  <h1>Pipeline JIT de V8</h1>
+  <p class="subtitle">Visualisation du parcours d'une fonction JavaScript, de l'analyse au code machine optimise</p>
+
+  <!-- ── Code Snippet ──────────────────────────────────────── -->
+  <div class="code-box" id="codeBox">
+    <span class="comment" style="color:#546e7a;">// En attente...</span>
+  </div>
+
+  <!-- ── Pipeline ──────────────────────────────────────────── -->
+  <div class="pipeline-wrap">
+    <div class="pipeline" id="pipeline">
+      <!-- Stages and arrows are built by JS -->
+    </div>
+  </div>
+
+  <!-- ── Deopt Backward Arrow ──────────────────────────────── -->
+  <div class="deopt-arrow-container" id="deoptArrow">
+    <svg width="100%" height="50" style="overflow:visible;">
+      <defs>
+        <marker id="deoptHead" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" class="deopt-head"/>
+        </marker>
+      </defs>
+      <path id="deoptPath" class="deopt-path" marker-end="url(#deoptHead)"
+            d="M 85% 5 C 80% 40, 20% 40, 15% 5" />
+    </svg>
+    <div class="deopt-label">Deoptimisation ! Retour a Ignition</div>
+  </div>
+
+  <!-- ── Info Bar ──────────────────────────────────────────── -->
+  <div class="info-bar">
+    <div class="info-item">
+      <div class="info-label">Appels</div>
+      <div class="info-value counter-val" id="callCounter">0</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">Niveau actuel</div>
+      <div class="info-value tier-val" id="tierIndicator">--</div>
+    </div>
+  </div>
+
+  <!-- ── Explanation Panel ─────────────────────────────────── -->
+  <div class="explanation" id="explanation">
+    <h3>Bienvenue</h3>
+    <p>
+      Cliquez sur <strong>Lecture</strong> pour lancer l'animation ou sur
+      <strong>Pas-a-pas</strong> pour avancer etape par etape.
+      Cette visualisation montre comment V8 compile progressivement une fonction
+      JavaScript en passant par plusieurs niveaux d'optimisation.
+    </p>
+  </div>
+
+  <!-- ── Controls ──────────────────────────────────────────── -->
+  <div class="controls">
+    <button class="btn btn-play"  id="btnPlay">&#9654; Lecture</button>
+    <button class="btn btn-pause" id="btnPause" disabled>&#10074;&#10074; Pause</button>
+    <button class="btn btn-step"  id="btnStep">&#9199; Pas-a-pas</button>
+    <button class="btn btn-reset" id="btnReset">&#8634; Reinitialiser</button>
+    <button class="btn btn-deopt" id="btnDeopt" disabled>&#9888; Changement de type !</button>
+  </div>
+
+<script>
+/* ================================================================
+   Pipeline JIT de V8 — Animation logic
+   ================================================================ */
+
+(function () {
+  'use strict';
+
+  /* ── Stage Definitions ────────────────────────────────── */
+  var STAGES = [
+    { id: 'source',   label: 'Source',    icon: '\uD83D\uDCDD', detail: 'Code JS',           activeClass: 'active-source'   },
+    { id: 'scanner',  label: 'Scanner',   icon: '\uD83D\uDD0D', detail: 'Tokenisation',      activeClass: 'active-scanner'  },
+    { id: 'parser',   label: 'Parser',    icon: '\uD83D\uDCC4', detail: 'Analyse syntaxique', activeClass: 'active-parser'   },
+    { id: 'ast',      label: 'AST',       icon: '\uD83C\uDF33', detail: 'Arbre syntaxique',   activeClass: 'active-ast'      },
+    { id: 'ignition', label: 'Ignition',  icon: '\uD83D\uDD25', detail: 'Bytecode',          activeClass: 'active-ignition' },
+    { id: 'sparkplug',label: 'Sparkplug', icon: '\u26A1',       detail: 'Baseline',          activeClass: 'active-sparkplug'},
+    { id: 'maglev',   label: 'Maglev',    icon: '\uD83D\uDE84', detail: 'Intermediaire',     activeClass: 'active-maglev'   },
+    { id: 'turbofan', label: 'TurboFan',  icon: '\uD83C\uDF00', detail: 'Optimise',          activeClass: 'active-turbofan' }
+  ];
+
+  var SPARKPLUG_THRESHOLD = 5;
+  var MAGLEV_THRESHOLD    = 20;
+  var TURBOFAN_THRESHOLD  = 100;
+
+  /* ── Explanation texts ────────────────────────────────── */
+  var EXPLANATIONS = {
+    idle: {
+      title: 'Bienvenue',
+      text:  'Cliquez sur <strong>Lecture</strong> pour lancer l\'animation ou sur <strong>Pas-\u00e0-pas</strong> pour avancer \u00e9tape par \u00e9tape. Cette visualisation montre comment V8 compile progressivement une fonction JavaScript en passant par plusieurs niveaux d\'optimisation.'
+    },
+    source: {
+      title: '\u00C9tape 1 \u2014 Code source',
+      text:  'Le moteur V8 re\u00e7oit le code source JavaScript. Ici, nous avons une simple fonction <code>add(a, b)</code>. V8 va d\'abord analyser ce texte avant de pouvoir l\'ex\u00e9cuter.'
+    },
+    scanner: {
+      title: '\u00C9tape 2 \u2014 Scanner (Lexer)',
+      text:  'Le <strong>Scanner</strong> d\u00e9coupe le code source en <em>tokens</em> : mots-cl\u00e9s (<code>function</code>, <code>return</code>), identifiants (<code>add</code>, <code>a</code>, <code>b</code>), op\u00e9rateurs (<code>+</code>) et symboles (<code>{</code>, <code>}</code>). C\'est l\'\u00e9tape de <em>tokenisation</em>.'
+    },
+    parser: {
+      title: '\u00C9tape 3 \u2014 Parser',
+      text:  'Le <strong>Parser</strong> prend les tokens et construit une structure arborescente selon les r\u00e8gles de la grammaire JavaScript. Il v\u00e9rifie que la syntaxe est correcte et produit l\'AST (Abstract Syntax Tree).'
+    },
+    ast: {
+      title: '\u00C9tape 4 \u2014 AST (Arbre Syntaxique Abstrait)',
+      text:  'L\'<strong>AST</strong> est une repr\u00e9sentation en arbre du programme. Chaque noeud repr\u00e9sente une construction du langage : d\u00e9claration de fonction, instruction return, op\u00e9ration binaire (+), etc. C\'est cette structure que les compilateurs utilisent.'
+    },
+    ignition: {
+      title: '\u00C9tape 5 \u2014 Ignition (Interpr\u00e9teur)',
+      text:  '<strong>Ignition</strong> est l\'interpr\u00e9teur de V8. Il convertit l\'AST en <em>bytecode</em>, un format interm\u00e9diaire compact et rapide \u00e0 interpr\u00e9ter. La fonction peut maintenant \u00eatre appel\u00e9e. V8 collecte des informations de type (\u00ab feedback \u00bb) \u00e0 chaque appel.'
+    },
+    sparkplug: {
+      title: '\u00C9tape 6 \u2014 Sparkplug (Compilation Baseline)',
+      text:  'Apr\u00e8s <strong>' + SPARKPLUG_THRESHOLD + ' appels</strong>, V8 d\u00e9clenche <strong>Sparkplug</strong>, le compilateur <em>baseline</em>. Il g\u00e9n\u00e8re du code machine directement depuis le bytecode, sans optimisation pouss\u00e9e. C\'est rapide \u00e0 compiler et d\u00e9j\u00e0 plus performant que l\'interpr\u00e9tation.'
+    },
+    maglev: {
+      title: '\u00C9tape 7 \u2014 Maglev (Compilation Interm\u00e9diaire)',
+      text:  'Apr\u00e8s <strong>' + MAGLEV_THRESHOLD + ' appels</strong>, <strong>Maglev</strong> entre en jeu. C\'est un compilateur interm\u00e9diaire qui utilise le feedback de type collect\u00e9 par Ignition pour g\u00e9n\u00e9rer du code machine plus optimis\u00e9 que Sparkplug, tout en restant rapide \u00e0 compiler.'
+    },
+    turbofan: {
+      title: '\u00C9tape 8 \u2014 TurboFan (Compilation Optimis\u00e9e)',
+      text:  'Apr\u00e8s <strong>' + TURBOFAN_THRESHOLD + ' appels</strong>, <strong>TurboFan</strong> compile la fonction avec des optimisations agressives : inlining, \u00e9limination de code mort, all\u00e9gement des v\u00e9rifications de type... Le code machine r\u00e9sultant est proche de ce qu\'un compilateur C++ produirait. <em>Mais attention</em> : ces optimisations reposent sur des hypoth\u00e8ses de type !'
+    },
+    running_ignition: {
+      title: 'Ex\u00e9cution \u2014 Ignition',
+      text:  'La fonction est interpr\u00e9t\u00e9e par <strong>Ignition</strong>. Chaque appel accumule du <em>feedback de type</em>. V8 observe que <code>a</code> et <code>b</code> sont toujours des <code>number</code>. Quand le nombre d\'appels atteint un seuil, un compilateur plus agressif prendra le relais.'
+    },
+    running_sparkplug: {
+      title: 'Ex\u00e9cution \u2014 Sparkplug',
+      text:  'Le code <em>baseline</em> g\u00e9n\u00e9r\u00e9 par <strong>Sparkplug</strong> est en cours d\'ex\u00e9cution. Il est plus rapide que le bytecode interpr\u00e9t\u00e9, mais V8 continue de collecter du feedback. Encore quelques appels avant la prochaine optimisation...'
+    },
+    running_maglev: {
+      title: 'Ex\u00e9cution \u2014 Maglev',
+      text:  'Le code interm\u00e9diaire <strong>Maglev</strong> est en ex\u00e9cution. Il utilise les informations de type pour \u00e9viter certaines v\u00e9rifications. La fonction approche du seuil de TurboFan...'
+    },
+    running_turbofan: {
+      title: 'Ex\u00e9cution \u2014 TurboFan (optimis\u00e9)',
+      text:  'La fonction tourne en <strong>code machine optimis\u00e9</strong> par TurboFan. Les performances sont maximales. TurboFan a suppos\u00e9 que les param\u00e8tres sont toujours de type <code>number</code>. Si cette hypoth\u00e8se est viol\u00e9e, une <em>d\u00e9optimisation</em> se produira !'
+    },
+    deopt: {
+      title: 'D\u00e9optimisation !',
+      text:  'Le type a chang\u00e9 ! On a appel\u00e9 <code>add("hello", " world")</code> avec des <code>string</code> au lieu de <code>number</code>. L\'hypoth\u00e8se de TurboFan est invalid\u00e9e. V8 effectue un <strong>retour \u00e0 Ignition</strong> (d\u00e9optimisation). Le compteur de feedback reprend depuis le d\u00e9but, et le cycle de compilation recommence avec les nouveaux types.'
+    }
+  };
+
+  /* ── State ────────────────────────────────────────────── */
+  var callCount  = 0;
+  var phase      = 'idle';   // idle | parsing | running | deopt
+  var parseStep  = 0;        // 0..4 for source->scanner->parser->ast->ignition
+  var playing    = false;
+  var timer      = null;
+  var currentTier = 'none';  // none | ignition | sparkplug | maglev | turbofan
+  var deoptActive = false;
+
+  /* ── DOM refs ─────────────────────────────────────────── */
+  var pipelineEl   = document.getElementById('pipeline');
+  var codeBoxEl    = document.getElementById('codeBox');
+  var counterEl    = document.getElementById('callCounter');
+  var tierEl       = document.getElementById('tierIndicator');
+  var explanationEl= document.getElementById('explanation');
+  var deoptArrowEl = document.getElementById('deoptArrow');
+  var btnPlay      = document.getElementById('btnPlay');
+  var btnPause     = document.getElementById('btnPause');
+  var btnStep      = document.getElementById('btnStep');
+  var btnReset     = document.getElementById('btnReset');
+  var btnDeopt     = document.getElementById('btnDeopt');
+
+  var stageEls = {};  // id -> DOM element
+  var arrowEls = [];  // arrow DOM elements in order
+
+  /* ── Build Pipeline DOM ───────────────────────────────── */
+  function buildPipeline() {
+    pipelineEl.innerHTML = '';
+    arrowEls = [];
+
+    STAGES.forEach(function (s, i) {
+      // Stage box
+      var box = document.createElement('div');
+      box.className = 'stage';
+      box.id = 'stage-' + s.id;
+      box.innerHTML =
+        '<div class="icon">' + s.icon + '</div>' +
+        '<div class="label">' + s.label + '</div>' +
+        '<div class="detail">' + s.detail + '</div>' +
+        '<div class="particles"></div>';
+      pipelineEl.appendChild(box);
+      stageEls[s.id] = box;
+
+      // Arrow (except after last stage)
+      if (i < STAGES.length - 1) {
+        var arrow = document.createElement('div');
+        arrow.className = 'arrow';
+        arrow.innerHTML =
+          '<svg viewBox="0 0 38 20">' +
+            '<defs><marker id="ah' + i + '" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">' +
+              '<polygon points="0 0, 7 2.5, 0 5" class="arrow-head"/>' +
+            '</marker></defs>' +
+            '<line x1="0" y1="10" x2="30" y2="10" class="arrow-line" marker-end="url(#ah' + i + ')"/>' +
+          '</svg>';
+        pipelineEl.appendChild(arrow);
+        arrowEls.push(arrow);
+      }
+    });
+  }
+
+  /* ── Rendering helpers ────────────────────────────────── */
+  function clearAllActive() {
+    STAGES.forEach(function (s) {
+      stageEls[s.id].className = 'stage';
+    });
+    arrowEls.forEach(function (a) {
+      a.className = 'arrow';
+    });
+  }
+
+  function setExplanation(key) {
+    var data = EXPLANATIONS[key] || EXPLANATIONS.idle;
+    explanationEl.innerHTML = '<h3>' + data.title + '</h3><p>' + data.text + '</p>';
+    explanationEl.classList.toggle('deopt-highlight', key === 'deopt');
+  }
+
+  function updateCounter() {
+    counterEl.textContent = callCount;
+  }
+
+  function updateTier() {
+    tierEl.className = 'info-value tier-val';
+    if (currentTier === 'none')      { tierEl.textContent = '--'; }
+    else if (currentTier === 'ignition') { tierEl.textContent = 'Ignition (interpr\u00e9t\u00e9)'; tierEl.classList.add('tier-interp'); }
+    else if (currentTier === 'sparkplug'){ tierEl.textContent = 'Sparkplug (baseline)'; tierEl.classList.add('tier-baseline'); }
+    else if (currentTier === 'maglev')   { tierEl.textContent = 'Maglev (interm\u00e9diaire)'; tierEl.classList.add('tier-mid'); }
+    else if (currentTier === 'turbofan') { tierEl.textContent = 'TurboFan (optimis\u00e9)'; tierEl.classList.add('tier-optimized'); }
+  }
+
+  function setCodeBox(html, highlight) {
+    codeBoxEl.innerHTML = html;
+    codeBoxEl.classList.toggle('highlight', !!highlight);
+  }
+
+  function lightArrowsUpTo(index, colorClass) {
+    for (var i = 0; i <= index && i < arrowEls.length; i++) {
+      arrowEls[i].className = 'arrow lit ' + (colorClass || '');
+    }
+  }
+
+  function activateStagesUpTo(stageId) {
+    var found = false;
+    STAGES.forEach(function (s) {
+      if (!found) {
+        stageEls[s.id].classList.add(s.activeClass);
+      }
+      if (s.id === stageId) { found = true; }
+    });
+  }
+
+  function spawnParticles(stageId, color) {
+    var container = stageEls[stageId].querySelector('.particles');
+    for (var i = 0; i < 6; i++) {
+      var p = document.createElement('div');
+      p.className = 'particle';
+      p.style.left = (Math.random() * 80 + 10) + '%';
+      p.style.bottom = '10%';
+      p.style.background = color;
+      p.style.animationDelay = (Math.random() * 0.4) + 's';
+      container.appendChild(p);
+      (function(el) {
+        setTimeout(function() { el.remove(); }, 1200);
+      })(p);
+    }
+  }
+
+  /* ── Code snippets ────────────────────────────────────── */
+  var CODE_NORMAL =
+    '<span class="keyword">function</span> <span class="func">add</span>(<span class="param">a</span>, <span class="param">b</span>) { <span class="keyword">return</span> <span class="param">a</span> <span class="op">+</span> <span class="param">b</span>; }';
+
+  var CODE_CALL_PREFIX =
+    '<span class="func">add</span>(<span class="param">2</span>, <span class="param">3</span>)  <span style="color:#546e7a;">// appel #';
+
+  var CODE_DEOPT =
+    '<span class="func">add</span>(<span class="string">"hello"</span>, <span class="string">" world"</span>)  <span style="color:#ef5350;">// type change !</span>';
+
+  /* ── Render current state ─────────────────────────────── */
+  function render() {
+    clearAllActive();
+    deoptArrowEl.classList.remove('visible');
+
+    if (phase === 'idle') {
+      setCodeBox('<span style="color:#546e7a;">// En attente...</span>', false);
+      currentTier = 'none';
+      setExplanation('idle');
+    }
+    else if (phase === 'parsing') {
+      var stageKeys = ['source', 'scanner', 'parser', 'ast', 'ignition'];
+      var targetKey = stageKeys[parseStep];
+
+      // Activate stages up to current parse step
+      for (var pi = 0; pi <= parseStep; pi++) {
+        stageEls[stageKeys[pi]].classList.add(STAGES.filter(function(s){ return s.id === stageKeys[pi]; })[0].activeClass);
+      }
+
+      // Light arrows up to current step
+      for (var ai = 0; ai < parseStep && ai < arrowEls.length; ai++) {
+        arrowEls[ai].className = 'arrow lit';
+      }
+
+      setCodeBox(CODE_NORMAL, true);
+      currentTier = 'none';
+      setExplanation(targetKey);
+    }
+    else if (phase === 'running') {
+      setCodeBox(CODE_CALL_PREFIX + callCount + '</span>', true);
+
+      // Determine current tier and apply visuals
+      if (callCount >= TURBOFAN_THRESHOLD) {
+        currentTier = 'turbofan';
+        activateStagesUpTo('turbofan');
+        lightArrowsUpTo(6, 'lit-turbofan');
+        setExplanation('running_turbofan');
+      } else if (callCount >= MAGLEV_THRESHOLD) {
+        currentTier = 'maglev';
+        activateStagesUpTo('maglev');
+        lightArrowsUpTo(5, 'lit-maglev');
+        setExplanation('running_maglev');
+      } else if (callCount >= SPARKPLUG_THRESHOLD) {
+        currentTier = 'sparkplug';
+        activateStagesUpTo('sparkplug');
+        lightArrowsUpTo(4, 'lit-sparkplug');
+        setExplanation('running_sparkplug');
+      } else {
+        currentTier = 'ignition';
+        activateStagesUpTo('ignition');
+        lightArrowsUpTo(3, 'lit-ignition');
+        setExplanation('running_ignition');
+      }
+
+      // Spawn particles on tier transitions
+      if (callCount === SPARKPLUG_THRESHOLD) {
+        spawnParticles('sparkplug', '#66bb6a');
+        setExplanation('sparkplug');
+      }
+      if (callCount === MAGLEV_THRESHOLD) {
+        spawnParticles('maglev', '#fdd835');
+        setExplanation('maglev');
+      }
+      if (callCount === TURBOFAN_THRESHOLD) {
+        spawnParticles('turbofan', '#ef5350');
+        setExplanation('turbofan');
+      }
+    }
+    else if (phase === 'deopt') {
+      // Show backward arrow
+      deoptArrowEl.classList.add('visible');
+
+      // Only ignition stays lit
+      stageEls['source'].classList.add('active-source');
+      stageEls['scanner'].classList.add('active-scanner');
+      stageEls['parser'].classList.add('active-parser');
+      stageEls['ast'].classList.add('active-ast');
+      stageEls['ignition'].classList.add('active-ignition');
+      lightArrowsUpTo(3, 'lit-ignition');
+
+      setCodeBox(CODE_DEOPT, true);
+      currentTier = 'ignition';
+      setExplanation('deopt');
+    }
+
+    updateCounter();
+    updateTier();
+    updateButtons();
+  }
+
+  /* ── Button state ─────────────────────────────────────── */
+  function updateButtons() {
+    btnPlay.disabled  = playing;
+    btnPause.disabled = !playing;
+    btnStep.disabled  = playing;
+    btnDeopt.disabled = currentTier !== 'turbofan' || phase === 'deopt';
+  }
+
+  /* ── Step logic ───────────────────────────────────────── */
+  function doStep() {
+    if (deoptActive) {
+      // After showing deopt, reset to running from ignition
+      deoptActive = false;
+      callCount = 0;
+      phase = 'running';
+      callCount = 1;
+      render();
+      return;
+    }
+
+    if (phase === 'idle') {
+      phase = 'parsing';
+      parseStep = 0;
+      render();
+      return;
+    }
+
+    if (phase === 'parsing') {
+      parseStep++;
+      if (parseStep > 4) {
+        // Done parsing, switch to running
+        phase = 'running';
+        callCount = 1;
+      }
+      render();
+      return;
+    }
+
+    if (phase === 'running') {
+      callCount++;
+      render();
+      return;
+    }
+
+    if (phase === 'deopt') {
+      // Step past deopt
+      deoptActive = false;
+      callCount = 0;
+      phase = 'running';
+      callCount = 1;
+      render();
+      return;
+    }
+  }
+
+  /* ── Play / Pause / Reset ─────────────────────────────── */
+  function play() {
+    if (playing) return;
+    playing = true;
+    updateButtons();
+    scheduleNext();
+  }
+
+  function scheduleNext() {
+    if (!playing) return;
+    var delay;
+    if (phase === 'idle' || phase === 'parsing') {
+      delay = 900;
+    } else if (phase === 'deopt') {
+      delay = 2200;
+    } else {
+      // Speed up as calls accumulate
+      if (callCount < SPARKPLUG_THRESHOLD)       delay = 600;
+      else if (callCount < MAGLEV_THRESHOLD)     delay = 350;
+      else if (callCount < TURBOFAN_THRESHOLD)    delay = 150;
+      else delay = 800;
+    }
+    timer = setTimeout(function () {
+      doStep();
+      if (playing) {
+        // Stop auto-play once TurboFan is warm
+        if (phase === 'running' && callCount > TURBOFAN_THRESHOLD + 3) {
+          pause();
+          return;
+        }
+        scheduleNext();
+      }
+    }, delay);
+  }
+
+  function pause() {
+    playing = false;
+    clearTimeout(timer);
+    updateButtons();
+  }
+
+  function reset() {
+    pause();
+    callCount = 0;
+    phase = 'idle';
+    parseStep = 0;
+    currentTier = 'none';
+    deoptActive = false;
+    render();
+  }
+
+  /* ── Deoptimization ───────────────────────────────────── */
+  function triggerDeopt() {
+    if (currentTier !== 'turbofan') return;
+    var wasPlaying = playing;
+    pause();
+    deoptActive = true;
+    phase = 'deopt';
+    callCount = 0;
+    render();
+
+    // After a delay, return to ignition running state
+    setTimeout(function () {
+      deoptActive = false;
+      phase = 'running';
+      callCount = 1;
+      render();
+      if (wasPlaying) {
+        play();
+      }
+    }, 3000);
+  }
+
+  /* ── Event listeners ──────────────────────────────────── */
+  btnPlay.addEventListener('click', play);
+  btnPause.addEventListener('click', pause);
+  btnStep.addEventListener('click', doStep);
+  btnReset.addEventListener('click', reset);
+  btnDeopt.addEventListener('click', triggerDeopt);
+
+  /* ── Keyboard shortcuts ───────────────────────────────── */
+  document.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      if (playing) pause(); else play();
+    }
+    if (e.key === 'ArrowRight' || e.key === 'n') {
+      if (!playing) doStep();
+    }
+    if (e.key === 'r') {
+      reset();
+    }
+    if (e.key === 'd') {
+      if (!btnDeopt.disabled) triggerDeopt();
+    }
+  });
+
+  /* ── Init ─────────────────────────────────────────────── */
+  buildPipeline();
+  render();
+
+})();
+</script>
+</body>
+</html>

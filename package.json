@@ -1,0 +1,51 @@
+{
+  "name": "js-runtime-course",
+  "version": "1.0.0",
+  "description": "Formation avancée sur le runtime JavaScript (V8, event loop, mémoire, JIT)",
+  "type": "module",
+  "scripts": {
+    "docs:copy-assets": "node scripts/copy-assets.js",
+    "docs:dev": "npm run docs:copy-assets && vitepress dev",
+    "docs:build": "npm run docs:copy-assets && vitepress build",
+    "docs:preview": "vitepress preview",
+    "lab:01": "node labs/lab-01-call-stack-observation/exercise.js",
+    "lab:02": "node labs/lab-02-closure-memory/exercise.js",
+    "lab:03": "node labs/lab-03-event-loop-order/exercise.js",
+    "lab:04": "node labs/lab-04-microtask-macrotask/exercise.js",
+    "lab:05": "node labs/lab-05-promise-implementation/exercise.js",
+    "lab:05:step1": "node labs/lab-05-promise-implementation/exercise-step1.js",
+    "lab:05:step2": "node labs/lab-05-promise-implementation/exercise-step2.js",
+    "lab:05:step3": "node labs/lab-05-promise-implementation/exercise-step3.js",
+    "lab:06": "node labs/lab-06-async-patterns-comparison/exercise.js",
+    "lab:07": "node --expose-gc labs/lab-07-gc-observation/exercise.js",
+    "lab:08": "node --max-old-space-size=100 labs/lab-08-memory-leak-detection/exercise.js",
+    "lab:09": "node --print-bytecode --print-bytecode-filter=hotFunction labs/lab-09-v8-optimization/exercise.js",
+    "lab:10": "node --trace-opt --trace-deopt labs/lab-10-jit-deoptimization/exercise.js",
+    "lab:11": "node --allow-natives-syntax labs/lab-11-hidden-classes/exercise.js",
+    "lab:12": "node --prof labs/lab-12-performance-profiling/exercise.js",
+    "lab:13": "node labs/lab-13-scheduler-implementation/exercise.js",
+    "lab:14": "node labs/lab-14-mini-event-loop/exercise.js",
+    "lab:15": "node --expose-gc --trace-gc labs/lab-15-debugging-session/exercise.js",
+    "solution:01": "node labs/lab-01-call-stack-observation/solution.js",
+    "solution:02": "node labs/lab-02-closure-memory/solution.js",
+    "solution:03": "node labs/lab-03-event-loop-order/solution.js",
+    "solution:04": "node labs/lab-04-microtask-macrotask/solution.js",
+    "solution:05": "node labs/lab-05-promise-implementation/solution.js",
+    "solution:06": "node labs/lab-06-async-patterns-comparison/solution.js",
+    "solution:07": "node --expose-gc labs/lab-07-gc-observation/solution.js",
+    "solution:08": "node --max-old-space-size=100 labs/lab-08-memory-leak-detection/solution.js",
+    "solution:09": "node --print-bytecode --print-bytecode-filter=hotFunction labs/lab-09-v8-optimization/solution.js",
+    "solution:10": "node --trace-opt --trace-deopt labs/lab-10-jit-deoptimization/solution.js",
+    "solution:11": "node --allow-natives-syntax labs/lab-11-hidden-classes/solution.js",
+    "solution:12": "node --prof labs/lab-12-performance-profiling/solution.js",
+    "solution:13": "node labs/lab-13-scheduler-implementation/solution.js",
+    "solution:14": "node labs/lab-14-mini-event-loop/solution.js",
+    "solution:15": "node --expose-gc --trace-gc labs/lab-15-debugging-session/solution.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.0"
+  }
+}

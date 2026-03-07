@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hidden Classes (Maps) — Transitions</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1a1a2e; color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column; overflow-x: hidden;
+  }
+  header {
+    text-align: center; padding: 24px 16px 12px;
+    border-bottom: 1px solid #2a2a4a;
+    background: linear-gradient(180deg, #1e1e38 0%, #1a1a2e 100%);
+  }
+  header h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: .5px; color: #c0c0ff; }
+  header h1 span { color: #7878c8; }
+  header p.subtitle { margin-top: 6px; font-size: .85rem; color: #8888aa; }
+
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    justify-content: center; align-items: center;
+    padding: 16px; border-bottom: 1px solid #2a2a4a; background: #1c1c34;
+  }
+  .controls input[type="text"] {
+    background: #2a2a4a; border: 1px solid #3a3a6a; color: #e0e0e0;
+    padding: 8px 14px; border-radius: 6px; font-size: .9rem;
+    width: 180px; outline: none; transition: border-color .2s;
+  }
+  .controls input[type="text"]:focus {
+    border-color: #6c6cff; box-shadow: 0 0 0 2px rgba(108,108,255,.25);
+  }
+  .controls input[type="text"]::placeholder { color: #666688; }
+
+  button {
+    border: none; border-radius: 6px; padding: 8px 16px;
+    font-size: .85rem; font-weight: 600; cursor: pointer;
+    transition: background .2s, transform .1s, box-shadow .2s;
+  }
+  button:active { transform: scale(.97); }
+  .btn-primary { background: #4c4cff; color: #fff; }
+  .btn-primary:hover { background: #5a5aff; box-shadow: 0 2px 12px rgba(76,76,255,.3); }
+  .btn-danger { background: #cc3344; color: #fff; }
+  .btn-danger:hover { background: #dd4455; box-shadow: 0 2px 12px rgba(204,51,68,.3); }
+  .btn-secondary { background: #3a3a5e; color: #c0c0e0; }
+  .btn-secondary:hover { background: #4a4a6e; }
+  .btn-scenario {
+    background: #2a2a50; color: #aaaadd; border: 1px solid #3a3a6a;
+    position: relative; padding-left: 28px;
+  }
+  .btn-scenario:hover { background: #3a3a60; border-color: #5a5a8a; }
+  .btn-scenario::before {
+    content: attr(data-icon); position: absolute; left: 10px;
+    top: 50%; transform: translateY(-50%); font-size: .75rem;
+  }
+  .separator { width: 1px; height: 30px; background: #3a3a6a; }
+
+  .viz-container { flex: 1; position: relative; overflow: auto; min-height: 350px; }
+  .viz-container svg { display: block; width: 100%; min-height: 400px; }
+
+  .explanation {
+    border-top: 1px solid #2a2a4a; background: #1c1c34;
+    padding: 16px 24px; min-height: 60px;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; font-size: .9rem; line-height: 1.5; color: #aaaacc;
+  }
+  .explanation .label-ok { color: #44cc88; }
+  .explanation .label-warn { color: #ffaa44; }
+  .explanation .label-bad { color: #ff5566; }
+  .explanation code {
+    background: #2a2a4a; padding: 2px 6px; border-radius: 4px;
+    font-size: .82rem; color: #ccccff;
+  }
+
+  .map-node rect { rx: 10; ry: 10; stroke-width: 2; transition: stroke .3s, filter .3s; }
+  .map-node.active rect { filter: drop-shadow(0 0 8px rgba(108,108,255,.6)); }
+  .map-node.dictionary rect {
+    fill: #3a1a1a !important; stroke: #ff4444 !important;
+    filter: drop-shadow(0 0 8px rgba(255,68,68,.4));
+  }
+  .map-node text { font-family: 'Segoe UI', system-ui, sans-serif; }
+  .transition-line { stroke: #5a5a8a; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+  .transition-label {
+    font-size: 12px; fill: #88aaff; font-weight: 600;
+    font-family: 'Consolas', 'Courier New', monospace;
+  }
+  .object-badge { font-size: 11px; font-weight: 700; }
+
+  @keyframes nodeAppear {
+    0%   { opacity: 0; transform: scale(.5); }
+    60%  { opacity: 1; transform: scale(1.05); }
+    100% { opacity: 1; transform: scale(1); }
+  }
+  .map-node.animating { animation: nodeAppear .45s ease-out forwards; transform-origin: center center; }
+  @keyframes edgeGrow {
+    0%   { stroke-dashoffset: 200; opacity: 0; }
+    100% { stroke-dashoffset: 0; opacity: 1; }
+  }
+  .transition-line.animating { stroke-dasharray: 200; animation: edgeGrow .4s ease-out forwards; }
+  @keyframes labelFade { 0% { opacity: 0; } 100% { opacity: 1; } }
+  .transition-label.animating { animation: labelFade .4s .15s ease-out forwards; opacity: 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hidden Classes <span>(Maps)</span> — Transitions</h1>
+  <p class="subtitle">Visualisation de l'arbre de transitions des classes cachees V8</p>
+</header>
+
+<div class="controls">
+  <input type="text" id="propInput" placeholder="Nom de propriete (ex: x)" autocomplete="off" />
+  <button class="btn-primary" id="btnAdd">Ajouter propriete</button>
+  <button class="btn-danger" id="btnDelete">Supprimer propriete</button>
+  <button class="btn-secondary" id="btnReset">Reinitialiser</button>
+  <div class="separator"></div>
+  <button class="btn-scenario" data-icon="1" id="scenSame">Meme forme</button>
+  <button class="btn-scenario" data-icon="2" id="scenDiff">Forme differente</button>
+  <button class="btn-scenario" data-icon="3" id="scenDelete">delete &rarr; dictionnaire</button>
+</div>
+
+<div class="viz-container" id="vizContainer">
+  <svg id="treeSvg" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrowhead" viewBox="0 0 10 7" refX="10" refY="3.5"
+              markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#5a5a8a" />
+      </marker>
+      <marker id="arrowhead-red" viewBox="0 0 10 7" refX="10" refY="3.5"
+              markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#ff5566" />
+      </marker>
+    </defs>
+    <g id="edgesGroup"></g>
+    <g id="nodesGroup"></g>
+    <g id="badgesGroup"></g>
+  </svg>
+</div>
+
+<div class="explanation" id="explanation">
+  Ajoutez des proprietes une par une ou choisissez un scenario pre-charge ci-dessus.
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const NODE_W = 160, NODE_H = 88;
+  const H_GAP = 60, V_GAP = 70;
+  const PAD_X = 40, PAD_Y = 40;
+  const IN_OBJECT_LIMIT = 3;
+
+  const svg         = document.getElementById("treeSvg");
+  const nodesGroup  = document.getElementById("nodesGroup");
+  const edgesGroup  = document.getElementById("edgesGroup");
+  const badgesGroup = document.getElementById("badgesGroup");
+  const explanation  = document.getElementById("explanation");
+  const propInput   = document.getElementById("propInput");
+
+  /* ---------- Data model ---------- */
+  let nextMapId = 0;
+  let root = null;
+  let activeNodes = [];
+  let objectBadges = [];
+
+  class MapNode {
+    constructor(id, properties, parent, transitionProp) {
+      this.id = id;
+      this.properties = properties;
+      this.parent = parent;
+      this.transitionProp = transitionProp;
+      this.children = [];
+      this.isDictionary = false;
+      this.x = 0; this.y = 0;
+    }
+    get shortLabel() {
+      if (this.isDictionary) return "Dictionnaire";
+      return "Map" + this.id;
+    }
+  }
+
+  function createRoot() {
+    nextMapId = 0;
+    root = new MapNode(nextMapId++, [], null, null);
+    activeNodes = [root];
+    objectBadges = [];
+  }
+
+  /* ---------- Tree helpers ---------- */
+  function addTransition(node, prop) {
+    let child = node.children.find(c => c.transitionProp === prop && !c.isDictionary);
+    if (child) return child;
+    const newProps = [...node.properties, prop];
+    child = new MapNode(nextMapId++, newProps, node, prop);
+    node.children.push(child);
+    return child;
+  }
+
+  function addDictionaryTransition(node, deletedProp) {
+    const child = new MapNode(nextMapId++, [], node, "delete " + deletedProp);
+    child.isDictionary = true;
+    node.children.push(child);
+    return child;
+  }
+
+  function allNodes() {
+    if (!root) return [];
+    const result = [], queue = [root];
+    while (queue.length > 0) {
+      const n = queue.shift();
+      result.push(n);
+      for (const c of n.children) queue.push(c);
+    }
+    return result;
+  }
+
+  /* ---------- Layout ---------- */
+  function layoutTree() {
+    if (!root) return;
+    function subtreeWidth(node) {
+      if (node.children.length === 0) return 1;
+      let w = 0;
+      for (const c of node.children) w += subtreeWidth(c);
+      return w;
+    }
+    function assign(node, left, depth) {
+      const w = subtreeWidth(node);
+      const center = left + w / 2;
+      node.x = PAD_X + center * (NODE_W + H_GAP) - (NODE_W + H_GAP) / 2;
+      node.y = PAD_Y + depth * (NODE_H + V_GAP);
+      let childLeft = left;
+      for (const c of node.children) {
+        assign(c, childLeft, depth + 1);
+        childLeft += subtreeWidth(c);
+      }
+    }
+    assign(root, 0, 0);
+
+    const nodes = allNodes();
+    let maxX = 0, maxY = 0;
+    for (const n of nodes) {
+      if (n.x + NODE_W + PAD_X > maxX) maxX = n.x + NODE_W + PAD_X;
+      if (n.y + NODE_H + PAD_Y > maxY) maxY = n.y + NODE_H + PAD_Y;
+    }
+    svg.setAttribute("viewBox", "0 0 " + Math.max(maxX, 600) + " " + Math.max(maxY, 350));
+    svg.style.minWidth = Math.max(maxX, 600) + "px";
+    svg.style.minHeight = Math.max(maxY, 350) + "px";
+  }
+
+  /* ---------- SVG helper ---------- */
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+    return el;
+  }
+
+  /* ---------- Rendering ---------- */
+  let previousNodeIds = new Set();
+
+  function render(animate) {
+    layoutTree();
+    const nodes = allNodes();
+    const currentIds = new Set(nodes.map(n => n.id));
+    nodesGroup.innerHTML = "";
+    edgesGroup.innerHTML = "";
+    badgesGroup.innerHTML = "";
+
+    // Edges
+    for (const node of nodes) {
+      if (!node.parent) continue;
+      const p = node.parent;
+      const x1 = p.x + NODE_W / 2, y1 = p.y + NODE_H;
+      const x2 = node.x + NODE_W / 2, y2 = node.y;
+      const midY = (y1 + y2) / 2;
+      const isNew = animate && !previousNodeIds.has(node.id);
+
+      const path = svgEl("path", {
+        d: "M " + x1 + " " + y1 + " C " + x1 + " " + midY + ", " + x2 + " " + midY + ", " + x2 + " " + y2
+      });
+      path.classList.add("transition-line");
+      if (node.isDictionary) {
+        path.style.stroke = "#ff5566";
+        path.setAttribute("marker-end", "url(#arrowhead-red)");
+      }
+      if (isNew) path.classList.add("animating");
+      edgesGroup.appendChild(path);
+
+      const label = svgEl("text", {
+        x: (x1 + x2) / 2, y: midY - 6, "text-anchor": "middle"
+      });
+      label.classList.add("transition-label");
+      if (node.isDictionary) label.style.fill = "#ff5566";
+      if (isNew) label.classList.add("animating");
+      label.textContent = node.transitionProp;
+      edgesGroup.appendChild(label);
+    }
+
+    // Nodes
+    for (const node of nodes) {
+      const g = svgEl("g");
+      g.classList.add("map-node");
+      g.setAttribute("transform", "translate(" + node.x + "," + node.y + ")");
+      if (node.isDictionary) g.classList.add("dictionary");
+      if (activeNodes.includes(node)) g.classList.add("active");
+      if (animate && !previousNodeIds.has(node.id)) g.classList.add("animating");
+
+      const isActive = activeNodes.includes(node);
+      const rect = svgEl("rect", {
+        width: NODE_W, height: NODE_H,
+        fill: node.isDictionary ? "#3a1a1a" : "#22223a",
+        stroke: node.isDictionary ? "#ff4444" : (isActive ? "#6c6cff" : "#3a3a6a")
+      });
+      g.appendChild(rect);
+
+      // Map ID title
+      const title = svgEl("text", {
+        x: NODE_W / 2, y: 20, "text-anchor": "middle",
+        fill: node.isDictionary ? "#ff6666" : "#ccccff",
+        "font-size": 13, "font-weight": 700
+      });
+      title.textContent = node.shortLabel;
+      g.appendChild(title);
+
+      // Content area
+      if (node.isDictionary) {
+        const dl = svgEl("text", {
+          x: NODE_W / 2, y: 42, "text-anchor": "middle", fill: "#ff8888", "font-size": 11
+        });
+        dl.textContent = "Table de hachage";
+        g.appendChild(dl);
+        const sl = svgEl("text", {
+          x: NODE_W / 2, y: 58, "text-anchor": "middle",
+          fill: "#ff5555", "font-size": 10, "font-weight": 600
+        });
+        sl.textContent = "Acces lent";
+        g.appendChild(sl);
+      } else if (node.properties.length === 0) {
+        const el = svgEl("text", {
+          x: NODE_W / 2, y: 42, "text-anchor": "middle", fill: "#666688", "font-size": 11
+        });
+        el.textContent = "(vide)";
+        g.appendChild(el);
+      } else {
+        const propsStr = node.properties.join(", ");
+        const pt = svgEl("text", {
+          x: NODE_W / 2, y: 40, "text-anchor": "middle", fill: "#aaaacc",
+          "font-size": 11, "font-family": "'Consolas', 'Courier New', monospace"
+        });
+        pt.textContent = propsStr.length > 20 ? propsStr.substring(0, 18) + "..." : "{" + propsStr + "}";
+        g.appendChild(pt);
+
+        const st = svgEl("text", {
+          x: NODE_W / 2, y: 58, "text-anchor": "middle", "font-size": 10
+        });
+        if (node.properties.length <= IN_OBJECT_LIMIT) {
+          st.setAttribute("fill", "#44cc88");
+          st.textContent = "in-object (" + node.properties.length + "/" + IN_OBJECT_LIMIT + ")";
+        } else {
+          st.setAttribute("fill", "#ffaa44");
+          const b = node.properties.length - IN_OBJECT_LIMIT;
+          st.textContent = IN_OBJECT_LIMIT + " in-obj + " + b + " backing store";
+        }
+        g.appendChild(st);
+      }
+
+      // Property count badge
+      if (!node.isDictionary && node.properties.length > 0) {
+        const ok = node.properties.length <= IN_OBJECT_LIMIT;
+        const badge = svgEl("circle", {
+          cx: NODE_W - 8, cy: 8, r: 9,
+          fill: ok ? "#2a6644" : "#665522",
+          stroke: ok ? "#44cc88" : "#ffaa44", "stroke-width": 1.5
+        });
+        g.appendChild(badge);
+        const bt = svgEl("text", {
+          x: NODE_W - 8, y: 12, "text-anchor": "middle",
+          fill: "#e0e0e0", "font-size": 10, "font-weight": 700
+        });
+        bt.textContent = node.properties.length;
+        g.appendChild(bt);
+      }
+
+      // Offset label below node showing full properties
+      if (!node.isDictionary && node.properties.length > 3) {
+        const full = svgEl("text", {
+          x: NODE_W / 2, y: NODE_H - 6, "text-anchor": "middle",
+          fill: "#6666aa", "font-size": 9,
+          "font-family": "'Consolas', 'Courier New', monospace"
+        });
+        full.textContent = node.properties.join(", ");
+        g.appendChild(full);
+      }
+
+      nodesGroup.appendChild(g);
+    }
+
+    // Object badges (a, b, obj labels)
+    for (const badge of objectBadges) {
+      const node = nodes.find(n => n.id === badge.nodeId);
+      if (!node) continue;
+      const bx = node.x + NODE_W / 2 + badge.offsetX;
+      const by = node.y + NODE_H + 20;
+
+      const line = svgEl("line", {
+        x1: bx, y1: by - 6, x2: node.x + NODE_W / 2, y2: node.y + NODE_H,
+        stroke: badge.color || "#6c6cff", "stroke-width": 1.5, "stroke-dasharray": "4,3"
+      });
+      badgesGroup.appendChild(line);
+
+      const circle = svgEl("circle", {
+        cx: bx, cy: by + 6, r: 14,
+        fill: "#1a1a2e", stroke: badge.color || "#6c6cff", "stroke-width": 2
+      });
+      badgesGroup.appendChild(circle);
+
+      const text = svgEl("text", {
+        x: bx, y: by + 11, "text-anchor": "middle",
+        fill: badge.color || "#8888ff", "font-size": 13, "font-weight": 700
+      });
+      text.classList.add("object-badge");
+      text.textContent = badge.label;
+      badgesGroup.appendChild(text);
+    }
+
+    previousNodeIds = currentIds;
+  }
+
+  /* ---------- Interactive: add / delete property ---------- */
+  function handleAddProperty() {
+    const name = propInput.value.trim();
+    if (!name) return;
+    if (!/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name)) {
+      explanation.innerHTML = '<span class="label-warn">Nom de propriete invalide.</span> Utilisez un identifiant JavaScript valide.';
+      return;
+    }
+    if (activeNodes.length === 1 && activeNodes[0].properties.includes(name)) {
+      explanation.innerHTML = '<span class="label-warn">La propriete <code>' + name + '</code> existe deja dans le Map actuel.</span>';
+      propInput.value = "";
+      return;
+    }
+    const newActive = [];
+    for (const node of activeNodes) {
+      if (node.isDictionary) {
+        explanation.innerHTML = '<span class="label-bad">Impossible d\'ajouter une propriete en mode dictionnaire.</span>';
+        propInput.value = "";
+        return;
+      }
+      if (node.properties.includes(name)) continue;
+      newActive.push(addTransition(node, name));
+    }
+    if (newActive.length > 0) activeNodes = newActive;
+    propInput.value = "";
+    render(true);
+    updateInteractiveExplanation();
+    propInput.focus();
+  }
+
+  function handleDeleteProperty() {
+    const name = propInput.value.trim();
+    if (!name) {
+      explanation.innerHTML = '<span class="label-warn">Entrez le nom de la propriete a supprimer.</span>';
+      return;
+    }
+    const newActive = [];
+    for (const node of activeNodes) {
+      if (node.isDictionary) {
+        explanation.innerHTML = '<span class="label-bad">L\'objet est deja en mode dictionnaire.</span>';
+        propInput.value = "";
+        return;
+      }
+      if (!node.properties.includes(name)) {
+        explanation.innerHTML = '<span class="label-warn">La propriete <code>' + name + '</code> n\'existe pas dans le Map actuel.</span>';
+        propInput.value = "";
+        return;
+      }
+      newActive.push(addDictionaryTransition(node, name));
+    }
+    if (newActive.length > 0) activeNodes = newActive;
+    propInput.value = "";
+    render(true);
+    explanation.innerHTML =
+      '<span class="label-bad"><code>delete obj.' + name + '</code> convertit l\'objet en mode dictionnaire (table de hachage). ' +
+      'Les acces aux proprietes deviennent lents car V8 ne peut plus utiliser les inline caches.</span>';
+    propInput.focus();
+  }
+
+  function updateInteractiveExplanation() {
+    if (!activeNodes.length) return;
+    const node = activeNodes[0];
+    if (node.isDictionary) {
+      explanation.innerHTML = '<span class="label-bad">Mode dictionnaire — acces aux proprietes non optimise.</span>';
+      return;
+    }
+    const count = node.properties.length;
+    if (count === 0) {
+      explanation.innerHTML = 'Objet vide. Commencez a ajouter des proprietes pour voir les transitions de Maps.';
+    } else if (count <= IN_OBJECT_LIMIT) {
+      explanation.innerHTML =
+        '<span class="label-ok">Map' + node.id + '</span> — ' + count +
+        ' propriete(s) stockee(s) <span class="label-ok">in-object</span> (rapide). ' +
+        'Encore ' + (IN_OBJECT_LIMIT - count) + ' emplacement(s) in-object disponible(s).';
+    } else {
+      const backing = count - IN_OBJECT_LIMIT;
+      explanation.innerHTML =
+        '<span class="label-warn">Map' + node.id + '</span> — ' + IN_OBJECT_LIMIT +
+        ' proprietes in-object + ' + backing +
+        ' dans le <span class="label-warn">backing store</span> (un peu plus lent).';
+    }
+  }
+
+  /* ---------- Reset ---------- */
+  function reset() {
+    createRoot();
+    previousNodeIds = new Set();
+    render(false);
+    explanation.innerHTML = 'Ajoutez des proprietes une par une ou choisissez un scenario pre-charge ci-dessus.';
+    propInput.value = "";
+    propInput.focus();
+  }
+
+  /* ---------- Scenario 1: Meme forme ---------- */
+  function scenarioSameShape() {
+    createRoot();
+    previousNodeIds = new Set();
+    const map1 = addTransition(root, "x");
+    const map2 = addTransition(map1, "y");
+    activeNodes = [map2];
+    objectBadges = [
+      { nodeId: map2.id, label: "a", offsetX: -18, color: "#44cc88" },
+      { nodeId: map2.id, label: "b", offsetX: 18,  color: "#44aaff" }
+    ];
+    render(false);
+    animateSequence([root.id, map1.id, map2.id]);
+    explanation.innerHTML =
+      '<code>const a = {}; a.x = 1; a.y = 2;</code> &nbsp;/&nbsp; ' +
+      '<code>const b = {}; b.x = 10; b.y = 20;</code><br>' +
+      '<span class="label-ok">a et b partagent les memes Maps &rarr; IC monomorphe &#x2705;</span>';
+  }
+
+  /* ---------- Scenario 2: Forme differente ---------- */
+  function scenarioDiffShape() {
+    createRoot();
+    previousNodeIds = new Set();
+    const map1x = addTransition(root, "x");
+    const map2xy = addTransition(map1x, "y");
+    const map3y = addTransition(root, "y");
+    const map4yx = addTransition(map3y, "x");
+    activeNodes = [map2xy, map4yx];
+    objectBadges = [
+      { nodeId: map2xy.id, label: "a", offsetX: 0, color: "#44cc88" },
+      { nodeId: map4yx.id, label: "b", offsetX: 0, color: "#ffaa44" }
+    ];
+    render(false);
+    animateSequence([root.id, map1x.id, map2xy.id, map3y.id, map4yx.id]);
+    explanation.innerHTML =
+      '<code>a: x puis y</code> &nbsp;/&nbsp; <code>b: y puis x</code><br>' +
+      '<span class="label-warn">a et b ont des Maps differentes &rarr; IC polymorphe &#x26A0;&#xFE0F;</span>';
+  }
+
+  /* ---------- Scenario 3: delete -> dictionnaire ---------- */
+  function scenarioDelete() {
+    createRoot();
+    previousNodeIds = new Set();
+    const map1 = addTransition(root, "x");
+    const map2 = addTransition(map1, "y");
+    const dict = addDictionaryTransition(map2, "x");
+    activeNodes = [dict];
+    objectBadges = [
+      { nodeId: dict.id, label: "obj", offsetX: 0, color: "#ff5566" }
+    ];
+    render(false);
+    animateSequence([root.id, map1.id, map2.id, dict.id]);
+    explanation.innerHTML =
+      '<code>const obj = {}; obj.x = 1; obj.y = 2; delete obj.x;</code><br>' +
+      '<span class="label-bad">delete convertit l\'objet en mode dictionnaire &rarr; acces lent &#x274C;</span>';
+  }
+
+  /* ---------- Sequential animation ---------- */
+  function animateSequence(nodeIds) {
+    const allNodeEls = nodesGroup.querySelectorAll(".map-node");
+    const allEdgeEls = edgesGroup.querySelectorAll(".transition-line");
+    const allLabelEls = edgesGroup.querySelectorAll(".transition-label");
+
+    allNodeEls.forEach(function (el) { el.style.opacity = "0"; });
+    allEdgeEls.forEach(function (el) { el.style.opacity = "0"; });
+    allLabelEls.forEach(function (el) { el.style.opacity = "0"; });
+
+    var badgeEls = badgesGroup.children;
+    for (var i = 0; i < badgeEls.length; i++) badgeEls[i].style.opacity = "0";
+
+    const nodes = allNodes();
+    var delay = 100;
+
+    for (var idx = 0; idx < nodeIds.length; idx++) {
+      (function (nodeId, d) {
+        setTimeout(function () {
+          var nodeIndex = nodes.findIndex(function (n) { return n.id === nodeId; });
+          if (nodeIndex >= 0 && allNodeEls[nodeIndex]) {
+            allNodeEls[nodeIndex].style.opacity = "1";
+            allNodeEls[nodeIndex].classList.add("animating");
+          }
+          var edgeIdx = nodeIndex - 1;
+          if (edgeIdx >= 0 && allEdgeEls[edgeIdx]) {
+            allEdgeEls[edgeIdx].style.opacity = "1";
+            allEdgeEls[edgeIdx].classList.add("animating");
+          }
+          if (edgeIdx >= 0 && allLabelEls[edgeIdx]) {
+            allLabelEls[edgeIdx].style.opacity = "1";
+            allLabelEls[edgeIdx].classList.add("animating");
+          }
+        }, d);
+      })(nodeIds[idx], delay);
+      delay += 350;
+    }
+
+    setTimeout(function () {
+      for (var i = 0; i < badgeEls.length; i++) {
+        badgeEls[i].style.opacity = "1";
+        badgeEls[i].style.transition = "opacity .4s";
+      }
+    }, delay + 100);
+  }
+
+  /* ---------- Event listeners ---------- */
+  document.getElementById("btnAdd").addEventListener("click", handleAddProperty);
+  document.getElementById("btnDelete").addEventListener("click", handleDeleteProperty);
+  document.getElementById("btnReset").addEventListener("click", reset);
+  document.getElementById("scenSame").addEventListener("click", scenarioSameShape);
+  document.getElementById("scenDiff").addEventListener("click", scenarioDiffShape);
+  document.getElementById("scenDelete").addEventListener("click", scenarioDelete);
+  propInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); handleAddProperty(); }
+  });
+
+  /* ---------- Init ---------- */
+  createRoot();
+  render(false);
+})();
+</script>
+</body>
+</html>
