@@ -24,13 +24,13 @@
 
 JavaScript utilise la **portée lexicale** (ou statique) : la portée d'une variable est déterminée par sa **position dans le code source**, pas par l'endroit où la fonction est appelée.
 
-```javascript
+```typescript
 const x = 'global';
 
-function outer() {
+function outer(): () => void {
   const x = 'outer';
 
-  function inner() {
+  function inner(): void {
     console.log(x); // 'outer' — résolu lexicalement, pas dynamiquement
   }
 
@@ -98,8 +98,8 @@ Une **closure** est la combinaison d'une fonction et d'une **référence** vers 
 
 Quand une fonction est créée (pas appelée, **créée**), le moteur stocke dans un slot interne `[[Environment]]` une référence vers le LexicalEnvironment courant.
 
-```javascript
-function createCounter() {
+```typescript
+function createCounter(): { increment(): void; getCount(): number } {
   let count = 0;  // variable dans le scope de createCounter
 
   return {
@@ -159,12 +159,12 @@ console.log(counter.getCount()); // 2
 
 Point critique : en théorie (selon la spec), une closure retient l'**intégralité** de l'objet de scope (EnvironmentRecord) de son contexte englobant, **pas seulement** les variables qu'elle utilise.
 
-```javascript
-function createClosure() {
+```typescript
+function createClosure(): () => number {
   const bigArray = new Array(1_000_000).fill('data');  // ~8 Mo
   const smallValue = 42;
 
-  return function() {
+  return function(): number {
     return smallValue; // n'utilise que smallValue
   };
 }
@@ -178,12 +178,12 @@ const fn = createClosure();
 
 **ATTENTION** : cette optimisation a des limites :
 
-```javascript
-function createClosure() {
+```typescript
+function createClosure(): () => unknown {
   const bigArray = new Array(1_000_000).fill('data');
   const smallValue = 42;
 
-  return function() {
+  return function(): unknown {
     return eval('bigArray'); // eval() empêche l'optimisation !
   };
 }
@@ -193,13 +193,13 @@ function createClosure() {
 
 De même, si **deux closures** partagent le même scope, une seule a besoin d'une variable, mais **les deux** partagent le même objet Context :
 
-```javascript
-function outer() {
+```typescript
+function outer(): () => number {
   const bigData = new Array(1_000_000).fill('x');
   const small = 1;
 
-  function usesSmall() { return small; }
-  function usesBig() { return bigData.length; }
+  function usesSmall(): number { return small; }
+  function usesBig(): number { return bigData.length; }
 
   return usesSmall; // on ne retourne QUE usesSmall
   // usesBig n'est pas retourné, mais bigData sera-t-il GC ?
@@ -221,12 +221,12 @@ On peut observer concrètement ce que capture une closure en utilisant les DevTo
 
 Dans la console Chrome, utilise `console.dir()` pour inspecter le slot interne `[[Scopes]]` d'une fonction :
 
-```javascript
-function outer() {
+```typescript
+function outer(): () => number {
   const secret = 42;
   const message = 'hello';
 
-  return function inner() {
+  return function inner(): number {
     return secret;
   };
 }
@@ -293,9 +293,9 @@ Tu peux aussi utiliser `console.dir()` dans la console Firefox, mais l'affichage
 
 Les closures sont la cause numéro un de fuites mémoire en JavaScript :
 
-```javascript
+```typescript
 // Fuite classique : event listeners non nettoyés
-function setupHandler() {
+function setupHandler(): void {
   const hugeData = new Array(10_000_000).fill('leak');
 
   document.getElementById('btn').addEventListener('click', function handler() {
@@ -307,10 +307,10 @@ function setupHandler() {
 }
 ```
 
-```javascript
+```typescript
 // Fuite classique : timers
-function startPolling() {
-  const cache = {};
+function startPolling(): void {
+  const cache: Record<string, number[]> = {};
 
   setInterval(() => {
     cache[Date.now()] = new Array(10000);
@@ -328,12 +328,12 @@ function startPolling() {
 
 V8 utilise des **hidden classes** (décrivant la "forme" d'un objet — quelles propriétés, dans quel ordre) et des **inline caches** (IC — le moteur mémorise l'emplacement mémoire d'une propriété pour y accéder plus vite la prochaine fois). Les closures stockent leurs variables capturées dans un objet **Context** qui est soumis à ces mêmes mécanismes.
 
-```javascript
-function createPair(name) {
+```typescript
+function createPair(name: string): { getName(): string; setName(n: string): void } {
   // V8 crée un objet Context : { name: ... }
   return {
     getName() { return name; },
-    setName(n) { name = n; }
+    setName(n: string) { name = n; }
   };
 }
 
@@ -346,9 +346,9 @@ const pair2 = createPair('Bob');
 
 **Quand ça se dégrade** : si la forme des Context objects varie (par exemple à cause d'`eval()` ou de code dynamique qui ajoute des variables), les inline caches deviennent **polymorphiques** ou **mégamorphiques**, et l'accès aux variables de closure ralentit significativement.
 
-```javascript
+```typescript
 // Mauvais pattern : eval() casse le Context specialization
-function createBroken(code) {
+function createBroken(code: string): () => number {
   let x = 1;
   eval(code); // V8 ne peut pas optimiser le Context
   return () => x;
@@ -363,7 +363,7 @@ function createBroken(code) {
 
 > 💡 **Rappel** : `with` est une instruction JavaScript qui permet d'ajouter un objet temporairement en tête de la chaîne de scopes. Elle est **interdite** en mode strict et fortement déconseillée. On l'explique ici pour la culture et parce que tu peux la rencontrer dans du vieux code.
 
-```javascript
+```typescript
 const obj = { x: 10, y: 20 };
 
 with (obj) {
@@ -379,16 +379,16 @@ with (obj) {
 
 On a vu dans le module 01 que `eval()` est problématique. Voici son impact spécifique sur les closures : `eval()` empêche le Context specialization car le moteur ne peut pas savoir statiquement quelles variables seront accédées.
 
-```javascript
-function withoutEval() {
+```typescript
+function withoutEval(): () => number {
   const a = 1, b = 2, c = new Array(1_000_000).fill('data'); // 8 Mo
-  return function() { return a; };
+  return function(): number { return a; };
 }
 // V8 libère b et c → Context ne contient que { a: 1 } → ~0 Mo
 
-function withEval() {
+function withEval(): () => unknown {
   const a = 1, b = 2, c = new Array(1_000_000).fill('data'); // 8 Mo
-  return function() { return eval('c.length'); }; // eval → tout est retenu
+  return function(): unknown { return eval('c.length'); }; // eval → tout est retenu
 }
 // V8 DOIT conserver a, b ET c → Context contient tout → ~8 Mo
 ```
@@ -399,13 +399,13 @@ function withEval() {
 
 Le **Module Pattern** exploite les closures pour créer de l'encapsulation (variables privées) :
 
-```javascript
+```typescript
 const module = (function() {
   // IIFE crée un scope isolé
   let _private = 0;          // inaccessible depuis l'extérieur
   const _SECRET = 'hidden';
 
-  function _internalHelper() {
+  function _internalHelper(): number {
     return _private * 2;
   }
 
@@ -429,7 +429,7 @@ L'**IIFE** (Immediately Invoked Function Expression — expression de fonction i
 
 Avec `let` et `const`, chaque itération d'une boucle `for` crée un **nouveau** LexicalEnvironment :
 
-```javascript
+```typescript
 // Piège classique avec var
 for (var i = 0; i < 3; i++) {
   setTimeout(() => console.log(i), 100);
@@ -466,9 +466,9 @@ ES2021 a introduit deux outils pour travailler avec le ramasse-miettes :
 
 Une `WeakRef` (référence faible) contient une référence vers un objet qui **n'empêche pas** le GC de le collecter. Contrairement à une référence normale (dite "forte"), la WeakRef dit au GC : "tu peux supprimer cet objet si tu en as besoin, je m'en remettrai."
 
-```javascript
-let target = { data: 'important' };
-const weakRef = new WeakRef(target);
+```typescript
+let target: { data: string } | null = { data: 'important' };
+const weakRef = new WeakRef<{ data: string }>(target);
 
 console.log(weakRef.deref()); // { data: 'important' }
 
@@ -482,8 +482,8 @@ target = null; // plus de référence forte
 
 Permet d'enregistrer un **callback** (fonction de rappel) qui sera appelé quand un objet est collecté par le GC :
 
-```javascript
-const registry = new FinalizationRegistry((heldValue) => {
+```typescript
+const registry = new FinalizationRegistry<string>((heldValue: string) => {
   console.log(`Objet avec tag "${heldValue}" a été collecté par le GC`);
 });
 
@@ -498,9 +498,9 @@ obj = null;
 
 ### 14. Diagramme mémoire complet d'une closure
 
-```javascript
-function createAdder(x) {
-  return function adder(y) {
+```typescript
+function createAdder(x: number): (y: number) => number {
+  return function adder(y: number): number {
     return x + y;
   };
 }
@@ -587,16 +587,16 @@ Dans Firefox : ouvre les DevTools (`F12`) → onglet **Débogueur** → place un
 
 ### Demo 1 : Mesurer la mémoire retenue par une closure
 
-```javascript
+```typescript
 // Node.js
-function getMemoryMB() {
+function getMemoryMB(): string {
   const mem = process.memoryUsage();
   return (mem.heapUsed / 1024 / 1024).toFixed(2);
 }
 
 console.log(`Avant : ${getMemoryMB()} MB`);
 
-const closures = [];
+const closures: (() => number)[] = [];
 
 for (let i = 0; i < 100; i++) {
   const bigArray = new Array(100_000).fill(`data-${i}`);
@@ -612,8 +612,8 @@ console.log(`Après closures : ${getMemoryMB()} MB`);
 closures.length = 0;
 
 // Forcer le GC (nécessite --expose-gc)
-if (global.gc) {
-  global.gc();
+if ((globalThis as any).gc) {
+  (globalThis as any).gc();
   console.log(`Après GC : ${getMemoryMB()} MB`);
 }
 
@@ -622,14 +622,14 @@ if (global.gc) {
 
 ### Demo 2 : Prouver que le scope est lexical, pas dynamique
 
-```javascript
+```typescript
 const scope = 'global';
 
-function printScope() {
+function printScope(): void {
   console.log(scope); // résolu au moment de la CRÉATION de printScope
 }
 
-function wrapper() {
+function wrapper(): void {
   const scope = 'local';
   printScope(); // affiche 'global', pas 'local'
 }
@@ -639,14 +639,14 @@ wrapper();
 
 ### Demo 3 : Observer le partage de Context entre closures
 
-```javascript
-function shared() {
+```typescript
+function shared(): { getA(): number; getB(): number; setA(val: number): void } {
   let a = 1;
   let b = 2;
 
-  function getA() { return a; }
-  function getB() { return b; }
-  function setA(val) { a = val; }
+  function getA(): number { return a; }
+  function getB(): number { return b; }
+  function setA(val: number): void { a = val; }
 
   return { getA, getB, setA };
 }
@@ -660,17 +660,17 @@ console.log(obj.getB()); // 2
 
 ### Demo 4 : WeakRef en action
 
-```javascript
+```typescript
 // Node.js avec --expose-gc
 
-let bigObject = { data: new Array(1_000_000).fill('x') };
-const ref = new WeakRef(bigObject);
+let bigObject: { data: string[] } | null = { data: new Array(1_000_000).fill('x') };
+const ref = new WeakRef<{ data: string[] }>(bigObject);
 
 console.log('Avant null :', ref.deref() ? 'vivant' : 'collecté');
 
 bigObject = null; // supprime la référence forte
 
-global.gc(); // force le GC
+(globalThis as any).gc(); // force le GC
 
 console.log('Après GC :', ref.deref() ? 'vivant' : 'collecté');
 // "Après GC : collecté"
@@ -678,11 +678,11 @@ console.log('Après GC :', ref.deref() ? 'vivant' : 'collecté');
 
 ### Demo 5 : Fuite mémoire classique avec closures
 
-```javascript
+```typescript
 // Exemple de fuite : closures qui s'accumulent
-const leaked = [];
+const leaked: (() => string[])[] = [];
 
-function createLeak() {
+function createLeak(): void {
   const heavy = new Array(1_000_000).fill('leak');
   leaked.push(() => heavy); // chaque closure retient 1M d'éléments
 }
@@ -697,12 +697,12 @@ for (let i = 0; i < 50; i++) {
 
 ### Demo 6 : Inspecter `[[Scopes]]` dans Chrome
 
-```javascript
+```typescript
 // Copie-colle dans la console Chrome (F12 → Console)
-function createGreeter(greeting) {
+function createGreeter(greeting: string): (name: string) => string {
   const prefix = '[LOG]';
   const unusedData = 'will this be captured?';
-  return function greet(name) { return `${prefix} ${greeting}, ${name}!`; };
+  return function greet(name: string): string { return `${prefix} ${greeting}, ${name}!`; };
 }
 const hello = createGreeter('Bonjour');
 console.dir(hello);
@@ -714,11 +714,11 @@ console.log(hello('Marie')); // "[LOG] Bonjour, Marie!"
 
 ### Demo 7 : Impact de `with` sur la résolution de scope
 
-```javascript
+```typescript
 // ATTENTION : ne fonctionne PAS en mode strict — présenté à titre éducatif
 const obj = { x: 'with-scope' };
 
-function demo() {
+function demo(): void {
   const x = 'local';
   with (obj) {
     console.log(x); // 'with-scope' — obj est en tête de la chaîne de scopes
@@ -786,9 +786,9 @@ Voici un résumé ultra-simplifié de ce module. Si tu as compris ces points, tu
 
 Quel est l'affichage de ce code ? Pourquoi ?
 
-```javascript
-function createFunctions() {
-  const result = [];
+```typescript
+function createFunctions(): (() => void)[] {
+  const result: (() => void)[] = [];
 
   for (var i = 0; i < 3; i++) {
     result.push(

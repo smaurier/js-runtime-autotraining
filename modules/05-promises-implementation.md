@@ -151,7 +151,7 @@ Quand on appelle `resolve(x)`, la valeur `x` subit une analyse appelée la **Pro
 
 C'est l'un des aspects les plus subtils et les moins compris des Promises. Quand on résout une Promise avec un **thenable** (un objet qui a une méthode `.then()`), V8 crée un job spécial :
 
-```javascript
+```typescript
 // Cas 1 : résolution avec une valeur primitive
 new Promise(resolve => resolve(42));
 // -> fulfill immédiat, pas de tick supplémentaire
@@ -164,9 +164,9 @@ new Promise(resolve => resolve(Promise.resolve(42)));
 
 Le **PromiseResolveThenableJob** fait ceci en interne :
 
-```javascript
+```typescript
 // Pseudocode de PromiseResolveThenableJob :
-function PromiseResolveThenableJob(promiseToResolve, thenable, then) {
+function PromiseResolveThenableJob(promiseToResolve: Promise<unknown>, thenable: PromiseLike<unknown>, then: Function): void {
   // Appeler then sur le thenable avec les résolveurs de promiseToResolve
   then.call(
     thenable,
@@ -200,7 +200,7 @@ Visualisation du coût en ticks :
 
 Ces deux formes semblent identiques mais ont un comportement subtilement différent :
 
-```javascript
+```typescript
 // Cas avec une valeur primitive : comportement identique
 Promise.resolve(42);           // -> Promise fulfilled avec 42
 new Promise(r => r(42));       // -> Promise fulfilled avec 42
@@ -214,7 +214,7 @@ new Promise(r => r(p));        // -> crée une NOUVELLE Promise qui adopte p
                                //    (tick supplémentaire !)
 ```
 
-```javascript
+```typescript
 // Preuve de la différence
 const original = Promise.resolve('hello');
 
@@ -262,7 +262,7 @@ Ce mécanisme est défini dans ECMA-262 section 27.2.2.2. Voici ce que V8 fait q
      └── Les handlers .then() sont planifiés comme microtâches (1 tick)
 ```
 
-```javascript
+```typescript
 // Impact pratique : combien de ticks avant d'obtenir la valeur ?
 
 // 0 ticks extra (résolution directe)
@@ -301,22 +301,30 @@ Promise.resolve()
 
 Voici une implémentation pas à pas conforme à la spécification Promises/A+ :
 
-```javascript
+```typescript
 // promise-aplus.js — Implémentation Promises/A+ complète
 
-const PENDING = 'pending';
-const FULFILLED = 'fulfilled';
-const REJECTED = 'rejected';
+const PENDING = 'pending' as const;
+const FULFILLED = 'fulfilled' as const;
+const REJECTED = 'rejected' as const;
+
+type PromiseState = typeof PENDING | typeof FULFILLED | typeof REJECTED;
 
 class MyPromise {
-  constructor(executor) {
+  private _state: PromiseState;
+  private _value: unknown;
+  private _reason: unknown;
+  private _onFulfilledCallbacks: (() => void)[];
+  private _onRejectedCallbacks: (() => void)[];
+
+  constructor(executor: (resolve: (value: unknown) => void, reject: (reason: unknown) => void) => void) {
     this._state = PENDING;
     this._value = undefined;
     this._reason = undefined;
     this._onFulfilledCallbacks = [];
     this._onRejectedCallbacks = [];
 
-    const resolve = (value) => {
+    const resolve = (value: unknown): void => {
       // Si value est un thenable, on doit unwrap
       if (value instanceof MyPromise) {
         value.then(resolve, reject);
@@ -328,7 +336,7 @@ class MyPromise {
       this._onFulfilledCallbacks.forEach(fn => fn());
     };
 
-    const reject = (reason) => {
+    const reject = (reason: unknown): void => {
       if (this._state !== PENDING) return;
       this._state = REJECTED;
       this._reason = reason;
@@ -342,7 +350,7 @@ class MyPromise {
     }
   }
 
-  then(onFulfilled, onRejected) {
+  then(onFulfilled?: ((value: unknown) => unknown) | null, onRejected?: ((reason: unknown) => unknown) | null): MyPromise {
     // 2.2.1 : les arguments sont optionnels
     onFulfilled = typeof onFulfilled === 'function'
       ? onFulfilled
@@ -390,23 +398,23 @@ class MyPromise {
     return promise2;
   }
 
-  catch(onRejected) {
+  catch(onRejected?: ((reason: unknown) => unknown) | null): MyPromise {
     return this.then(null, onRejected);
   }
 
-  finally(onFinally) {
+  finally(onFinally: () => unknown): MyPromise {
     return this.then(
       (value) => MyPromise.resolve(onFinally()).then(() => value),
       (reason) => MyPromise.resolve(onFinally()).then(() => { throw reason; })
     );
   }
 
-  static resolve(value) {
+  static resolve(value: unknown): MyPromise {
     if (value instanceof MyPromise) return value; // raccourci spec
     return new MyPromise((resolve) => resolve(value));
   }
 
-  static reject(reason) {
+  static reject(reason: unknown): MyPromise {
     return new MyPromise((_, reject) => reject(reason));
   }
 }
@@ -414,9 +422,9 @@ class MyPromise {
 
 La **Promise Resolution Procedure** (spec section 2.3) :
 
-```javascript
+```typescript
 // 2.3 : The Promise Resolution Procedure
-function resolvePromise(promise2, x, resolve, reject) {
+function resolvePromise(promise2: MyPromise, x: unknown, resolve: (value: unknown) => void, reject: (reason: unknown) => void): void {
   // 2.3.1 : si promise2 === x, TypeError (cycle)
   if (promise2 === x) {
     return reject(new TypeError('Chaining cycle detected'));
@@ -552,10 +560,10 @@ function resolvePromise(promise2, x, resolve, reject) {
 
 Implémentation de `Promise.all` avec notre `MyPromise` :
 
-```javascript
-MyPromise.all = function(promises) {
+```typescript
+MyPromise.all = function(promises: MyPromise[]): MyPromise {
   return new MyPromise((resolve, reject) => {
-    const results = [];
+    const results: unknown[] = [];
     let remaining = 0;
 
     if (promises.length === 0) {
@@ -579,7 +587,7 @@ MyPromise.all = function(promises) {
   });
 };
 
-MyPromise.race = function(promises) {
+MyPromise.race = function(promises: MyPromise[]): MyPromise {
   return new MyPromise((resolve, reject) => {
     promises.forEach((promise) => {
       MyPromise.resolve(promise).then(resolve, reject);
@@ -587,9 +595,9 @@ MyPromise.race = function(promises) {
   });
 };
 
-MyPromise.allSettled = function(promises) {
+MyPromise.allSettled = function(promises: MyPromise[]): MyPromise {
   return new MyPromise((resolve) => {
-    const results = [];
+    const results: { status: string; value?: unknown; reason?: unknown }[] = [];
     let remaining = promises.length;
 
     if (remaining === 0) {
@@ -612,9 +620,9 @@ MyPromise.allSettled = function(promises) {
   });
 };
 
-MyPromise.any = function(promises) {
+MyPromise.any = function(promises: MyPromise[]): MyPromise {
   return new MyPromise((resolve, reject) => {
-    const errors = [];
+    const errors: unknown[] = [];
     let rejectedCount = 0;
     const total = promises.length;
 
@@ -666,7 +674,7 @@ Quand une Promise est rejetée sans handler `.catch()`, le moteur doit le signal
   └─────────────────────────────────────────────────┘
 ```
 
-```javascript
+```typescript
 // Navigateur
 window.addEventListener('unhandledrejection', (event) => {
   console.log('Promise rejetée non gérée:', event.reason);
@@ -684,7 +692,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 **Timing subtil** : un `.catch()` ajouté de manière asynchrone dans le même tick empêche le signalement :
 
-```javascript
+```typescript
 const p = Promise.reject(new Error('boom'));
 
 // Ceci est une microtâche — exécutée dans le même tick
@@ -724,12 +732,12 @@ V8 a considérablement optimisé les Promises au fil des versions :
 
 ### Demo 1 — Observer le thenable unwrapping
 
-```javascript
+```typescript
 // demo1-thenable-unwrapping.js
 
 // Compteur de ticks
-let tick = 0;
-function nextTick() {
+let tick: number = 0;
+function nextTick(): Promise<void> {
   return Promise.resolve().then(() => {
     tick++;
     console.log(`  [tick ${tick}]`);
@@ -766,7 +774,7 @@ setTimeout(() => {
 
 ### Demo 2 — Promise.resolve(p) vs new Promise(r => r(p))
 
-```javascript
+```typescript
 // demo2-resolve-vs-new.js
 
 const original = Promise.resolve('valeur');
@@ -801,7 +809,7 @@ Promise.resolve()
 
 ### Demo 3 — Implémentation MyPromise avec tests
 
-```javascript
+```typescript
 // demo3-mypromise-test.js
 // Coller le code MyPromise + resolvePromise ci-dessus, puis :
 
@@ -869,7 +877,7 @@ MyPromise.resolve('hello')
 
 ### Demo 4 — Visualiser les PromiseReaction jobs
 
-```javascript
+```typescript
 // demo4-reaction-jobs.js
 
 // Simuler l'observation des microtâches créées par les Promises
@@ -903,18 +911,18 @@ console.log('3 handlers enregistrés (Promise encore pending)\n');
 
 ### Demo 5 — Impact du thenable unwrapping sur async/await
 
-```javascript
+```typescript
 // demo5-async-await-ticks.js
 
-async function directReturn() {
+async function directReturn(): Promise<number> {
   return 42; // résolution avec valeur primitive
 }
 
-async function promiseReturn() {
+async function promiseReturn(): Promise<number> {
   return Promise.resolve(42); // résolution avec thenable !
 }
 
-async function awaitAndReturn() {
+async function awaitAndReturn(): Promise<number> {
   const val = await Promise.resolve(42);
   return val; // après await, val est déjà unwrappé
 }
@@ -1046,7 +1054,7 @@ Reviens relire ce module après le lab — implémenter ta propre Promise rend t
 
 Quel est l'ordre exact de sortie du code suivant ?
 
-```javascript
+```typescript
 const p1 = new Promise(resolve => {
   console.log('A');
   resolve(Promise.resolve('B'));

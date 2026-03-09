@@ -195,11 +195,11 @@ Idéal pour comprendre *comment* on arrive au hotspot.
 
 #### 4.1. `perf_hooks` — API de mesure intégrée
 
-```javascript
+```typescript
 const { performance, PerformanceObserver } = require('node:perf_hooks');
 
 // Observer pour collecter les mesures automatiquement
-const obs = new PerformanceObserver((list) => {
+const obs = new PerformanceObserver((list: PerformanceObserverEntryList) => {
   for (const entry of list.getEntries()) {
     console.log(`${entry.name}: ${entry.duration.toFixed(2)} ms`);
   }
@@ -276,9 +276,9 @@ la table de hachage à chaque accès).
   MEGA:  |===================|         ~10-100x
 ```
 
-```javascript
+```typescript
 // --- MAUVAIS : mégamorphique ---
-function getX(obj) {
+function getX(obj: { x: number; [key: string]: unknown }): number {
   return obj.x; // ce site voit des dizaines de shapes différentes
 }
 
@@ -291,13 +291,15 @@ getX({ w: 0, x: 1 });
 
 // --- BON : monomorphique ---
 class Point {
-  constructor(x, y) {
+  x: number;
+  y: number;
+  constructor(x: number, y: number) {
     this.x = x;
     this.y = y;
   }
 }
 
-function getX(point) {
+function getX(point: Point): number {
   return point.x; // toujours la même hidden class
 }
 
@@ -309,9 +311,9 @@ getX(p2); // même shape => cache hit
 
 #### 5.2. Hidden class thrashing
 
-```javascript
+```typescript
 // --- MAUVAIS : ordre d'initialisation incohérent ---
-function createUser(name, age) {
+function createUser(name: string, age: number): { name: string; age: number } {
   const obj = {};
   if (age > 18) {
     obj.age = age;    // propriété 'age' d'abord
@@ -327,7 +329,7 @@ function createUser(name, age) {
 }
 
 // --- BON : initialisation uniforme ---
-function createUser(name, age) {
+function createUser(name: string, age: number): { name: string; age: number } {
   return { name, age }; // toujours le même ordre => une seule HC
 }
 ```
@@ -359,9 +361,9 @@ function createUser(name, age) {
 
 #### 5.3. Allocation excessive dans les boucles chaudes
 
-```javascript
+```typescript
 // --- MAUVAIS : allocation dans la boucle ---
-function processPixels(pixels) {
+function processPixels(pixels: number[]): void {
   for (let i = 0; i < pixels.length; i++) {
     const color = { r: 0, g: 0, b: 0 }; // nouvel objet à chaque itération !
     color.r = pixels[i] & 0xFF;
@@ -373,7 +375,7 @@ function processPixels(pixels) {
 }
 
 // --- BON : réutilisation d'objet ---
-function processPixels(pixels) {
+function processPixels(pixels: number[]): void {
   const color = { r: 0, g: 0, b: 0 }; // un seul objet, réutilisé
   for (let i = 0; i < pixels.length; i++) {
     color.r = pixels[i] & 0xFF;
@@ -402,9 +404,9 @@ function processPixels(pixels) {
 
 #### 5.4. Concaténation de chaînes dans les boucles
 
-```javascript
+```typescript
 // --- MAUVAIS : concaténation O(n^2) en mémoire ---
-function buildCSV(rows) {
+function buildCSV(rows: string[][]): string {
   let csv = '';
   for (const row of rows) {
     csv += row.join(',') + '\n'; // chaque += peut copier tout le contenu
@@ -414,7 +416,7 @@ function buildCSV(rows) {
 // Avec 100 000 lignes : copies intermédiaires massives
 
 // --- BON : array.join() O(n) ---
-function buildCSV(rows) {
+function buildCSV(rows: string[][]): string {
   const lines = new Array(rows.length);
   for (let i = 0; i < rows.length; i++) {
     lines[i] = rows[i].join(',');
@@ -449,9 +451,9 @@ function buildCSV(rows) {
 
 #### 5.5. `JSON.parse`/`JSON.stringify` dans les chemins chauds
 
-```javascript
+```typescript
 // --- MAUVAIS : deep clone par JSON round-trip ---
-function processItem(template) {
+function processItem(template: Record<string, unknown>): void {
   for (let i = 0; i < 100_000; i++) {
     const item = JSON.parse(JSON.stringify(template)); // TRÈS coûteux
     item.id = i;
@@ -482,7 +484,7 @@ function processItem(template) {
 
 #### 5.6. I/O synchrone dans la boucle d'événements Node.js
 
-```javascript
+```typescript
 // --- MAUVAIS : bloque l'event loop ---
 const fs = require('node:fs');
 app.get('/config', (req, res) => {
@@ -534,9 +536,14 @@ au lieu de les laisser au garbage collector.
   +-------+-------+-------+-------+-------+
 ```
 
-```javascript
-class ObjectPool {
-  constructor(factory, reset, initialSize = 100) {
+```typescript
+class ObjectPool<T> {
+  private _factory: () => T;
+  private _reset: (obj: T) => void;
+  private _pool: T[];
+  private _size: number;
+
+  constructor(factory: () => T, reset: (obj: T) => void, initialSize: number = 100) {
     this._factory = factory;
     this._reset = reset;
     this._pool = new Array(initialSize);
@@ -546,7 +553,7 @@ class ObjectPool {
     }
   }
 
-  acquire() {
+  acquire(): T {
     if (this._size > 0) {
       return this._pool[--this._size];
     }
@@ -554,7 +561,7 @@ class ObjectPool {
     return this._factory();
   }
 
-  release(obj) {
+  release(obj: T): void {
     this._reset(obj);
     if (this._size < this._pool.length) {
       this._pool[this._size++] = obj;
@@ -566,13 +573,14 @@ class ObjectPool {
 }
 
 // Exemple : pool de vecteurs 3D pour une simulation physique
-const vecPool = new ObjectPool(
+interface Vec3 { x: number; y: number; z: number }
+const vecPool = new ObjectPool<Vec3>(
   () => ({ x: 0, y: 0, z: 0 }),         // factory
   (v) => { v.x = 0; v.y = 0; v.z = 0; }, // reset
   1000
 );
 
-function simulate(particles, dt) {
+function simulate(particles: { x: number; y: number; z: number; vx: number; vy: number; vz: number }[], dt: number): void {
   for (const p of particles) {
     const vel = vecPool.acquire();
     vel.x = p.vx * dt;
@@ -627,7 +635,7 @@ function simulate(particles, dt) {
 
 #### 8.1. Tableaux pré-alloués
 
-```javascript
+```typescript
 // --- LENT : le tableau grandit dynamiquement ---
 const result = [];
 for (let i = 0; i < 1_000_000; i++) {
@@ -654,7 +662,7 @@ for (let i = 0; i < 1_000_000; i++) {
 
 #### 8.2. Typed Arrays pour le travail numérique
 
-```javascript
+```typescript
 // Typed Arrays : mémoire contiguë, pas de boxing, accès direct par offset
 const positions = new Float64Array(3 * numParticles);
 const velocities = new Float64Array(3 * numParticles);
@@ -713,7 +721,7 @@ for (let i = 0; i < numParticles; i++) {
   |                             | terminate()
 ```
 
-```javascript
+```typescript
 // main.js (navigateur)
 const worker = new Worker('heavy-compute.js');
 
@@ -729,7 +737,7 @@ worker.onerror = (e) => {
 };
 ```
 
-```javascript
+```typescript
 // heavy-compute.js (Worker)
 self.onmessage = (e) => {
   const start = performance.now();
@@ -756,7 +764,7 @@ function applyFilter(pixels, type) {
 
 ### Démo 1 — Mesurer avec `performance.mark` / `performance.measure`
 
-```javascript
+```typescript
 // demo-perf-marks.mjs
 import { performance, PerformanceObserver } from 'node:perf_hooks';
 
@@ -768,7 +776,7 @@ const obs = new PerformanceObserver((list) => {
 obs.observe({ entryTypes: ['measure'] });
 
 // --- Fonction naïve : boucle ---
-function sumNaive(n) {
+function sumNaive(n: number): number {
   let total = 0;
   for (let i = 0; i < n; i++) {
     total += i;
@@ -777,7 +785,7 @@ function sumNaive(n) {
 }
 
 // --- Fonction optimisée : formule de Gauss ---
-function sumGauss(n) {
+function sumGauss(n: number): number {
   return (n * (n - 1)) / 2;
 }
 
@@ -799,11 +807,11 @@ obs.disconnect();
 
 ### Démo 2 — Détecter le hidden class thrashing avec `--trace-ic`
 
-```javascript
+```typescript
 // demo-hidden-class-thrash.mjs
 // Lancer avec : node --trace-ic demo-hidden-class-thrash.mjs 2>&1 | head -50
 
-function readName(obj) {
+function readName(obj: { name: string }): string {
   return obj.name;
 }
 
@@ -835,7 +843,7 @@ console.log('  MEGAMORPHIC => lent (hash table lookup)');
 
 ### Démo 3 — Concaténation de chaînes : benchmark comparatif
 
-```javascript
+```typescript
 // demo-string-concat.mjs
 import { performance } from 'node:perf_hooks';
 
@@ -844,7 +852,7 @@ const data = Array.from({ length: ROWS }, (_, i) =>
   [i, `item_${i}`, Math.random().toFixed(4)]
 );
 
-function benchConcatenation(data) {
+function benchConcatenation(data: (string | number)[][]): string {
   let csv = '';
   for (const row of data) {
     csv += row.join(',') + '\n';
@@ -852,7 +860,7 @@ function benchConcatenation(data) {
   return csv;
 }
 
-function benchArrayJoin(data) {
+function benchArrayJoin(data: (string | number)[][]): string {
   const lines = new Array(data.length);
   for (let i = 0; i < data.length; i++) {
     lines[i] = data[i].join(',');
@@ -879,22 +887,24 @@ console.log(`Tailles résultat    : ${r1.length} vs ${r2.length}`);
 
 ### Démo 4 — Object pool vs allocation libre
 
-```javascript
+```typescript
 // demo-object-pool.mjs
 import { performance } from 'node:perf_hooks';
 
 class VecPool {
-  constructor(size) {
+  pool: { x: number; y: number; z: number }[];
+  idx: number;
+  constructor(size: number) {
     this.pool = new Array(size);
     this.idx = size;
     for (let i = 0; i < size; i++) {
       this.pool[i] = { x: 0, y: 0, z: 0 };
     }
   }
-  acquire() {
+  acquire(): { x: number; y: number; z: number } {
     return this.idx > 0 ? this.pool[--this.idx] : { x: 0, y: 0, z: 0 };
   }
-  release(v) {
+  release(v: { x: number; y: number; z: number }): void {
     v.x = 0; v.y = 0; v.z = 0;
     this.pool[this.idx++] = v;
   }
@@ -931,7 +941,7 @@ console.log(`Checksums : ${sum1 === sum2}`);
 
 ### Démo 5 — Profiler, identifier, optimiser (workflow complet)
 
-```javascript
+```typescript
 // demo-profile-optimize.mjs
 // Lancer avec : node --cpu-prof demo-profile-optimize.mjs
 // Puis ouvrir le .cpuprofile dans Chrome DevTools > Performance
@@ -940,7 +950,7 @@ import { performance } from 'node:perf_hooks';
 // =============================================
 // Version LENTE (volontairement mal écrite)
 // =============================================
-function processDataSlow(records) {
+function processDataSlow(records: { name: string; score: number }[]): string[] {
   let output = '';
   for (let i = 0; i < records.length; i++) {
     // Anti-pattern 1 : deep clone par JSON round-trip
@@ -957,7 +967,7 @@ function processDataSlow(records) {
 // =============================================
 // Version RAPIDE (optimisée)
 // =============================================
-function processDataFast(records) {
+function processDataFast(records: { name: string; score: number }[]): string[] {
   // Pré-allouer le tableau de sortie
   const entries = new Array(records.length);
   for (let i = 0; i < records.length; i++) {
@@ -1069,9 +1079,9 @@ Dans ce lab, vous recevrez une application Node.js volontairement mal optimisée
 
 Considérez cette fonction qui traite un flux de données de capteurs :
 
-```javascript
-function processSensorData(readings) {
-  const results = [];
+```typescript
+function processSensorData(readings: { ts: number; val: number; max: number; id: string }[]): { id: string; avg: number; report: string }[] {
+  const results: { timestamp: number; value: number; normalized: number; label: string }[] = [];
   for (const reading of readings) {
     const point = {
       timestamp: reading.ts,
@@ -1082,7 +1092,7 @@ function processSensorData(readings) {
     results.push(point);
   }
 
-  const summary = {};
+  const summary: Record<string, { sum: number; count: number }> = {};
   for (const r of results) {
     const key = r.label.split('-')[1]; // extraire l'id du sensor
     if (!summary[key]) {
@@ -1133,11 +1143,11 @@ ces réallocations.
 
 **Version optimisée :**
 
-```javascript
+```typescript
 // Réutiliser le Map entre les appels (pas de réallocation)
-const summaryCache = new Map();
+const summaryCache = new Map<string, { sum: number; count: number }>();
 
-function processSensorDataFast(readings) {
+function processSensorDataFast(readings: { val: number; max: number; id: string }[]): { id: string; avg: number; sum: number; count: number }[] {
   summaryCache.clear();
 
   // Une seule passe, pas d'objet intermédiaire, pas de chaîne

@@ -147,7 +147,7 @@ AVANT (phase de création)          APRÈS (phase d'exécution)
 
 Le "hoisting" (hissage) n'est **PAS** un mécanisme qui "déplace les déclarations en haut du scope". C'est une **conséquence de la phase de création** : puisque le moteur enregistre les déclarations avant d'exécuter quoi que ce soit, tout se passe *comme si* les déclarations étaient "remontées" — mais en réalité, le code n'est jamais modifié.
 
-```javascript
+```typescript
 console.log(a);   // undefined (var → initialisé à undefined en phase de création)
 console.log(b);   // ReferenceError: Cannot access 'b' before initialization (TDZ)
 console.log(c);   // ReferenceError: Cannot access 'c' before initialization (TDZ)
@@ -157,8 +157,8 @@ console.log(bar); // undefined (var bar = function... → bar est un var, pas un
 var a = 1;
 let b = 2;
 const c = 3;
-function foo() { return 'hello'; }
-var bar = function() { return 'world'; };
+function foo(): string { return 'hello'; }
+var bar = function(): string { return 'world'; };
 ```
 
 Ce qui se passe en phase de création :
@@ -198,9 +198,9 @@ En V8 (le moteur de Chrome/Node.js), la pile est une zone mémoire contiguë. Ch
 
 La call stack a une **taille limitée** (dépend du moteur et de l'OS, typiquement ~10 000 à ~25 000 frames dans V8). Un dépassement provoque une erreur `RangeError: Maximum call stack size exceeded`.
 
-```javascript
+```typescript
 // Stack overflow classique : récursion infinie
-function infinite() {
+function infinite(): never {
   return infinite();
 }
 infinite(); // RangeError: Maximum call stack size exceeded
@@ -212,15 +212,15 @@ Pour reprendre notre analogie : c'est comme si on empilait tellement d'assiettes
 
 La spécification ES2015 (ES6) définit la **Proper Tail Calls** (PTC) : si l'appel récursif est en **position terminale** (tail position — c'est-à-dire que l'appel récursif est la toute dernière opération de la fonction, sans rien après), le moteur **réutilise** le stack frame courant au lieu d'en empiler un nouveau.
 
-```javascript
+```typescript
 // Appel en position terminale :
-function factorial(n, acc = 1) {
+function factorial(n: number, acc: number = 1): number {
   if (n <= 1) return acc;
   return factorial(n - 1, n * acc); // tail call : rien après l'appel
 }
 
 // PAS en position terminale :
-function factorialBad(n) {
+function factorialBad(n: number): number {
   if (n <= 1) return 1;
   return n * factorialBad(n - 1); // multiplication APRES l'appel récursif
 }
@@ -247,14 +247,14 @@ function factorialBad(n) {
 
 ### 8. Diagramme complet : cycle de vie de la stack
 
-```javascript
-function multiply(a, b) {
+```typescript
+function multiply(a: number, b: number): number {
   return a * b;
 }
-function square(n) {
+function square(n: number): number {
   return multiply(n, n);
 }
-function printSquare(x) {
+function printSquare(x: number): void {
   const result = square(x);
   console.log(result);
 }
@@ -319,7 +319,7 @@ La spécification ECMAScript définit le concept de **Realm** (domaine). Un Real
 
 En pratique, chaque **contexte de navigation** (browsing context) dans un navigateur — chaque onglet, chaque iframe — possède son propre Realm.
 
-```javascript
+```typescript
 // Dans la page principale
 const arr = [1, 2, 3];
 console.log(arr instanceof Array); // true
@@ -351,8 +351,8 @@ La spécification distingue deux formes d'`eval`, qui créent des contextes d'ex
 
 Un appel à `eval` est **direct** quand il apparaît littéralement comme `eval(...)` :
 
-```javascript
-function test() {
+```typescript
+function test(): void {
   const x = 10;
   eval('console.log(x)'); // 10 — direct eval : accès au scope local de test()
 }
@@ -365,8 +365,8 @@ Le **direct eval** crée un contexte d'exécution qui hérite du **LexicalEnviro
 
 Toute autre manière d'invoquer `eval` est **indirecte** :
 
-```javascript
-function test() {
+```typescript
+function test(): void {
   const x = 10;
   const myEval = eval;
   myEval('console.log(x)'); // ReferenceError: x is not defined — scope GLOBAL
@@ -384,12 +384,12 @@ La différence clé : le direct eval hérite du scope local (`outer → test() E
 
 V8 possède un compilateur optimisant appelé **TurboFan**. Quand une fonction est appelée de nombreuses fois (on dit qu'elle est "chaude" — hot), TurboFan peut décider de l'**inliner** : au lieu de créer un nouveau stack frame et un nouveau contexte d'exécution pour chaque appel, il insère directement le code de la fonction appelée dans la fonction appelante.
 
-```javascript
-function add(a, b) {
+```typescript
+function add(a: number, b: number): number {
   return a + b;
 }
 
-function compute(x) {
+function compute(x: number): number {
   // Après optimisation par TurboFan, cet appel peut être "inliné" :
   // au lieu de créer un stack frame pour add(), V8 remplace
   // l'appel par le corps de la fonction directement.
@@ -498,19 +498,19 @@ En résumé : les deux moteurs passent du bytecode interprété (Ignition / Base
 
 ### Demo 1 : Inspecter la call stack avec `Error().stack`
 
-```javascript
-function c() {
+```typescript
+function c(): void {
   // Créer une Error capture la stack trace actuelle
-  const stack = new Error().stack;
+  const stack: string | undefined = new Error().stack;
   console.log('=== Stack Trace ===');
   console.log(stack);
 }
 
-function b() {
+function b(): void {
   c();
 }
 
-function a() {
+function a(): void {
   b();
 }
 
@@ -527,16 +527,16 @@ a();
 
 ### Demo 2 : `console.trace()`
 
-```javascript
-function deepFunction() {
+```typescript
+function deepFunction(): void {
   console.trace('Où suis-je ?');
 }
 
-function middleFunction() {
+function middleFunction(): void {
   deepFunction();
 }
 
-function topFunction() {
+function topFunction(): void {
   middleFunction();
 }
 
@@ -546,10 +546,10 @@ topFunction();
 
 ### Demo 3 : Mesurer la profondeur maximale de la stack
 
-```javascript
-let depth = 0;
+```typescript
+let depth: number = 0;
 
-function measureStackDepth() {
+function measureStackDepth(): void {
   depth++;
   measureStackDepth();
 }
@@ -567,7 +567,7 @@ try {
 
 ### Demo 4 : Observer la phase de création
 
-```javascript
+```typescript
 // Ce code démontre que la phase de création est réelle
 console.log(typeof undeclaredVar);  // "undefined" — pas d'erreur !
 // ATTENTION : cela n'a rien à voir avec le hoisting ou la phase de création.
@@ -583,16 +583,16 @@ console.log(typeof myVar);         // "undefined"
 
 var myVar = 42;
 let myLet = 100;
-function myFunc() {}
+function myFunc(): void {}
 ```
 
 ### Demo 5 : Performance.mark et stack depth
 
-```javascript
+```typescript
 // En Node.js
 const { performance } = require('perf_hooks');
 
-function recursiveWork(n) {
+function recursiveWork(n: number): void {
   if (n <= 0) return;
   performance.mark(`depth-${n}-start`);
   recursiveWork(n - 1);
@@ -603,7 +603,7 @@ function recursiveWork(n) {
 recursiveWork(5);
 
 const measures = performance.getEntriesByType('measure');
-measures.forEach(m => {
+measures.forEach((m: PerformanceEntry) => {
   console.log(`${m.name}: ${m.duration.toFixed(4)}ms`);
 });
 ```
@@ -683,10 +683,10 @@ Voici un résumé ultra-simplifié de ce module. Si tu as compris ces points, tu
 
 Quel est l'affichage de ce code ? Expliquez en termes de phases de création et d'exécution.
 
-```javascript
+```typescript
 var x = 1;
 
-function foo() {
+function foo(): void {
   console.log(x);       // ???
   var x = 2;
   console.log(x);       // ???

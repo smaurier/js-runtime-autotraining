@@ -238,14 +238,14 @@ bugs de timing dans les tests.
 
 Ajouter un endpoint de monitoring :
 
-```javascript
+```typescript
 // monitoring.mjs
 import { performance } from 'node:perf_hooks';
 
 const startTime = Date.now();
 
-export function getMemoryStats() {
-  const mem = process.memoryUsage();
+export function getMemoryStats(): Record<string, string | number> {
+  const mem: NodeJS.MemoryUsage = process.memoryUsage();
   return {
     uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
     heapUsedMB: (mem.heapUsed / 1024 / 1024).toFixed(2),
@@ -289,12 +289,12 @@ On prend 3 heap snapshots via Chrome DevTools (connecté a Node avec
 
 Pour prendre un snapshot programmatiquement :
 
-```javascript
+```typescript
 import { writeHeapSnapshot } from 'node:v8';
 
 // Prendre un snapshot à la demande
-app.get('/_heapdump', (req, res) => {
-  const filename = writeHeapSnapshot();
+app.get('/_heapdump', (req: unknown, res: { json: (body: unknown) => void }) => {
+  const filename: string = writeHeapSnapshot();
   res.json({ filename });
 });
 ```
@@ -378,12 +378,12 @@ libérés :
 
 Deux problèmes identifiés :
 
-```javascript
+```typescript
 // PROBLÈME 1 : Map sans limite, jamais nettoyée
-const sessionCache = new Map();
+const sessionCache = new Map<string, { payload: unknown; timestamp: number; processed: boolean }>();
 
-app.post('/webhook', (req, res) => {
-  const eventId = req.body.eventId;
+app.post('/webhook', (req: { body: { eventId: string }; socket: import('node:net').Socket }, res: { sendStatus: (code: number) => void }) => {
+  const eventId: string = req.body.eventId;
   // Chaque webhook est stocké, JAMAIS supprimé
   sessionCache.set(eventId, {
     payload: req.body,
@@ -414,52 +414,55 @@ app.post('/webhook', (req, res) => {
 
 #### Étape 5 : Corriger
 
-```javascript
+```typescript
 // FIX 1 : Map bornée avec éviction LRU
-class LRUCache {
-  constructor(maxSize) {
+class LRUCache<V> {
+  private _map: Map<string, V>;
+  private _maxSize: number;
+
+  constructor(maxSize: number) {
     this._map = new Map();
     this._maxSize = maxSize;
   }
 
-  get(key) {
+  get(key: string): V | undefined {
     if (!this._map.has(key)) return undefined;
-    const value = this._map.get(key);
+    const value = this._map.get(key)!;
     // Remettre en fin (plus récent) pour l'ordre LRU
     this._map.delete(key);
     this._map.set(key, value);
     return value;
   }
 
-  set(key, value) {
+  set(key: string, value: V): void {
     if (this._map.has(key)) {
       this._map.delete(key);
     } else if (this._map.size >= this._maxSize) {
       // Supprimer le plus ancien (premier élément du Map)
-      const oldestKey = this._map.keys().next().value;
+      const oldestKey: string = this._map.keys().next().value!;
       this._map.delete(oldestKey);
     }
     this._map.set(key, value);
   }
 
-  get size() { return this._map.size; }
+  get size(): number { return this._map.size; }
 }
 
-const sessionCache = new LRUCache(10_000); // Max 10 000 entrées
+const sessionCache = new LRUCache<{ payload: unknown; timestamp: number; processed: boolean }>(10_000); // Max 10 000 entrées
 
 // FIX 2 : AbortController pour nettoyer les listeners
-app.post('/webhook', (req, res) => {
+app.post('/webhook', (req: { body: { eventId: string }; socket: import('node:net').Socket }, res: { on: (event: string, cb: () => void) => void; sendStatus: (code: number) => void }) => {
   const controller = new AbortController();
   const { signal } = controller;
 
   const socket = req.socket;
-  socket.on('data', function onData(chunk) {
+  socket.on('data', function onData(chunk: Buffer) {
     // traitement supplémentaire...
-  }, { signal }); // Le signal permet de retirer le listener automatiquement
+  }, { signal } as any); // Le signal permet de retirer le listener automatiquement
 
-  socket.on('error', function onError(err) {
+  socket.on('error', function onError(err: Error) {
     console.error('Socket error:', err);
-  }, { signal });
+  }, { signal } as any);
 
   // À la fin de la requête, retirer tous les listeners
   res.on('finish', () => {
@@ -582,10 +585,10 @@ node --trace-ic pipeline.mjs data.csv 2>&1 | grep transformRecord | head -20
 
 Le problème est dans le parser CSV :
 
-```javascript
+```typescript
 // PROBLÈME : le parser crée des objets avec des shapes différentes
-function parseCSVLine(headers, values) {
-  const record = {};
+function parseCSVLine(headers: string[], values: string[]): Record<string, string> {
+  const record: Record<string, string> = {};
   for (let i = 0; i < headers.length; i++) {
     if (values[i] !== undefined && values[i] !== '') {
       record[headers[i]] = values[i]; // Ajoute la propriété SEULEMENT si non vide
@@ -607,10 +610,10 @@ function parseCSVLine(headers, values) {
 
 #### Étape 5 : Corriger — Normaliser les formes
 
-```javascript
+```typescript
 // FIX : toujours créer des objets avec la MÊME shape
-function parseCSVLine(headers, values) {
-  const record = {};
+function parseCSVLine(headers: string[], values: string[]): Record<string, string | null> {
+  const record: Record<string, string | null> = {};
   for (let i = 0; i < headers.length; i++) {
     // Assigner TOUTES les propriétés, même si la valeur est vide
     record[headers[i]] = (values[i] !== undefined && values[i] !== '')
@@ -708,15 +711,15 @@ Lecture de la sortie :
 
 #### Étape 2 : Corréler GC et latence
 
-```javascript
+```typescript
 // Monitoring GC programmatique
-import { PerformanceObserver } from 'node:perf_hooks';
+import { PerformanceObserver, PerformanceObserverEntryList } from 'node:perf_hooks';
 
-const gcObserver = new PerformanceObserver((list) => {
+const gcObserver = new PerformanceObserver((list: PerformanceObserverEntryList) => {
   for (const entry of list.getEntries()) {
     if (entry.duration > 10) { // Pauses > 10ms
       console.warn(
-        `[GC] ${entry.detail.kind} pause: ${entry.duration.toFixed(1)}ms ` +
+        `[GC] ${(entry as any).detail.kind} pause: ${entry.duration.toFixed(1)}ms ` +
         `at ${new Date().toISOString()}`
       );
     }
@@ -742,12 +745,17 @@ Résultats corrélés avec les métriques de latence :
 
 Le code du broadcast :
 
-```javascript
+```typescript
 // PROBLÈME : allocations massives dans la boucle de broadcast
-function broadcastUpdate(clients, data) {
+interface WsClient {
+  id: string;
+  send(data: Buffer): void;
+}
+
+function broadcastUpdate(clients: WsClient[], data: unknown): void {
   for (const client of clients) {
     // PROBLÈME 1 : nouvelle chaîne JSON pour CHAQUE client
-    const message = JSON.stringify({
+    const message: string = JSON.stringify({
       type: 'update',
       timestamp: Date.now(),
       payload: data,
@@ -755,7 +763,7 @@ function broadcastUpdate(clients, data) {
     });
 
     // PROBLÈME 2 : Buffer.from() alloue un nouveau buffer à chaque fois
-    const buffer = Buffer.from(message, 'utf-8');
+    const buffer: Buffer = Buffer.from(message, 'utf-8');
 
     client.send(buffer);
   }
@@ -771,28 +779,28 @@ function broadcastUpdate(clients, data) {
 
 #### Étape 4 : Corriger — Réduire les allocations
 
-```javascript
+```typescript
 // FIX : minimiser les allocations dans le chemin chaud
 
 // Pré-allouer un buffer réutilisable
-const SEND_BUFFER_SIZE = 64 * 1024; // 64 Ko
-let sendBuffer = Buffer.alloc(SEND_BUFFER_SIZE);
+const SEND_BUFFER_SIZE: number = 64 * 1024; // 64 Ko
+let sendBuffer: Buffer = Buffer.alloc(SEND_BUFFER_SIZE);
 
-function broadcastUpdate(clients, data) {
+function broadcastUpdate(clients: WsClient[], data: unknown): void {
   // FIX 1 : sérialiser UNE SEULE FOIS (le payload est identique pour tous)
-  const baseMessage = JSON.stringify({
+  const baseMessage: string = JSON.stringify({
     type: 'update',
     timestamp: Date.now(),
     payload: data,
   });
 
   // FIX 2 : encoder dans le buffer pré-alloué
-  const byteLength = Buffer.byteLength(baseMessage, 'utf-8');
+  const byteLength: number = Buffer.byteLength(baseMessage, 'utf-8');
   if (byteLength > sendBuffer.length) {
     sendBuffer = Buffer.alloc(byteLength * 2); // Agrandir si nécessaire
   }
   sendBuffer.write(baseMessage, 0, 'utf-8');
-  const messageSlice = sendBuffer.subarray(0, byteLength);
+  const messageSlice: Buffer = sendBuffer.subarray(0, byteLength);
 
   for (const client of clients) {
     // Envoyer le même buffer à tous les clients
@@ -856,17 +864,17 @@ node --gc-interval=100 server.mjs
 
 #### Diagnostic rapide
 
-```javascript
+```typescript
 // Détecter le blocage de l'event loop
-import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { monitorEventLoopDelay, IntervalHistogram } from 'node:perf_hooks';
 
-const h = monitorEventLoopDelay({ resolution: 10 });
+const h: IntervalHistogram = monitorEventLoopDelay({ resolution: 10 });
 h.enable();
 
 setInterval(() => {
-  const p50 = h.percentile(50) / 1e6; // nanosecondes -> millisecondes
-  const p99 = h.percentile(99) / 1e6;
-  const max = h.max / 1e6;
+  const p50: number = h.percentile(50) / 1e6; // nanosecondes -> millisecondes
+  const p99: number = h.percentile(99) / 1e6;
+  const max: number = h.max / 1e6;
   console.log(`Event Loop Delay — p50: ${p50.toFixed(1)}ms, p99: ${p99.toFixed(1)}ms, max: ${max.toFixed(1)}ms`);
   h.reset();
 }, 5000);
@@ -881,28 +889,28 @@ setInterval(() => {
 
 #### Fix : décharger vers un Worker Thread
 
-```javascript
+```typescript
 // report-worker.mjs (exécuté dans un thread séparé)
 import { parentPort, workerData } from 'node:worker_threads';
 
-function generateReport(data) {
+function generateReport(data: unknown): unknown {
   // Calcul CPU-intensif (2-3 secondes)
-  const result = heavyComputation(data);
+  const result: unknown = heavyComputation(data);
   return result;
 }
 
-const result = generateReport(workerData);
-parentPort.postMessage(result);
+const result: unknown = generateReport(workerData);
+parentPort!.postMessage(result);
 ```
 
-```javascript
+```typescript
 // Dans le handler Express
 import { Worker } from 'node:worker_threads';
 
-app.get('/report', async (req, res) => {
-  const data = await getReportData(req.query);
+app.get('/report', async (req: unknown, res: { json: (body: unknown) => void }) => {
+  const data: unknown = await getReportData((req as any).query);
 
-  const result = await new Promise((resolve, reject) => {
+  const result: unknown = await new Promise<unknown>((resolve, reject) => {
     const worker = new Worker('./report-worker.mjs', {
       workerData: data,
     });
@@ -971,17 +979,17 @@ moteurs permet d'écrire du code performant partout.
 
 #### Exemples de différences pratiques
 
-```javascript
+```typescript
 // Pattern 1 : arguments objet
 // V8 : déoptimisé si `arguments` est passé à une autre fonction
 // JSC : optimisé même avec `arguments` dans certains cas
 // SpiderMonkey : gère via une représentation spéciale (MagicArguments)
 
-function sum() {
-  return Array.prototype.reduce.call(arguments, (a, b) => a + b, 0);
+function sum(): number {
+  return Array.prototype.reduce.call(arguments, (a: number, b: number) => a + b, 0);
 }
 // Préférer les rest parameters pour être portable :
-function sum(...args) {
+function sum(...args: number[]): number {
   return args.reduce((a, b) => a + b, 0);
 }
 
@@ -1091,16 +1099,16 @@ pour les chemins critiques de l'application.
 
 ### Démo 1 — Diagnostic complet d'une fuite mémoire
 
-```javascript
+```typescript
 // demo-memory-leak-diagnostic.mjs
 // Lancer avec : node --expose-gc demo-memory-leak-diagnostic.mjs
 import { performance } from 'node:perf_hooks';
 
 // Simuler une fuite mémoire avec un cache sans limite
-const leakyCache = new Map();
+const leakyCache = new Map<string, { id: string; payload: string; timestamp: number; headers: Record<string, string> }>();
 let requestId = 0;
 
-function simulateLeakyRequest() {
+function simulateLeakyRequest(): void {
   const id = `req_${requestId++}`;
   // Chaque "requête" ajoute des données au cache, JAMAIS supprimées
   leakyCache.set(id, {
@@ -1112,25 +1120,28 @@ function simulateLeakyRequest() {
 }
 
 // Simuler le fix : cache LRU borné
-class BoundedCache {
-  constructor(maxSize) {
+class BoundedCache<V> {
+  private _map: Map<string, V>;
+  private _maxSize: number;
+
+  constructor(maxSize: number) {
     this._map = new Map();
     this._maxSize = maxSize;
   }
-  set(key, value) {
+  set(key: string, value: V): void {
     if (this._map.size >= this._maxSize) {
-      const oldest = this._map.keys().next().value;
+      const oldest: string = this._map.keys().next().value!;
       this._map.delete(oldest);
     }
     this._map.set(key, value);
   }
-  get size() { return this._map.size; }
+  get size(): number { return this._map.size; }
 }
 
-const fixedCache = new BoundedCache(100);
+const fixedCache = new BoundedCache<{ id: string; payload: string; timestamp: number; headers: Record<string, string> }>(100);
 let fixedRequestId = 0;
 
-function simulateFixedRequest() {
+function simulateFixedRequest(): void {
   const id = `req_${fixedRequestId++}`;
   fixedCache.set(id, {
     id,
@@ -1178,24 +1189,24 @@ console.log(`Cache borné : ${fixedCache.size} entrées (mémoire stable)`);
 
 ### Démo 2 — Détection de cascade de déoptimisations
 
-```javascript
+```typescript
 // demo-deopt-cascade.mjs
 // Lancer avec : node --trace-deopt demo-deopt-cascade.mjs 2>&1 | head -30
 import { performance } from 'node:perf_hooks';
 
 // Version problematique : objets avec shapes inconsistantes
-function processRecordSlow(record) {
+function processRecordSlow(record: { name: string; value: number; [key: string]: unknown }): string {
   return record.name.toUpperCase() + ':' + record.value * 2;
 }
 
 // Version corrigée : objets avec shapes uniformes
-function processRecordFast(record) {
+function processRecordFast(record: { name: string; value: number; category: string | null; priority: number | null; active: boolean }): string {
   return record.name.toUpperCase() + ':' + record.value * 2;
 }
 
 // Générer des records avec shapes INCONSISTANTES
-function generateInconsistentRecords(n) {
-  const records = [];
+function generateInconsistentRecords(n: number): Array<{ name: string; value: number; [key: string]: unknown }> {
+  const records: Array<{ name: string; value: number; [key: string]: unknown }> = [];
   for (let i = 0; i < n; i++) {
     const r = { name: `item_${i}` };
     if (i % 3 === 0) r.value = i;           // parfois .value
@@ -1209,8 +1220,8 @@ function generateInconsistentRecords(n) {
 }
 
 // Générer des records avec shapes UNIFORMES
-function generateConsistentRecords(n) {
-  const records = [];
+function generateConsistentRecords(n: number): Array<{ name: string; value: number; category: string | null; priority: number | null; active: boolean }> {
+  const records: Array<{ name: string; value: number; category: string | null; priority: number | null; active: boolean }> = [];
   for (let i = 0; i < n; i++) {
     records.push({
       name: `item_${i}`,
@@ -1255,16 +1266,16 @@ console.log('\nLancer avec --trace-deopt pour voir les déoptimisations en déta
 
 ### Démo 3 — Monitoring GC en temps réel
 
-```javascript
+```typescript
 // demo-gc-monitoring.mjs
 // Lancer avec : node --trace-gc --expose-gc demo-gc-monitoring.mjs
 import { PerformanceObserver } from 'node:perf_hooks';
 
 // Observer les événements GC
-const gcObserver = new PerformanceObserver((list) => {
+const gcObserver = new PerformanceObserver((list: PerformanceObserverEntryList) => {
   for (const entry of list.getEntries()) {
-    const kind = entry.detail?.kind ?? 'unknown';
-    const flag = entry.duration > 10 ? ' *** PAUSE LONGUE ***' : '';
+    const kind: string = (entry as any).detail?.kind ?? 'unknown';
+    const flag: string = entry.duration > 10 ? ' *** PAUSE LONGUE ***' : '';
     console.log(
       `  [GC] ${kind.toString().padEnd(12)} ` +
       `${entry.duration.toFixed(2).padStart(8)} ms${flag}`
@@ -1322,7 +1333,7 @@ gcObserver.disconnect();
 
 ### Démo 4 — Lecture de la spec ECMAScript en pratique
 
-```javascript
+```typescript
 // demo-spec-reading.mjs
 // Cette demo illustre des comportements subtils
 // qui ne sont compréhensibles qu'en lisant la spec
@@ -1331,16 +1342,16 @@ console.log('=== Démo : Comportements subtils de la spec ECMAScript ===\n');
 
 // --- Cas 1 : Promise.resolve(thenable) est TOUJOURS asynchrone ---
 console.log('--- Cas 1 : Promise.resolve(thenable) ---');
-const thenable = {
-  then(resolve) {
+const thenable: { then(resolve: (value: number) => void): void } = {
+  then(resolve: (value: number) => void) {
     console.log('  2. thenable.then() appelé');
     resolve(42);
   }
 };
 
 console.log('1. Avant Promise.resolve(thenable)');
-const p = Promise.resolve(thenable);
-p.then(value => {
+const p: Promise<number> = Promise.resolve(thenable) as Promise<number>;
+p.then((value: number) => {
   console.log(`  4. Promise résolue avec: ${value}`);
 });
 console.log('3. Après Promise.resolve(thenable)');
@@ -1367,7 +1378,7 @@ console.log(`  {} + []  = ${(() => ({} + []))()} (en expression)`);
 // "" + "[object Object]" = "[object Object]"
 
 console.log('\n--- Cas 4 : 0.1 + 0.2 !== 0.3 ---');
-const result = 0.1 + 0.2;
+const result: number = 0.1 + 0.2;
 console.log(`  0.1 + 0.2 = ${result}`);
 console.log(`  0.1 + 0.2 === 0.3 ? ${result === 0.3}`);
 console.log(`  Difference : ${Math.abs(result - 0.3)}`);
@@ -1383,7 +1394,7 @@ console.log('pas seulement de les constater. Ref: https://tc39.es/ecma262/');
 
 ### Démo 5 — Event loop blocking et Worker Threads
 
-```javascript
+```typescript
 // demo-event-loop-blocking.mjs
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { performance, monitorEventLoopDelay } from 'node:perf_hooks';
@@ -1392,8 +1403,8 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 
 // Calcul CPU-intensif : trouver des nombres premiers
-function findPrimes(limit) {
-  const primes = [];
+function findPrimes(limit: number): number {
+  const primes: number[] = [];
   for (let n = 2; n <= limit; n++) {
     let isPrime = true;
     for (let d = 2; d <= Math.sqrt(n); d++) {
@@ -1406,8 +1417,8 @@ function findPrimes(limit) {
 
 if (!isMainThread) {
   // Code du Worker
-  const result = findPrimes(500_000);
-  parentPort.postMessage(result);
+  const result: number = findPrimes(500_000);
+  parentPort!.postMessage(result);
 } else {
   // Code du thread principal
   console.log('=== Démo : Blocage event loop vs Worker Thread ===\n');
@@ -1425,9 +1436,9 @@ if (!isMainThread) {
   // Test 1 : calcul sur le thread principal (BLOQUANT)
   console.log('--- Test 1 : Calcul sur le thread principal ---');
   const t1 = performance.now();
-  const result1 = findPrimes(500_000);
-  const t2 = performance.now();
-  const delay1 = h.percentile(99) / 1e6;
+  const result1: number = findPrimes(500_000);
+  const t2: number = performance.now();
+  const delay1: number = h.percentile(99) / 1e6;
   console.log(`  Primes trouvés : ${result1}`);
   console.log(`  Durée : ${(t2 - t1).toFixed(0)} ms`);
   console.log(`  Event loop delay p99 : ${delay1.toFixed(1)} ms`);
@@ -1437,11 +1448,11 @@ if (!isMainThread) {
 
   // Test 2 : calcul dans un Worker (NON BLOQUANT)
   console.log('\n--- Test 2 : Calcul dans un Worker Thread ---');
-  const t3 = performance.now();
+  const t3: number = performance.now();
   const worker = new Worker(__filename);
-  worker.on('message', (result2) => {
-    const t4 = performance.now();
-    const delay2 = h.percentile(99) / 1e6;
+  worker.on('message', (result2: number) => {
+    const t4: number = performance.now();
+    const delay2: number = h.percentile(99) / 1e6;
     console.log(`  Primes trouvés : ${result2}`);
     console.log(`  Durée : ${(t4 - t3).toFixed(0)} ms`);
     console.log(`  Event loop delay p99 : ${delay2.toFixed(1)} ms`);
@@ -1538,14 +1549,14 @@ L'application est un serveur Express qui :
 
 Le code suspect :
 
-```javascript
+```typescript
 import { EventEmitter } from 'node:events';
 
-const cache = {};
+const cache: Record<string, unknown> = {};
 const emitter = new EventEmitter();
 
-app.post('/upload', async (req, res) => {
-  const data = JSON.parse(req.body);
+app.post('/upload', async (req: { body: string }, res: { json: (body: unknown) => void }) => {
+  const data = JSON.parse(req.body) as { id: string; items: Array<{ type: string; value: number; extra?: unknown }> };
   const result = processData(data);
 
   cache[result.id] = result;
@@ -1557,10 +1568,10 @@ app.post('/upload', async (req, res) => {
   res.json({ id: result.id, status: 'ok' });
 });
 
-function processData(data) {
-  const records = [];
+function processData(data: { id: string; items: Array<{ type: string; value: number; extra?: unknown }> }): { id: string; records: Record<string, unknown>[]; raw: unknown } {
+  const records: Record<string, unknown>[] = [];
   for (const item of data.items) {
-    const copy = JSON.parse(JSON.stringify(item));
+    const copy: Record<string, unknown> = JSON.parse(JSON.stringify(item));
     if (item.type === 'A') {
       copy.score = item.value * 2;
     }
@@ -1631,26 +1642,34 @@ function processData(data) {
 
 **Version corrigée :**
 
-```javascript
+```typescript
 import { EventEmitter } from 'node:events';
 
 // FIX 1+6 : Map bornée au lieu d'objet sans limite
-class LRUCache {
-  constructor(max) {
+class LRUCache<V> {
+  private _map: Map<string, V>;
+  private _max: number;
+
+  constructor(max: number) {
     this._map = new Map();
     this._max = max;
   }
-  set(key, value) {
+  set(key: string, value: V): void {
     if (this._map.has(key)) this._map.delete(key);
     else if (this._map.size >= this._max) {
-      this._map.delete(this._map.keys().next().value);
+      this._map.delete(this._map.keys().next().value!);
     }
     this._map.set(key, value);
   }
-  get values() { return this._map; }
+  get values(): Map<string, V> { return this._map; }
 }
 
-const cache = new LRUCache(1_000);
+interface ProcessedResult {
+  id: string;
+  records: Array<{ score: number; bonus: unknown; [key: string]: unknown }>;
+}
+
+const cache = new LRUCache<ProcessedResult>(1_000);
 const emitter = new EventEmitter();
 
 // FIX 2 : listener enregistré UNE SEULE FOIS
@@ -1658,17 +1677,17 @@ emitter.on('flush', () => {
   flushToDatabase(cache.values);
 });
 
-app.post('/upload', async (req, res) => {
-  const data = JSON.parse(req.body);
-  const result = processData(data);
+app.post('/upload', async (req: { body: string }, res: { json: (body: unknown) => void }) => {
+  const data = JSON.parse(req.body) as { id: string; items: Array<{ type: string; value: number; extra?: unknown }> };
+  const result: ProcessedResult = processData(data);
 
   cache.set(result.id, result); // FIX 1 : cache borné
 
   res.json({ id: result.id, status: 'ok' });
 });
 
-function processData(data) {
-  const records = new Array(data.items.length); // Pré-allocation
+function processData(data: { id: string; items: Array<{ type: string; value: number; extra?: unknown }> }): ProcessedResult {
+  const records = new Array<{ score: number; bonus: unknown; [key: string]: unknown }>(data.items.length); // Pré-allocation
   for (let i = 0; i < data.items.length; i++) {
     const item = data.items[i];
     // FIX 4 : shapes consistantes + FIX 5 : pas de JSON clone

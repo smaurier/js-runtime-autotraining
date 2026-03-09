@@ -66,11 +66,11 @@ La spécification HTML et ECMA-262 distinguent deux catégories de tâches async
 
 Quand une Promise est résolue, son handler `.then()` ne s'exécute pas immédiatement. Il est placé dans la **file de microtâches** et sera exécuté quand la pile d'appels sera vide (mais avant toute macrotâche).
 
-```javascript
+```typescript
 // await est du sucre syntaxique pour Promise.then
 // Donc la reprise après un await est une microtâche
 
-async function example() {
+async function example(): Promise<void> {
   console.log('A');        // synchrone
   await Promise.resolve(); // place la reprise en microtâche
   console.log('B');        // microtâche (reprise après await)
@@ -96,7 +96,7 @@ console.log('C');
 
 *Note : `requestAnimationFrame` est techniquement dans sa propre catégorie (rendering task), pas dans la file de macrotâches standard.
 
-```javascript
+```typescript
 // MessageChannel crée une macrotâche — utile pour céder le contrôle
 const channel = new MessageChannel();
 channel.port1.onmessage = () => {
@@ -164,7 +164,7 @@ C'est une confusion très courante. `process.nextTick` a sa propre file d'attent
   └─────────────────────────────────────┘
 ```
 
-```javascript
+```typescript
 // Preuve que nextTick passe avant les microtâches
 
 process.nextTick(() => {
@@ -230,9 +230,9 @@ La famine survient lorsqu'une catégorie de tâches accapare l'event loop et emp
 
 **Scénario 1 : Famine par microtâches récursives**
 
-```javascript
+```typescript
 // Les microtâches affament les macrotâches
-function eternalMicrotask() {
+function eternalMicrotask(): void {
   queueMicrotask(eternalMicrotask);
 }
 eternalMicrotask();
@@ -241,9 +241,9 @@ eternalMicrotask();
 
 **Scénario 2 : Famine par process.nextTick récursif**
 
-```javascript
+```typescript
 // nextTick affame TOUT (même les Promises)
-function eternalNextTick() {
+function eternalNextTick(): void {
   process.nextTick(eternalNextTick);
 }
 eternalNextTick();
@@ -252,7 +252,7 @@ eternalNextTick();
 
 **Scénario 3 : Famine par code synchrone**
 
-```javascript
+```typescript
 // Un calcul synchrone bloque tout
 while (true) {
   // Même les microtâches ne s'exécutent pas
@@ -286,7 +286,7 @@ while (true) {
 
 Ces deux approches créent des microtâches, mais avec des différences subtiles :
 
-```javascript
+```typescript
 // Approche 1 : queueMicrotask (recommandé)
 queueMicrotask(() => {
   console.log('queueMicrotask');
@@ -308,7 +308,7 @@ Promise.resolve().then(() => {
 | Sémantique | Explicite : "planifier une microtâche" | Détourne l'API Promise |
 | Ordre | Identique (même file) | Identique (même file) |
 
-```javascript
+```typescript
 // Différence de gestion d'erreurs
 queueMicrotask(() => {
   throw new Error('boom');
@@ -325,12 +325,12 @@ Promise.resolve().then(() => {
 
 **Piège 1 : `async/await` et les ticks supplémentaires**
 
-```javascript
-async function foo() {
+```typescript
+async function foo(): Promise<string> {
   return 'foo'; // équivalent à return Promise.resolve('foo')
 }
 
-async function bar() {
+async function bar(): Promise<string> {
   return Promise.resolve('bar'); // unwrap du thenable = tick supplémentaire !
 }
 
@@ -344,7 +344,7 @@ bar().then(console.log);
 
 **Piège 2 : Les Promises déjà résolues ne sont pas synchrones**
 
-```javascript
+```typescript
 const p = Promise.resolve(42);
 
 p.then(v => console.log('then:', v));
@@ -357,7 +357,7 @@ console.log('sync');
 
 **Piège 3 : `.then()` chaîné crée des microtâches séquentielles**
 
-```javascript
+```typescript
 Promise.resolve()
   .then(() => console.log('then 1'))
   .then(() => console.log('then 2'))
@@ -408,8 +408,8 @@ Visualisation de l'entrelacement :
 
 `MutationObserver` observe les modifications du DOM et ses callbacks sont des **microtâches** :
 
-```javascript
-const observer = new MutationObserver((mutations) => {
+```typescript
+const observer = new MutationObserver((mutations: MutationRecord[]) => {
   console.log('DOM muté - microtâche');
 });
 
@@ -432,7 +432,7 @@ Cela garantit que le callback du MutationObserver s'exécute **avant** le procha
 
 ### Demo 1 — Puzzle basique : micro vs macro
 
-```javascript
+```typescript
 // demo1-basic-puzzle.js
 
 console.log('1');
@@ -456,7 +456,7 @@ console.log('4');
 
 ### Demo 2 — Entrelacement de chaînes Promise
 
-```javascript
+```typescript
 // demo2-interleaving.js
 
 Promise.resolve()
@@ -489,7 +489,7 @@ queueMicrotask(() => console.log('QM-2'));
 
 ### Demo 3 — nextTick vs microtask vs macrotask (Node.js)
 
-```javascript
+```typescript
 // demo3-full-priority.js
 // Exécuter avec : node demo3-full-priority.js
 
@@ -553,22 +553,22 @@ console.log('sync');
 
 ### Demo 4 — Puzzle avancé : async/await et microtâches
 
-```javascript
+```typescript
 // demo4-async-await.js
 
-async function alpha() {
+async function alpha(): Promise<void> {
   console.log('alpha-1');
   await beta();
   console.log('alpha-2'); // microtâche (reprise après await)
 }
 
-async function beta() {
+async function beta(): Promise<void> {
   console.log('beta-1');
   await gamma();
   console.log('beta-2'); // microtâche
 }
 
-async function gamma() {
+async function gamma(): Promise<void> {
   console.log('gamma');
 }
 
@@ -611,12 +611,12 @@ console.log('end');
 
 ### Demo 5 — Famine : setTimeout bloqué par microtâches
 
-```javascript
+```typescript
 // demo5-starvation-proof.js
 
 const start = Date.now();
-let timerRan = false;
-let microCount = 0;
+let timerRan: boolean = false;
+let microCount: number = 0;
 
 // Planifier un timer à 0ms
 setTimeout(() => {
@@ -626,7 +626,7 @@ setTimeout(() => {
 }, 0);
 
 // Créer 100 000 microtâches en chaîne
-function chainMicrotasks(n) {
+function chainMicrotasks(n: number): Promise<void> {
   if (n <= 0) return Promise.resolve();
   return Promise.resolve().then(() => {
     microCount++;
@@ -650,7 +650,7 @@ chainMicrotasks(100_000).then(() => {
 
 ### Demo 6 — Puzzle expert : mélange complet
 
-```javascript
+```typescript
 // demo6-expert-puzzle.js
 
 console.log('A');
@@ -708,7 +708,7 @@ console.log('K');
 
 ### Demo 7 — Puzzle Node.js : mélange complet avec phases
 
-```javascript
+```typescript
 // demo7-nodejs-full.js (Node.js uniquement)
 
 setTimeout(() => {
@@ -851,14 +851,14 @@ L'ordre est : **synchrone -> nextTick -> microtasks -> macrotasks**. Si tu retie
 
 Prédisez l'ordre exact de sortie du code suivant (Node.js v18+) :
 
-```javascript
-async function one() {
+```typescript
+async function one(): Promise<void> {
   console.log('1');
   await two();
   console.log('2');
 }
 
-async function two() {
+async function two(): Promise<void> {
   console.log('3');
 }
 

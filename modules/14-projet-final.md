@@ -97,35 +97,33 @@ qui reproduit fidèlement le comportement du runtime.
 
 #### 2.2. API requise
 
-```javascript
+```typescript
 class MiniEventLoop {
   constructor()
 
   // --- Pile d'appels ---
-  pushFrame(name, fn)          // Empiler un frame d'exécution
-  popFrame()                   // Dépiler un frame
-  getCallStack()               // Retourner la pile courante (pour debug)
+  pushFrame(name: string, fn: () => void): void
+  popFrame(): void
+  getCallStack(): string[]
 
   // --- Macrotasks ---
-  setTimeout(callback, delay)  // Planifier un macrotask après 'delay' ms
-  setImmediate(callback)       // Planifier un macrotask immédiat (delay = 0)
-  clearTimeout(id)             // Annuler un timer
+  setTimeout(callback: () => void, delay: number): number
+  setImmediate(callback: () => void): number
+  clearTimeout(id: number): void
 
   // --- Microtasks ---
-  queueMicrotask(callback)     // Ajouter une microtask à la file
-  promiseResolve(value)        // Simuler Promise.resolve(value).then(cb)
-                               // retourne un objet { then(cb) }
+  queueMicrotask(callback: () => void): void
+  promiseResolve<T>(value: T): { then(cb: (val: T) => void): void }
 
   // --- Boucle principale ---
-  tick()                       // Exécuter UN cycle de la boucle
-  run()                        // Exécuter jusqu'à ce que toutes les files
-                               // soient vides
-  drain()                      // Vider toutes les microtasks en attente
+  tick(): boolean
+  run(): void
+  drain(): void
 
   // --- Observabilité ---
-  onTaskExecuted(listener)     // Callback appelé après chaque tâche
-  getStats()                   // { microtasksRun, macrotasksRun,
-                               //   currentTime, callStackDepth }
+  onTaskExecuted(listener: (info: { type: string; name: string }) => void): void
+  getStats(): { microtasksRun: number; macrotasksRun: number;
+                currentTime: number; callStackDepth: number }
 }
 ```
 
@@ -178,7 +176,7 @@ L'algorithme d'un cycle (tick) de votre event loop doit respecter cet ordre :
 
 **Microtasks drainées avant le prochain macrotask :**
 
-```javascript
+```typescript
 const loop = new MiniEventLoop();
 
 loop.setTimeout(() => console.log('A - macrotask 1'), 0);
@@ -197,9 +195,9 @@ loop.run();
 
 **Timers respectent le délai :**
 
-```javascript
+```typescript
 const loop = new MiniEventLoop();
-const order = [];
+const order: string[] = [];
 
 loop.setTimeout(() => order.push('100ms'), 100);
 loop.setTimeout(() => order.push('50ms'), 50);
@@ -211,9 +209,9 @@ loop.run();
 
 **Promise.resolve().then() est une microtask :**
 
-```javascript
+```typescript
 const loop = new MiniEventLoop();
-const order = [];
+const order: string[] = [];
 
 loop.setTimeout(() => order.push('macro'), 0);
 const p = loop.promiseResolve(42);
@@ -265,16 +263,37 @@ priorités, time slicing, annulation et dépendances.
 
 #### 3.2. API requise
 
-```javascript
-const PRIORITY = { HIGH: 0, NORMAL: 1, LOW: 2 };
+```typescript
+const PRIORITY = { HIGH: 0, NORMAL: 1, LOW: 2 } as const;
+
+type PriorityLevel = typeof PRIORITY[keyof typeof PRIORITY];
+
+interface SchedulerOptions {
+  timeBudget?: number;
+  yieldFn?: (fn: () => void) => void;
+}
+
+interface TaskOptions {
+  priority?: PriorityLevel;
+  name?: string;
+  dependencies?: number[];
+  signal?: AbortSignal;
+}
+
+interface TaskHandle {
+  id: number;
+  name: string;
+  promise: Promise<unknown>;
+  cancel(): void;
+}
 
 class TaskScheduler {
-  constructor(options = {})
+  constructor(options?: SchedulerOptions)
   // options.timeBudget : ms max par chunk (défaut: 5)
   // options.yieldFn   : fonction de yield (défaut: setTimeout(fn, 0))
 
   // --- Gestion des tâches ---
-  schedule(taskFn, options = {})
+  schedule(taskFn: () => unknown | Promise<unknown>, options?: TaskOptions): TaskHandle
   // taskFn    : fonction (peut être async ou générateur)
   // options   : { priority, name, dependencies, signal }
   // retourne  : { id, name, promise, cancel() }
@@ -304,7 +323,7 @@ Le scheduler doit supporter des tâches qui **cèdent le contrôle** via des
 fonctions génératrices. Cela permet le time slicing : le scheduler peut
 interrompre une longue tâche après N ms et la reprendre plus tard.
 
-```javascript
+```typescript
 // Tâche simple (non-interruptible)
 scheduler.schedule(() => {
   return computeResult(data);
@@ -360,40 +379,40 @@ scheduler.schedule(function* () {
   4. task_E attend que C ET D soient terminées
 ```
 
-```javascript
-const taskA = scheduler.schedule(() => fetchData('A'), {
+```typescript
+const taskA: TaskHandle = scheduler.schedule(() => fetchData('A'), {
   priority: PRIORITY.HIGH, name: 'fetch-A'
 });
 
-const taskB = scheduler.schedule(() => fetchData('B'), {
+const taskB: TaskHandle = scheduler.schedule(() => fetchData('B'), {
   priority: PRIORITY.HIGH, name: 'fetch-B'
 });
 
-const taskC = scheduler.schedule((results) => merge(results), {
+const taskC: TaskHandle = scheduler.schedule((results: unknown[]) => merge(results), {
   priority: PRIORITY.NORMAL,
   name: 'merge',
   dependencies: [taskA.id, taskB.id],
 });
 
-const taskD = scheduler.schedule(() => fetchData('D'), {
+const taskD: TaskHandle = scheduler.schedule(() => fetchData('D'), {
   priority: PRIORITY.NORMAL, name: 'fetch-D'
 });
 
-const taskE = scheduler.schedule((results) => finalize(results), {
+const taskE: TaskHandle = scheduler.schedule((results: unknown[]) => finalize(results), {
   priority: PRIORITY.LOW,
   name: 'finalize',
   dependencies: [taskC.id, taskD.id],
 });
 
 // taskE.promise se résout quand tout est fini
-const finalResult = await taskE.promise;
+const finalResult: unknown = await taskE.promise;
 ```
 
 #### 3.5. Annulation
 
-```javascript
+```typescript
 // Annulation via cancel()
-const task = scheduler.schedule(function* () {
+const task: TaskHandle = scheduler.schedule(function* (): Generator<unknown> {
   for (let i = 0; ; i++) {
     yield processChunk(i);
   }
@@ -404,7 +423,7 @@ task.cancel(); // la tâche est retirée de la file
 // task.promise est rejetée avec une erreur CancellationError
 
 // Annulation via AbortSignal
-const controller = new AbortController();
+const controller: AbortController = new AbortController();
 
 scheduler.schedule(function* () {
   while (true) {
@@ -452,7 +471,7 @@ On vous fournit un programme Node.js volontairement mal écrit. Il contient
 
 #### 4.2. Le programme défaillant
 
-```javascript
+```typescript
 // broken-app.mjs — Programme à auditer
 // Ce serveur HTTP traite des données de capteurs IoT
 
@@ -462,9 +481,9 @@ import fs from 'node:fs';
 // ==========================================
 // PROBLÈME 1 : Fuite mémoire — cache sans limite
 // ==========================================
-const cache = {};
+const cache: Record<string, { readings: Record<string, unknown>[]; metadata: unknown }> = {};
 
-function getCachedData(sensorId) {
+function getCachedData(sensorId: string): { readings: Record<string, unknown>[]; metadata: unknown } {
   if (!cache[sensorId]) {
     // Chaque nouveau capteur ajoute une entrée qui n'est JAMAIS nettoyée
     cache[sensorId] = {
@@ -480,8 +499,8 @@ function getCachedData(sensorId) {
 // ==========================================
 // PROBLÈME 3 : Hidden class thrashing
 // ==========================================
-function createReading(data) {
-  const reading = {};
+function createReading(data: Record<string, unknown>): Record<string, unknown> {
+  const reading: Record<string, unknown> = {};
   if (data.temperature !== undefined) {
     reading.temperature = data.temperature;
     reading.unit = 'celsius';
@@ -502,15 +521,15 @@ function createReading(data) {
 // ==========================================
 // PROBLÈME 5 : Mégamorphic IC
 // ==========================================
-function getReadingValue(reading) {
+function getReadingValue(reading: Record<string, unknown>): number {
   // Appelé avec des objets de formes très variées (voir createReading)
-  return reading.temperature || reading.humidity || reading.pressure || 0;
+  return (reading.temperature || reading.humidity || reading.pressure || 0) as number;
 }
 
 // ==========================================
 // PROBLÈME 6 : Boucle CPU-intensive bloquante
 // ==========================================
-function computeStatistics(readings) {
+function computeStatistics(readings: Record<string, unknown>[]): Record<string, unknown> {
   // Tri à chaque appel au lieu de maintenir une structure triée
   const sorted = readings.slice().sort((a, b) => {
     return getReadingValue(a) - getReadingValue(b);
@@ -519,7 +538,7 @@ function computeStatistics(readings) {
   let sum = 0;
   let output = '';
   for (const r of sorted) {
-    const val = getReadingValue(r);
+    const val: number = getReadingValue(r);
     sum += val;
     // PROBLÈME 7 : concaténation string en boucle
     output += `${r.id}:${val}\n`;
@@ -539,13 +558,13 @@ function computeStatistics(readings) {
 // ==========================================
 // Serveur HTTP
 // ==========================================
-const server = http.createServer((req, res) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   if (req.method === 'POST' && req.url === '/reading') {
     let body = '';
-    req.on('data', (chunk) => { body += chunk; });
+    req.on('data', (chunk: Buffer) => { body += chunk; });
     req.on('end', () => {
-      const data = JSON.parse(body);
-      const sensorData = getCachedData(data.sensorId);
+      const data: Record<string, unknown> = JSON.parse(body);
+      const sensorData = getCachedData(data.sensorId as string);
       const reading = createReading(data);
       sensorData.readings.push(reading);
 
@@ -594,10 +613,19 @@ Votre rapport doit suivre cette structure pour chaque problème identifié :
 
 #### 5.1. Squelette — Partie 1 (Mini Event Loop)
 
-```javascript
+```typescript
 // mini-event-loop.mjs — Squelette à compléter
 
 export class MiniEventLoop {
+  private _callStack: Array<{ name: string; fn: () => unknown }>;
+  private _microtaskQueue: Array<() => void>;
+  private _macrotaskQueue: Array<() => void>;
+  private _timers: Map<number, { fn: () => void; deadline: number }>;
+  private _nextTimerId: number;
+  private _currentTime: number;
+  private _stats: { microtasksRun: number; macrotasksRun: number };
+  private _listeners: Array<(info: { type: string; name: string }) => void>;
+
   constructor() {
     this._callStack = [];
     this._microtaskQueue = [];
@@ -611,56 +639,56 @@ export class MiniEventLoop {
 
   // --- Call Stack ---
 
-  pushFrame(name, fn) {
+  pushFrame(name: string, fn: () => unknown): void {
     // TODO: empiler { name, fn } sur this._callStack
     // Exécuter fn()
     // Gérer les erreurs (try/catch)
   }
 
-  popFrame() {
+  popFrame(): void {
     // TODO: dépiler le dernier frame
   }
 
-  getCallStack() {
+  getCallStack(): string[] {
     return this._callStack.map(f => f.name);
   }
 
   // --- Timers (Macrotasks) ---
 
-  setTimeout(callback, delay = 0) {
+  setTimeout(callback: () => void, delay: number = 0): number {
     const id = this._nextTimerId++;
     // TODO: enregistrer le timer avec deadline = this._currentTime + delay
     return id;
   }
 
-  setImmediate(callback) {
+  setImmediate(callback: () => void): void {
     // TODO: ajouter directement à la macrotask queue (delay = 0)
   }
 
-  clearTimeout(id) {
+  clearTimeout(id: number): void {
     // TODO: retirer le timer du registre
   }
 
   // --- Microtasks ---
 
-  queueMicrotask(callback) {
+  queueMicrotask(callback: () => void): void {
     // TODO: ajouter à la microtask queue
   }
 
-  promiseResolve(value) {
+  promiseResolve(value: unknown): { then(cb: (val: unknown) => void): void } {
     // TODO: retourner un objet avec une méthode then(cb)
     // then(cb) doit ajouter une microtask qui appelle cb(value)
   }
 
   // --- Boucle principale ---
 
-  drain() {
+  drain(): void {
     // TODO: exécuter TOUTES les microtasks
     // Y compris celles ajoutées pendant le drain
     // CRITIQUE : boucle while, pas forEach
   }
 
-  tick() {
+  tick(): boolean {
     // TODO: implémenter l'algorithme décrit dans la section 2.3
     // 1. Vérifier timers expirés -> macrotask queue
     // 2. Exécuter UN macrotask
@@ -669,17 +697,17 @@ export class MiniEventLoop {
     // 5. Retourner true/false
   }
 
-  run() {
+  run(): void {
     // TODO: appeler tick() en boucle jusqu'à ce que tout soit vide
   }
 
   // --- Observabilité ---
 
-  onTaskExecuted(listener) {
+  onTaskExecuted(listener: (info: { type: string; name: string }) => void): void {
     this._listeners.push(listener);
   }
 
-  getStats() {
+  getStats(): { microtasksRun: number; macrotasksRun: number; currentTime: number; callStackDepth: number } {
     return {
       ...this._stats,
       currentTime: this._currentTime,
@@ -691,16 +719,44 @@ export class MiniEventLoop {
 
 #### 5.2. Squelette — Partie 2 (Task Scheduler)
 
-```javascript
+```typescript
 // task-scheduler.mjs — Squelette à compléter
 
-export const PRIORITY = Object.freeze({ HIGH: 0, NORMAL: 1, LOW: 2 });
+export const PRIORITY = Object.freeze({ HIGH: 0, NORMAL: 1, LOW: 2 }) as const;
+
+interface SchedulerOptions {
+  timeBudget?: number;
+  yieldFn?: () => Promise<void>;
+}
+
+interface TaskInfo {
+  id: number;
+  name: string;
+  priority: number;
+  state: string;
+  taskFn: (() => unknown) | (() => Generator<unknown>);
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
+  dependencies: number[];
+  signal: AbortSignal | null;
+}
 
 export class TaskScheduler {
-  constructor(options = {}) {
+  private _timeBudget: number;
+  private _yieldFn: () => Promise<void>;
+  private _queues: Array<TaskInfo[]>;
+  private _nextId: number;
+  private _running: boolean;
+  private _paused: boolean;
+  private _tasks: Map<number, TaskInfo>;
+  private _stats: { pending: number; running: number; completed: number; cancelled: number; totalYields: number };
+  private _completionListeners: Array<(info: TaskInfo) => void>;
+  private _yieldListeners: Array<() => void>;
+
+  constructor(options: SchedulerOptions = {}) {
     this._timeBudget = options.timeBudget ?? 5; // ms
     this._yieldFn = options.yieldFn ?? (() =>
-      new Promise(r => setTimeout(r, 0))
+      new Promise<void>(r => setTimeout(r, 0))
     );
     this._queues = [[], [], []]; // [HIGH, NORMAL, LOW]
     this._nextId = 1;
@@ -715,7 +771,7 @@ export class TaskScheduler {
     this._yieldListeners = [];
   }
 
-  schedule(taskFn, options = {}) {
+  schedule(taskFn: (() => unknown) | (() => Generator<unknown>), options: { priority?: number; name?: string; dependencies?: number[]; signal?: AbortSignal } = {}): TaskHandle {
     const id = this._nextId++;
     const priority = options.priority ?? PRIORITY.NORMAL;
     const name = options.name ?? `task-${id}`;
@@ -730,29 +786,29 @@ export class TaskScheduler {
     //    avant d'ajouter la tâche à la queue
     // 5. Retourner { id, name, promise, cancel() }
 
-    return { id, name, promise: null, cancel: () => {} }; // placeholder
+    return { id, name, promise: null, cancel: () => {} } as unknown as TaskHandle; // placeholder
   }
 
-  start() {
+  start(): void {
     // TODO: démarrer la boucle d'exécution
     // Appeler _runLoop() qui exécute les tâches une par une
   }
 
-  pause() {
+  pause(): void {
     this._paused = true;
   }
 
-  resume() {
+  resume(): void {
     this._paused = false;
     // TODO: relancer la boucle si nécessaire
   }
 
-  cancelAll() {
+  cancelAll(): void {
     // TODO: annuler toutes les tâches en attente
     // Rejeter leurs promises avec CancellationError
   }
 
-  async _runLoop() {
+  async _runLoop(): Promise<void> {
     // TODO:
     // while (il y a des tâches ET pas en pause) {
     //   1. Choisir la tâche de plus haute priorité
@@ -762,7 +818,7 @@ export class TaskScheduler {
     // }
   }
 
-  async _executeGenerator(gen, taskInfo) {
+  async _executeGenerator(gen: Generator<unknown>, taskInfo: TaskInfo): Promise<unknown> {
     // TODO:
     // Boucle :
     //   const start = performance.now()
@@ -775,9 +831,9 @@ export class TaskScheduler {
     //   recommencer
   }
 
-  getStats() { return { ...this._stats }; }
-  onTaskComplete(listener) { this._completionListeners.push(listener); }
-  onYield(listener) { this._yieldListeners.push(listener); }
+  getStats(): { pending: number; running: number; completed: number; cancelled: number; totalYields: number } { return { ...this._stats }; }
+  onTaskComplete(listener: (info: TaskInfo) => void): void { this._completionListeners.push(listener); }
+  onYield(listener: () => void): void { this._yieldListeners.push(listener); }
 }
 ```
 
@@ -785,7 +841,7 @@ export class TaskScheduler {
 
 #### 6.1. Tests — Mini Event Loop
 
-```javascript
+```typescript
 // tests/event-loop.test.mjs
 import { MiniEventLoop } from '../mini-event-loop.mjs';
 import assert from 'node:assert/strict';
@@ -794,7 +850,7 @@ import { describe, it } from 'node:test';
 describe('MiniEventLoop', () => {
   it('exécute les microtasks avant les macrotasks', () => {
     const loop = new MiniEventLoop();
-    const order = [];
+    const order: string[] = [];
 
     loop.setTimeout(() => order.push('macro'), 0);
     loop.queueMicrotask(() => order.push('micro'));
@@ -805,7 +861,7 @@ describe('MiniEventLoop', () => {
 
   it('draine les microtasks imbriquées avant le macrotask suivant', () => {
     const loop = new MiniEventLoop();
-    const order = [];
+    const order: string[] = [];
 
     loop.setTimeout(() => order.push('A'), 0);
     loop.setTimeout(() => order.push('D'), 0);
@@ -820,7 +876,7 @@ describe('MiniEventLoop', () => {
 
   it('respecte l\'ordre des timers par délai', () => {
     const loop = new MiniEventLoop();
-    const order = [];
+    const order: string[] = [];
 
     loop.setTimeout(() => order.push('100ms'), 100);
     loop.setTimeout(() => order.push('50ms'), 50);
@@ -832,10 +888,10 @@ describe('MiniEventLoop', () => {
 
   it('promiseResolve().then() est une microtask', () => {
     const loop = new MiniEventLoop();
-    const order = [];
+    const order: string[] = [];
 
     loop.setTimeout(() => order.push('macro'), 0);
-    loop.promiseResolve(42).then(v => order.push(`micro:${v}`));
+    loop.promiseResolve(42).then((v: unknown) => order.push(`micro:${v}`));
 
     loop.run();
     assert.deepStrictEqual(order, ['micro:42', 'macro']);
@@ -843,9 +899,9 @@ describe('MiniEventLoop', () => {
 
   it('clearTimeout annule un timer', () => {
     const loop = new MiniEventLoop();
-    const order = [];
+    const order: string[] = [];
 
-    const id = loop.setTimeout(() => order.push('cancelled'), 0);
+    const id: number = loop.setTimeout(() => order.push('cancelled'), 0);
     loop.setTimeout(() => order.push('kept'), 0);
     loop.clearTimeout(id);
 
@@ -855,7 +911,7 @@ describe('MiniEventLoop', () => {
 
   it('gère un scénario complexe d\'imbrication', () => {
     const loop = new MiniEventLoop();
-    const order = [];
+    const order: string[] = [];
 
     loop.setTimeout(() => {
       order.push('T1');
@@ -894,7 +950,7 @@ describe('MiniEventLoop', () => {
 
 #### 6.2. Tests — Task Scheduler
 
-```javascript
+```typescript
 // tests/scheduler.test.mjs
 import { TaskScheduler, PRIORITY } from '../task-scheduler.mjs';
 import assert from 'node:assert/strict';
@@ -903,7 +959,7 @@ import { describe, it } from 'node:test';
 describe('TaskScheduler', () => {
   it('exécute les tâches par ordre de priorité', async () => {
     const scheduler = new TaskScheduler();
-    const order = [];
+    const order: string[] = [];
 
     scheduler.schedule(() => order.push('low'), {
       priority: PRIORITY.LOW, name: 'low'
@@ -917,37 +973,37 @@ describe('TaskScheduler', () => {
 
     scheduler.start();
     // Attendre la fin de toutes les tâches
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise<void>(r => setTimeout(r, 100));
 
     assert.deepStrictEqual(order, ['high', 'normal', 'low']);
   });
 
   it('supporte l\'annulation', async () => {
     const scheduler = new TaskScheduler();
-    const order = [];
+    const order: string[] = [];
 
-    const task = scheduler.schedule(() => order.push('cancelled'), {
+    const task: TaskHandle = scheduler.schedule(() => order.push('cancelled'), {
       name: 'to-cancel'
     });
     scheduler.schedule(() => order.push('kept'), { name: 'keeper' });
 
     task.cancel();
     scheduler.start();
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise<void>(r => setTimeout(r, 100));
 
     assert.deepStrictEqual(order, ['kept']);
   });
 
   it('respecte les dépendances', async () => {
     const scheduler = new TaskScheduler();
-    const order = [];
+    const order: string[] = [];
 
-    const a = scheduler.schedule(() => {
+    const a: TaskHandle = scheduler.schedule(() => {
       order.push('A');
       return 'resultA';
     }, { name: 'A', priority: PRIORITY.HIGH });
 
-    const b = scheduler.schedule(() => {
+    const b: TaskHandle = scheduler.schedule(() => {
       order.push('B');
     }, { name: 'B', priority: PRIORITY.HIGH, dependencies: [a.id] });
 
@@ -963,7 +1019,7 @@ describe('TaskScheduler', () => {
 
     scheduler.onYield(() => yieldCount++);
 
-    const task = scheduler.schedule(function* () {
+    const task: TaskHandle = scheduler.schedule(function* (): Generator<undefined, string> {
       for (let i = 0; i < 100_000; i++) {
         if (i % 1000 === 0) yield;
       }
@@ -971,7 +1027,7 @@ describe('TaskScheduler', () => {
     }, { name: 'long-task' });
 
     scheduler.start();
-    const result = await task.promise;
+    const result: unknown = await task.promise;
 
     assert.equal(result, 'done');
     assert.ok(yieldCount > 0, 'Le scheduler devrait avoir yield au moins une fois');
@@ -1084,11 +1140,17 @@ supporte l'annulation basique.
 
 ### Démo 1 — Event Loop minimal fonctionnel (référence)
 
-```javascript
+```typescript
 // demo-mini-loop.mjs
 // Implémentation de référence minimale pour illustrer le concept
 
 class DemoEventLoop {
+  microtasks: Array<() => void>;
+  macrotasks: Array<() => void>;
+  timers: Array<{ id: number; fn: () => void; deadline: number }>;
+  time: number;
+  nextTimerId: number;
+
   constructor() {
     this.microtasks = [];
     this.macrotasks = [];
@@ -1097,35 +1159,35 @@ class DemoEventLoop {
     this.nextTimerId = 1;
   }
 
-  setTimeout(fn, delay = 0) {
+  setTimeout(fn: () => void, delay: number = 0): number {
     const id = this.nextTimerId++;
     this.timers.push({ id, fn, deadline: this.time + delay });
     this.timers.sort((a, b) => a.deadline - b.deadline);
     return id;
   }
 
-  queueMicrotask(fn) {
+  queueMicrotask(fn: () => void): void {
     this.microtasks.push(fn);
   }
 
-  promiseResolve(val) {
+  promiseResolve(val: unknown): { then(cb: (v: unknown) => void): { then(cb: (v: unknown) => void): void } } {
     const self = this;
     return {
-      then(cb) {
+      then(cb: (v: unknown) => void) {
         self.queueMicrotask(() => cb(val));
         return self.promiseResolve(undefined);
       }
     };
   }
 
-  drainMicrotasks() {
+  drainMicrotasks(): void {
     while (this.microtasks.length > 0) {
-      const fn = this.microtasks.shift();
+      const fn = this.microtasks.shift()!;
       fn();
     }
   }
 
-  tick() {
+  tick(): boolean {
     // 1. Timers expirés -> macrotask queue
     while (this.timers.length > 0 && this.timers[0].deadline <= this.time) {
       const timer = this.timers.shift();
@@ -1134,7 +1196,7 @@ class DemoEventLoop {
 
     // 2. Exécuter un macrotask
     if (this.macrotasks.length > 0) {
-      const task = this.macrotasks.shift();
+      const task = this.macrotasks.shift()!;
       task();
     }
 
@@ -1155,7 +1217,7 @@ class DemoEventLoop {
       || this.timers.length > 0;
   }
 
-  run() {
+  run(): void {
     let safety = 0;
     while (this.tick() && safety++ < 10000) {}
     if (safety >= 10000) console.warn('Safety limit reached');
@@ -1164,7 +1226,7 @@ class DemoEventLoop {
 
 // --- Test ---
 const loop = new DemoEventLoop();
-const order = [];
+const order: string[] = [];
 
 loop.setTimeout(() => {
   order.push('T1');
@@ -1189,31 +1251,35 @@ console.log('Correct           :', JSON.stringify(order) ===
 
 ### Démo 2 — Scheduler avec générateur et time slicing
 
-```javascript
+```typescript
 // demo-scheduler-generator.mjs
 import { performance } from 'node:perf_hooks';
 
 class DemoScheduler {
-  constructor(budget = 5) {
+  budget: number;
+  queue: Array<{ genFn: () => Generator<unknown>; name: string; resolve: (value: unknown) => void; reject: (reason: unknown) => void }>;
+
+  constructor(budget: number = 5) {
     this.budget = budget; // ms
     this.queue = [];
   }
 
-  schedule(genFn, name = 'task') {
-    let resolve, reject;
-    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  schedule(genFn: () => Generator<unknown>, name: string = 'task'): Promise<unknown> {
+    let resolve!: (value: unknown) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<unknown>((res, rej) => { resolve = res; reject = rej; });
     this.queue.push({ genFn, name, resolve, reject });
     return promise;
   }
 
-  async run() {
+  async run(): Promise<void> {
     while (this.queue.length > 0) {
-      const task = this.queue.shift();
+      const task = this.queue.shift()!;
       const gen = task.genFn();
-      let result;
+      let result: unknown;
 
       while (true) {
-        const chunkStart = performance.now();
+        const chunkStart: number = performance.now();
         let done = false;
 
         // Exécuter le générateur jusqu'au budget temps
@@ -1234,7 +1300,7 @@ class DemoScheduler {
 
         // Budget épuisé : yield
         console.log(`  [${task.name}] yield après ${this.budget}ms`);
-        await new Promise(r => setTimeout(r, 0));
+        await new Promise<void>(r => setTimeout(r, 0));
       }
     }
   }
@@ -1269,7 +1335,7 @@ scheduler.run().then(async () => {
 
 ### Démo 3 — Détection des 8 problèmes du programme défaillant
 
-```javascript
+```typescript
 // demo-audit-findings.mjs
 // Ce script illustre comment détecter chacun des 8 problèmes
 
@@ -1380,7 +1446,7 @@ console.log(correctedCode);
 
 ### Démo 4 — Benchmark avant/après correction (Problème 7)
 
-```javascript
+```typescript
 // demo-audit-benchmark.mjs
 import { performance } from 'node:perf_hooks';
 
@@ -1392,7 +1458,7 @@ const readings = Array.from({ length: N }, (_, i) => ({
 }));
 
 // --- AVANT : concaténation string en boucle ---
-function reportBefore(readings) {
+function reportBefore(readings: Array<{ id: string; val: number }>): string {
   let output = '';
   for (const r of readings) {
     output += `${r.id}:${r.val.toFixed(2)}\n`;
@@ -1401,8 +1467,8 @@ function reportBefore(readings) {
 }
 
 // --- APRÈS : Array.join ---
-function reportAfter(readings) {
-  const lines = new Array(readings.length);
+function reportAfter(readings: Array<{ id: string; val: number }>): string {
+  const lines: string[] = new Array(readings.length);
   for (let i = 0; i < readings.length; i++) {
     lines[i] = `${readings[i].id}:${readings[i].val.toFixed(2)}`;
   }
@@ -1429,29 +1495,45 @@ console.log(`  Tailles output  : ${r1.length} / ${r2.length}`);
 
 ### Démo 5 — Scheduler complet avec dépendances
 
-```javascript
+```typescript
 // demo-scheduler-deps.mjs
 import { performance } from 'node:perf_hooks';
 
+interface FullTask {
+  id: number;
+  fn: () => unknown | Promise<unknown>;
+  deps: number[];
+  name: string;
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
+  promise: Promise<unknown>;
+  cancelled: boolean;
+}
+
 class FullScheduler {
+  tasks: Map<number, FullTask>;
+  nextId: number;
+  completed: Set<number>;
+
   constructor() {
     this.tasks = new Map();
     this.nextId = 1;
     this.completed = new Set();
   }
 
-  schedule(fn, deps = [], name = '') {
+  schedule(fn: () => unknown | Promise<unknown>, deps: number[] = [], name: string = ''): { id: number; promise: Promise<unknown>; cancel: () => void } {
     const id = this.nextId++;
-    let resolve, reject;
-    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    let resolve!: (value: unknown) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<unknown>((res, rej) => { resolve = res; reject = rej; });
     this.tasks.set(id, {
       id, fn, deps, name: name || `task-${id}`,
       resolve, reject, promise, cancelled: false,
     });
-    return { id, promise, cancel: () => { this.tasks.get(id).cancelled = true; } };
+    return { id, promise, cancel: () => { this.tasks.get(id)!.cancelled = true; } };
   }
 
-  _getReady() {
+  _getReady(): FullTask | null {
     for (const [id, task] of this.tasks) {
       if (task.cancelled) {
         task.reject(new Error('Cancelled'));
@@ -1465,12 +1547,12 @@ class FullScheduler {
     return null;
   }
 
-  _detectCycle() {
+  _detectCycle(): boolean {
     // Simple DFS pour détecter les cycles
-    const visited = new Set();
-    const stack = new Set();
+    const visited = new Set<number>();
+    const stack = new Set<number>();
 
-    const visit = (id) => {
+    const visit = (id: number): boolean => {
       if (stack.has(id)) return true; // cycle
       if (visited.has(id)) return false;
       visited.add(id);
@@ -1491,7 +1573,7 @@ class FullScheduler {
     return false;
   }
 
-  async run() {
+  async run(): Promise<void> {
     if (this._detectCycle()) {
       throw new Error('Dépendance circulaire détectée !');
     }
@@ -1499,16 +1581,16 @@ class FullScheduler {
     while (this.tasks.size > 0) {
       const task = this._getReady();
       if (!task) {
-        await new Promise(r => setTimeout(r, 0));
+        await new Promise<void>(r => setTimeout(r, 0));
         continue;
       }
 
       this.tasks.delete(task.id);
-      const start = performance.now();
+      const start: number = performance.now();
 
       try {
-        const result = await task.fn();
-        const duration = performance.now() - start;
+        const result: unknown = await task.fn();
+        const duration: number = performance.now() - start;
         console.log(`  [${task.name}] terminé en ${duration.toFixed(1)}ms`);
         task.resolve(result);
       } catch (e) {
@@ -1625,8 +1707,13 @@ projet-final/
 Considérez cette implémentation d'un mini event loop. Elle contient
 **3 bugs subtils**. Trouvez-les.
 
-```javascript
+```typescript
 class BuggyEventLoop {
+  microtasks: Array<() => void>;
+  macrotasks: Array<() => void>;
+  timers: Array<{ fn: () => void; deadline: number }>;
+  time: number;
+
   constructor() {
     this.microtasks = [];
     this.macrotasks = [];
@@ -1634,15 +1721,15 @@ class BuggyEventLoop {
     this.time = 0;
   }
 
-  setTimeout(fn, delay) {
+  setTimeout(fn: () => void, delay: number): void {
     this.timers.push({ fn, deadline: this.time + delay });
   }
 
-  queueMicrotask(fn) {
+  queueMicrotask(fn: () => void): void {
     this.microtasks.push(fn);
   }
 
-  tick() {
+  tick(): boolean {
     // Timers
     for (let i = 0; i < this.timers.length; i++) {
       if (this.timers[i].deadline <= this.time) {
@@ -1671,7 +1758,7 @@ class BuggyEventLoop {
       || this.timers.length > 0;
   }
 
-  run() {
+  run(): void {
     while (this.tick()) {}  // <--- ligne C
   }
 }
@@ -1693,9 +1780,9 @@ Exemple : `timers = [t0, t1, t2]`, tous expirés.
 **Fix** : itérer en sens inverse (`for (let i = timers.length - 1; i >= 0; i--)`)
 ou utiliser `filter()` pour créer un nouveau tableau.
 
-```javascript
+```typescript
 // Fix
-const expired = this.timers.filter(t => t.deadline <= this.time);
+const expired: Array<{ fn: () => void; deadline: number }> = this.timers.filter(t => t.deadline <= this.time);
 this.timers = this.timers.filter(t => t.deadline > this.time);
 for (const t of expired) {
   this.macrotasks.push(t.fn);
@@ -1713,10 +1800,10 @@ microtasks, y compris celles enqueued pendant l'exécution.
 
 **Fix** : utiliser un `while` au lieu d'un `for` avec longueur fixe.
 
-```javascript
+```typescript
 // Fix
 while (this.microtasks.length > 0) {
-  const fn = this.microtasks.shift();
+  const fn = this.microtasks.shift()!;
   fn();
 }
 ```
@@ -1744,8 +1831,8 @@ passer en premier).
 **Fix** : drainer les microtasks AU DÉBUT de chaque tick, avant de traiter
 les macrotasks.
 
-```javascript
-tick() {
+```typescript
+tick(): boolean {
   // 1. D'abord drainer les microtasks existantes
   this.drainMicrotasks();
 

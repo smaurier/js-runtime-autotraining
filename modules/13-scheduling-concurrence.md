@@ -113,7 +113,7 @@ chacun avec son propre contexte JavaScript (heap, call stack, event loop).
 
 **Navigateur — Web Workers :**
 
-```javascript
+```typescript
 // main.js
 const worker = new Worker('worker.js');
 
@@ -129,14 +129,14 @@ worker.onerror = (e) => {
 };
 ```
 
-```javascript
+```typescript
 // worker.js
-function fibonacci(n) {
+function fibonacci(n: number): number {
   if (n <= 1) return n;
   return fibonacci(n - 1) + fibonacci(n - 2);
 }
 
-self.onmessage = (e) => {
+self.onmessage = (e: MessageEvent) => {
   const start = performance.now();
   const result = fibonacci(e.data.n);
   const duration = performance.now() - start;
@@ -146,7 +146,7 @@ self.onmessage = (e) => {
 
 **Node.js — Worker Threads :**
 
-```javascript
+```typescript
 // main.mjs
 import { Worker } from 'node:worker_threads';
 
@@ -164,20 +164,20 @@ worker.on('error', (err) => {
 });
 ```
 
-```javascript
+```typescript
 // worker.mjs
 import { parentPort } from 'node:worker_threads';
 
-function fibonacci(n) {
+function fibonacci(n: number): number {
   if (n <= 1) return n;
   return fibonacci(n - 1) + fibonacci(n - 2);
 }
 
-parentPort.on('message', (msg) => {
+parentPort!.on('message', (msg: { n: number }) => {
   const start = performance.now();
   const result = fibonacci(msg.n);
   const duration = performance.now() - start;
-  parentPort.postMessage({ result, duration });
+  parentPort!.postMessage({ result, duration });
 });
 ```
 
@@ -217,7 +217,7 @@ profonde). Pour les gros volumes de données, cette copie est coûteuse.
                     (synchronisation entre threads)
 ```
 
-```javascript
+```typescript
 // main.mjs — Partage mémoire avec un Worker
 import { Worker } from 'node:worker_threads';
 
@@ -241,7 +241,7 @@ worker.on('message', () => {
 });
 ```
 
-```javascript
+```typescript
 // atomic-worker.mjs
 import { parentPort, workerData } from 'node:worker_threads';
 
@@ -310,7 +310,7 @@ parentPort.postMessage('done');
    utilisable ici)
 ```
 
-```javascript
+```typescript
 // Transfert d'un ArrayBuffer (coût O(1))
 const buffer = new ArrayBuffer(1024 * 1024); // 1 Mo
 
@@ -353,12 +353,12 @@ typiquement = 16.67 ms par frame).
   5. Composite (GPU)
 ```
 
-```javascript
+```typescript
 // Animation fluide avec rAF
-let lastTime = 0;
+let lastTime: number = 0;
 const speed = 200; // pixels par seconde
 
-function animate(currentTime) {
+function animate(currentTime: number): void {
   const dt = (currentTime - lastTime) / 1000; // delta en secondes
   lastTime = currentTime;
 
@@ -394,12 +394,12 @@ requestAnimationFrame(animate);
   |-- travail 16ms --|  (pas d'idle time)
 ```
 
-```javascript
+```typescript
 // Traiter une file de tâches non-urgentes pendant le temps mort
-const taskQueue = [];
+const taskQueue: (() => void)[] = [];
 
-function scheduleIdleWork() {
-  requestIdleCallback((deadline) => {
+function scheduleIdleWork(): void {
+  requestIdleCallback((deadline: IdleDeadline) => {
     // deadline.timeRemaining() : ms restantes dans la période idle
     while (taskQueue.length > 0 && deadline.timeRemaining() > 1) {
       const task = taskQueue.shift();
@@ -414,7 +414,7 @@ function scheduleIdleWork() {
 }
 
 // Ajouter des tâches non-urgentes
-function addIdleTask(task) {
+function addIdleTask(task: () => void): void {
   taskQueue.push(task);
   if (taskQueue.length === 1) {
     scheduleIdleWork();
@@ -448,9 +448,9 @@ des tâches avec des **niveaux de priorité** explicites.
   +---------------------+--------------------+-------------------+
 ```
 
-```javascript
+```typescript
 // Planifier avec priorités
-async function handleUserClick() {
+async function handleUserClick(): Promise<void> {
   // Haute priorité : mise à jour visuelle immédiate
   await scheduler.postTask(() => {
     updateButtonState('loading');
@@ -501,13 +501,13 @@ navigateur, et bloque l'interactivité.
   |             |  input  |             |  input  |             |
 ```
 
-```javascript
+```typescript
 // Pattern : time slicing avec setTimeout
-async function processLargeArray(items, processFn, chunkSize = 100) {
+async function processLargeArray<T>(items: T[], processFn: (item: T, index: number) => void, chunkSize: number = 100): Promise<void> {
   let index = 0;
 
   return new Promise((resolve) => {
-    function processChunk() {
+    function processChunk(): void {
       const end = Math.min(index + chunkSize, items.length);
 
       for (; index < end; index++) {
@@ -532,9 +532,9 @@ await processLargeArray(millionItems, (item) => {
 });
 ```
 
-```javascript
+```typescript
 // Pattern moderne : scheduler.yield() (Chrome 129+)
-async function processWithYield(items, processFn) {
+async function processWithYield<T>(items: T[], processFn: (item: T, index: number) => void): Promise<void> {
   for (let i = 0; i < items.length; i++) {
     processFn(items[i], i);
 
@@ -548,7 +548,7 @@ async function processWithYield(items, processFn) {
 
 ### 9. Node.js Worker Threads en profondeur
 
-```javascript
+```typescript
 // main.mjs — Pool de workers pour paralléliser du travail
 import { Worker } from 'node:worker_threads';
 import { cpus } from 'node:os';
@@ -556,7 +556,11 @@ import { cpus } from 'node:os';
 const NUM_WORKERS = cpus().length;
 
 class WorkerPool {
-  constructor(workerPath, size) {
+  private workers: Worker[];
+  private queue: { data: unknown; resolve: (value: unknown) => void; reject: (reason: unknown) => void }[];
+  private freeWorkers: (Worker & { _currentTask?: { resolve: (value: unknown) => void; reject: (reason: unknown) => void } | null })[];
+
+  constructor(workerPath: URL, size: number) {
     this.workers = [];
     this.queue = [];
     this.freeWorkers = [];
@@ -582,14 +586,14 @@ class WorkerPool {
     }
   }
 
-  exec(data) {
+  exec(data: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       this.queue.push({ data, resolve, reject });
       this._processQueue();
     });
   }
 
-  _processQueue() {
+  _processQueue(): void {
     while (this.queue.length > 0 && this.freeWorkers.length > 0) {
       const worker = this.freeWorkers.pop();
       const task = this.queue.shift();
@@ -598,7 +602,7 @@ class WorkerPool {
     }
   }
 
-  async destroy() {
+  async destroy(): Promise<void> {
     for (const worker of this.workers) {
       await worker.terminate();
     }
@@ -646,13 +650,13 @@ Le pattern de yield utilise `setImmediate` ou `setTimeout(fn, 0)`.
   +---------------------------------------------------+
 ```
 
-```javascript
+```typescript
 // Yield coopératif en Node.js
-function yieldToEventLoop() {
+function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-async function processLargeDataset(dataset) {
+async function processLargeDataset<T>(dataset: T[]): Promise<unknown[]> {
   const results = [];
   for (let i = 0; i < dataset.length; i++) {
     results.push(heavyTransform(dataset[i]));
@@ -669,8 +673,20 @@ async function processLargeDataset(dataset) {
 
 ### 11. Pattern : implémentation d'un scheduler à priorités
 
-```javascript
+```typescript
+type Priority = 'high' | 'normal' | 'low';
+
+interface ScheduledTask {
+  fn: () => void | Promise<void>;
+  priority: Priority;
+  cancelled: boolean;
+  cancel(): void;
+}
+
 class PriorityScheduler {
+  private queues: Record<Priority, ScheduledTask[]>;
+  private running: boolean;
+
   constructor() {
     // 3 files de priorité
     this.queues = {
@@ -681,7 +697,7 @@ class PriorityScheduler {
     this.running = false;
   }
 
-  schedule(fn, priority = 'normal') {
+  schedule(fn: () => void | Promise<void>, priority: Priority = 'normal'): ScheduledTask {
     const task = {
       fn,
       priority,
@@ -693,20 +709,20 @@ class PriorityScheduler {
     return task;
   }
 
-  _nextTask() {
+  _nextTask(): ScheduledTask | null {
     // Priorité stricte : high > normal > low
-    for (const level of ['high', 'normal', 'low']) {
+    for (const level of ['high', 'normal', 'low'] as Priority[]) {
       while (this.queues[level].length > 0) {
-        const task = this.queues[level].shift();
+        const task = this.queues[level].shift()!;
         if (!task.cancelled) return task;
       }
     }
     return null;
   }
 
-  async _run() {
+  async _run(): Promise<void> {
     this.running = true;
-    let task;
+    let task: ScheduledTask | null;
 
     while ((task = this._nextTask()) !== null) {
       const start = performance.now();
@@ -736,13 +752,13 @@ class PriorityScheduler {
 
 ### Démo 1 — Worker vs main thread : calcul de Fibonacci
 
-```javascript
+```typescript
 // demo-worker-vs-main.mjs
 // Montre la différence entre bloquer le thread principal et utiliser un Worker
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { performance } from 'node:perf_hooks';
 
-function fibonacci(n) {
+function fibonacci(n: number): number {
   if (n <= 1) return n;
   return fibonacci(n - 1) + fibonacci(n - 2);
 }
@@ -799,15 +815,15 @@ if (isMainThread) {
 
 } else {
   // Code Worker
-  parentPort.on('message', (n) => {
-    parentPort.postMessage(fibonacci(n));
+  parentPort!.on('message', (n: number) => {
+    parentPort!.postMessage(fibonacci(n));
   });
 }
 ```
 
 ### Démo 2 — SharedArrayBuffer : compteur atomique multi-thread
 
-```javascript
+```typescript
 // demo-shared-counter.mjs
 import { Worker, isMainThread, workerData, parentPort } from 'node:worker_threads';
 
@@ -858,7 +874,7 @@ if (isMainThread) {
 
 ### Démo 3 — Time slicing avec mesure d'interactivité
 
-```javascript
+```typescript
 // demo-time-slicing.mjs
 // Simule le time slicing en Node.js et mesure la réactivité de l'event loop
 import { performance } from 'node:perf_hooks';
@@ -866,7 +882,7 @@ import { performance } from 'node:perf_hooks';
 const TOTAL_ITEMS = 1_000_000;
 
 // Simule un traitement coûteux
-function heavyWork(item) {
+function heavyWork(item: number): number {
   let x = item;
   for (let i = 0; i < 100; i++) {
     x = Math.sin(x) * Math.cos(x);
@@ -875,7 +891,7 @@ function heavyWork(item) {
 }
 
 // --- Version bloquante ---
-async function processBlocking(items) {
+async function processBlocking(items: number[]): Promise<{ results: Float64Array; duration: number }> {
   const results = new Float64Array(items.length);
   const start = performance.now();
   for (let i = 0; i < items.length; i++) {
@@ -885,7 +901,7 @@ async function processBlocking(items) {
 }
 
 // --- Version avec time slicing ---
-async function processWithTimeSlicing(items, chunkSize = 5000) {
+async function processWithTimeSlicing(items: number[], chunkSize: number = 5000): Promise<{ results: Float64Array; duration: number }> {
   const results = new Float64Array(items.length);
   const start = performance.now();
   let index = 0;
@@ -905,12 +921,12 @@ async function processWithTimeSlicing(items, chunkSize = 5000) {
 }
 
 // Mesurer la réactivité de l'event loop
-function measureEventLoopLatency(durationMs) {
+function measureEventLoopLatency(durationMs: number): Promise<number[]> {
   return new Promise((resolve) => {
-    const latencies = [];
+    const latencies: number[] = [];
     const start = performance.now();
 
-    function check() {
+    function check(): void {
       const now = performance.now();
       const expected = 10; // setInterval de 10ms
       const last = latencies.length > 0
@@ -950,7 +966,7 @@ console.log(`  Latence event loop moyenne : ${(latencies2.reduce((a,b)=>a+b,0)/l
 
 ### Démo 4 — Scheduler à priorités en action
 
-```javascript
+```typescript
 // demo-priority-scheduler.mjs
 import { performance } from 'node:perf_hooks';
 
@@ -1049,7 +1065,7 @@ setTimeout(() => {
 
 ### Démo 5 — Transferable objects : performance postMessage
 
-```javascript
+```typescript
 // demo-transferable.mjs
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { performance } from 'node:perf_hooks';
@@ -1185,19 +1201,19 @@ Dans ce lab, vous implémenterez un scheduler coopératif complet avec :
 
 Considérez ce code qui implémente un "spinlock" en JavaScript avec `SharedArrayBuffer` et `Atomics` :
 
-```javascript
+```typescript
 const sab = new SharedArrayBuffer(4);
 const lock = new Int32Array(sab);
 // lock[0] : 0 = libre, 1 = verrouillé
 
 // Worker A
-function acquire() {
+function acquire(): void {
   while (Atomics.compareExchange(lock, 0, 0, 1) !== 0) {
     // Busy-wait (spinlock)
   }
 }
 
-function release() {
+function release(): void {
   Atomics.store(lock, 0, 0);
 }
 
@@ -1239,11 +1255,11 @@ Le **busy-wait** (boucle active) est catastrophique en JavaScript :
 
 **3. Réécriture idiomatique avec `Atomics.wait` / `Atomics.notify` :**
 
-```javascript
+```typescript
 const sab = new SharedArrayBuffer(4);
 const lock = new Int32Array(sab);
 
-function acquire() {
+function acquire(): void {
   while (true) {
     // Tenter de prendre le lock
     if (Atomics.compareExchange(lock, 0, 0, 1) === 0) {
@@ -1255,7 +1271,7 @@ function acquire() {
   }
 }
 
-function release() {
+function release(): void {
   Atomics.store(lock, 0, 0);
   // Réveiller UN thread en attente
   Atomics.notify(lock, 0, 1);

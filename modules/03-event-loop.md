@@ -195,7 +195,7 @@ C'est l'une des confusions les plus répandues. `setTimeout(fn, 0)` ne signifie 
 3. `fn` sera exécutée au **prochain passage** dans la phase timers, une fois la pile vide
 4. Si du code synchrone prend 500ms, le timer de 0ms attendra 500ms
 
-```javascript
+```typescript
 console.log('A');
 
 setTimeout(() => {
@@ -240,7 +240,7 @@ Ces trois mécanismes planifient du code asynchrone, mais à des moments **très
 
 **Cas piège** : l'ordre entre `setTimeout(fn, 0)` et `setImmediate` n'est **pas déterministe** lorsqu'ils sont appelés depuis le contexte principal :
 
-```javascript
+```typescript
 // Depuis le contexte principal : ordre NON garanti
 setTimeout(() => console.log('timeout'), 0);
 setImmediate(() => console.log('immediate'));
@@ -278,7 +278,7 @@ fs.readFile(__filename, () => {
   └─────────────────────────────────────────┘
 ```
 
-```javascript
+```typescript
 // rAF s'exécute AVANT le prochain paint
 requestAnimationFrame(() => {
   console.log('rAF'); // avant le paint, après les microtâches
@@ -304,9 +304,9 @@ Promise.resolve().then(() => {
 
 Les microtâches sont vidées **intégralement** avant de passer à la macrotâche suivante. Si une microtâche en crée une autre, et ainsi de suite, l'event loop est **bloqué** :
 
-```javascript
+```typescript
 // DANGER : ceci bloque l'event loop indéfiniment
-function recursiveMicrotask() {
+function recursiveMicrotask(): void {
   Promise.resolve().then(() => {
     console.log('microtask');
     recursiveMicrotask(); // crée une nouvelle microtâche à chaque fois
@@ -340,9 +340,9 @@ setTimeout(() => {
 
 Avec `process.nextTick`, c'est encore pire car il a une priorité **supérieure** aux microtâches :
 
-```javascript
+```typescript
 // Encore plus dangereux : bloque même les Promises
-function recursiveNextTick() {
+function recursiveNextTick(): void {
   process.nextTick(() => {
     recursiveNextTick();
   });
@@ -437,7 +437,7 @@ JavaScript est mono-threadé, mais l'I/O est asynchrone grâce à deux mécanism
 
 ### Demo 1 — Prouver l'ordre des phases
 
-```javascript
+```typescript
 // demo1-phases-order.js
 // Exécuter avec : node demo1-phases-order.js
 
@@ -476,7 +476,7 @@ console.log('5. Synchrone');
 
 ### Demo 2 — setImmediate toujours avant setTimeout dans un callback I/O
 
-```javascript
+```typescript
 // demo2-io-context.js
 const fs = require('fs');
 
@@ -506,11 +506,11 @@ fs.readFile(__filename, () => {
 
 ### Demo 3 — Visualiser la famine par microtâches
 
-```javascript
+```typescript
 // demo3-starvation.js
 // Ce script illustre la famine de manière contrôlée
 
-let count = 0;
+let count: number = 0;
 const MAX = 1_000_000;
 
 // Ce timer ne s'exécutera qu'après MAX microtâches
@@ -520,7 +520,7 @@ setTimeout(() => {
   console.log(`${count} microtâches ont été traitées avant`);
 }, 0);
 
-function floodMicrotasks() {
+function floodMicrotasks(): void {
   if (count >= MAX) return;
   count++;
   Promise.resolve().then(floodMicrotasks);
@@ -533,13 +533,13 @@ floodMicrotasks();
 
 ### Demo 4 — Mesurer le temps réel d'un setTimeout(fn, 0)
 
-```javascript
+```typescript
 // demo4-timer-accuracy.js
 
 const iterations = 20;
-const results = [];
+const results: number[] = [];
 
-function measureTimer(i) {
+function measureTimer(i: number): void {
   if (i >= iterations) {
     console.log('Délais réels de setTimeout(fn, 0) :');
     results.forEach((ms, idx) => {
@@ -567,7 +567,7 @@ measureTimer(0);
 
 ### Demo 5 — Ordre complet avec toutes les primitives
 
-```javascript
+```typescript
 // demo5-complete-order.js
 
 console.log('=== Début synchrone ===');
@@ -735,7 +735,7 @@ Relis le module après le lab — ça sera beaucoup plus clair avec la pratique.
 
 Quel est l'ordre exact de sortie du code suivant dans Node.js (v18+) ?
 
-```javascript
+```typescript
 const fs = require('fs');
 
 fs.readFile(__filename, () => {
