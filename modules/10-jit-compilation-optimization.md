@@ -585,6 +585,8 @@ async function fetchData() {
 - Résultat : `return await` n'a pas de surcoût par rapport à `return` dans le cas succès, mais il préserve la stack trace et le try/catch.
 - **Recommandation** : toujours utiliser `return await` dans une fonction async, surtout si elle est dans un try/catch.
 
+> **Note (2025+)** : Turboshaft remplace progressivement le backend de TurboFan comme pipeline d'optimisation par defaut dans V8. L'architecture reste la meme (Ignition → bytecode → optimisation), mais le backend genere un code machine plus performant avec des temps de compilation reduits. Voir le Module 09 (section 7) et le [blog V8 sur Turboshaft](https://v8.dev/blog/turboshaft) pour les details.
+
 ---
 
 ## Démonstration

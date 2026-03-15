@@ -247,6 +247,8 @@ node --version
 
 Si tu n'as pas Node.js : [https://nodejs.org](https://nodejs.org) (télécharge la version LTS).
 
+En mars 2026, la version LTS courante est Node.js 22 (Jod). Verifie toujours la version LTS active sur https://nodejs.org/en/about/previous-releases.
+
 ### Chrome DevTools
 
 Les DevTools de Chrome sont ton outil principal pour l'analyse de performance et de mémoire.
