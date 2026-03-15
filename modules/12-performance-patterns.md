@@ -22,7 +22,7 @@
 
 ### 1. Le mindset performance : mesurer d'abord, optimiser ensuite
 
-L'erreur la plus courante en optimisation est de deviner où se trouve le problème.
+L'erreur la plus courante en optimisation est de deviner ou se trouve le problème.
 Le cerveau humain est un très mauvais profileur.
 
 ```
@@ -1046,25 +1046,13 @@ Les anti-patterns de performance décrits dans ce module sont **universels** —
 
 ---
 
-## Lab associé
-
-**Lab 12 — Audit de performance** (`labs/12-performance-audit/`)
-
-Dans ce lab, vous recevrez une application Node.js volontairement mal optimisée
-(un serveur HTTP qui traite des données JSON). Vous devrez :
-
-1. Profiler l'application avec `--cpu-prof` et `--trace-gc`
-2. Identifier les 3 goulots d'étranglement principaux
-3. Corriger chaque problème en appliquant les patterns de ce module
-4. Démontrer l'amélioration avec des mesures avant/après
-
 ---
 
 ## Pour aller plus loin
 
 - [V8 Blog — Optimizing V8 Memory Consumption](https://v8.dev/blog/optimizing-v8-memory)
 - [V8 Blog — Fast Properties](https://v8.dev/blog/fast-properties)
-- [V8 Blog — Elements Kinds in V8](https://v8.dev/blog/elements-kinds)
+- [V8 Blog — Éléments Kinds in V8](https://v8.dev/blog/elements-kinds)
 - [Chrome DevTools — Analyze Runtime Performance](https://developer.chrome.com/docs/devtools/performance)
 - [Node.js — perf_hooks documentation](https://nodejs.org/api/perf_hooks.html)
 - [Clinic.js — Documentation](https://clinicjs.org/documentation/)
@@ -1189,3 +1177,13 @@ function processSensorDataFast(readings: { val: number; max: number; id: string 
 - Accélération attendue : **5-15x** selon le nombre de capteurs uniques
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 12 performance](../screencasts/screencast-12-performance.md)
+2. **Lab** : [lab-12-performance-profiling](../labs/lab-12-performance-profiling/README)
+3. **Quiz** : [quiz 12 performance](../quizzes/quiz-12-performance.html)
+:::

@@ -1,5 +1,9 @@
 # Module 00 — Prérequis et vue d'ensemble
 
+<!-- nav-cours-précédent -->
+> **Cours précédent** : [TypeScript](../../01-typescript/modules/19-projet-final.md). Si tu arrives ici sans avoir fait les cours précédents, consulte le [guide de démarrage](../../GUIDE-DEMARRAGE.md).
+
+
 > **Objectif** : Poser les fondations. Comprendre ce qu'est un moteur JavaScript, avoir les bons réflexes, et savoir où tu vas dans ce cours.
 
 > **Difficulté** : ⭐ (Débutant) — Si tu sais écrire du JavaScript, tu peux lire ce module.
@@ -79,7 +83,7 @@ Chaque terme est accompagné d'une analogie pour te donner une intuition.
 | **Runtime** | L'environnement complet d'exécution : le moteur + les APIs disponibles (DOM, setTimeout, fetch…). | Le moteur de la voiture + tout l'habitacle. |
 | **Call Stack** | La pile d'appels. Quand une fonction est appelée, elle est empilée. Quand elle retourne, elle est dépilée. LIFO (Last In, First Out). | Une pile d'assiettes : tu poses dessus, tu retires par le dessus. |
 | **Stack Frame** | Un cadre dans la pile d'appels. Contient les infos d'une fonction en cours d'exécution. | Une assiette dans la pile, avec une étiquette dessus. |
-| **Execution Context** | L'environnement créé par le moteur pour chaque fonction en cours : ses variables, son `this`, sa portée. | La fiche d'identité d'une fonction en train de s'exécuter. |
+| **Exécution Context** | L'environnement créé par le moteur pour chaque fonction en cours : ses variables, son `this`, sa portée. | La fiche d'identité d'une fonction en train de s'exécuter. |
 | **Thread** | Un fil d'exécution. JavaScript n'en a qu'un seul principal (mono-threadé). | Un seul cuisinier en cuisine : il ne peut faire qu'une chose à la fois. |
 | **Web Workers** | Des threads supplémentaires que tu peux créer pour exécuter du code en parallèle, sans bloquer le thread principal. | Des commis qui travaillent à côté du cuisinier principal. |
 
@@ -89,7 +93,7 @@ Chaque terme est accompagné d'une analogie pour te donner une intuition.
 |-------|------------|----------|
 | **Scope** | La portée d'une variable : depuis quel endroit du code elle est accessible. | Les murs d'une pièce — tu ne vois que ce qui est dans ta pièce (et dans les pièces autour). |
 | **Closure** | Une fonction qui "se souvient" des variables de son scope parent, même après que celui-ci a terminé. | Une fonction avec un sac à dos rempli de variables qu'elle emporte partout. |
-| **Reference** | Un lien (un pointeur) vers un objet en mémoire. La variable ne contient pas l'objet, elle contient l'adresse. | Un post-it avec l'adresse d'une maison, pas la maison elle-même. |
+| **Référence** | Un lien (un pointeur) vers un objet en mémoire. La variable ne contient pas l'objet, elle contient l'adresse. | Un post-it avec l'adresse d'une maison, pas la maison elle-même. |
 
 ### Asynchrone
 
@@ -105,7 +109,7 @@ Chaque terme est accompagné d'une analogie pour te donner une intuition.
 
 | Terme | Définition | Analogie |
 |-------|------------|----------|
-| **Heap** | La zone mémoire où sont stockés les objets et les données dynamiques. Non ordonnée. | Un grand parking : les voitures sont garées un peu partout, chacune à une place numérotée. |
+| **Heap** | La zone mémoire ou sont stockés les objets et les données dynamiques. Non ordonnée. | Un grand parking : les voitures sont garées un peu partout, chacune à une place numérotée. |
 | **Garbage Collector (GC)** | Le mécanisme automatique qui libère la mémoire des objets qui ne sont plus utilisés. | Le service de nettoyage qui débarrasse les tables abandonnées au restaurant. |
 | **Memory Leak** | Une fuite mémoire : de la mémoire qui devrait être libérée mais qui ne l'est pas, parce qu'une référence traîne. | Un robinet qui goutte. Tu ne t'en rends pas compte tout de suite, mais la facture d'eau explose. |
 | **Heap Snapshot** | Une photo de la mémoire à un instant T. Utilisée pour diagnostiquer les fuites. | Une photo aérienne du parking pour voir quelles voitures sont encore là. |
@@ -127,7 +131,7 @@ Chaque terme est accompagné d'une analogie pour te donner une intuition.
 | Terme | Définition | Analogie |
 |-------|------------|----------|
 | **Hidden Class / Map / Shape** | La structure interne que le moteur crée pour décrire la forme d'un objet (quelles propriétés, dans quel ordre). | Le plan d'architecte d'une maison : toutes les maisons identiques partagent le même plan. |
-| **Inline Cache (IC)** | Un cache qui retient où trouver une propriété d'un objet, pour ne pas chercher à chaque fois. | Un marque-page dans un dictionnaire : tu sais déjà à quelle page chercher. |
+| **Inline Cache (IC)** | Un cache qui retient ou trouver une propriété d'un objet, pour ne pas chercher à chaque fois. | Un marque-page dans un dictionnaire : tu sais déjà à quelle page chercher. |
 | **Profiling** | Mesurer les performances d'un programme : temps d'exécution, mémoire utilisée, fréquence d'appel. | Chronométrer un coureur pour savoir où il perd du temps. |
 
 ### Spécification
@@ -446,3 +450,12 @@ Si ces cinq rappels te semblent clairs, tu es prêt pour le Module 01. Si l'un d
 Tu as le glossaire, le modèle mental, les outils. Place au Module 01 — on commence par la base : la pile d'appels.
 
 → [Module 01 — Call Stack & Contextes d'exécution](./01-call-stack-execution-context.md)
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 00 prérequis](../screencasts/screencast-00-prerequis.md)
+2. **Quiz** : [quiz 00 prérequis](../quizzes/quiz-00-prerequis.html)
+:::

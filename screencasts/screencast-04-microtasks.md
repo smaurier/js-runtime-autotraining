@@ -40,7 +40,7 @@
 
 **Action** : Afficher un schéma avec deux colonnes : microtask queue et macrotask queue.
 
-> Il y a une subtilité importante dans Node.js : `process.nextTick` a sa propre
+> Il y à une subtilité importante dans Node.js : `process.nextTick` a sa propre
 > queue, qui est vidée **avant** la queue de microtâches standard.
 >
 > Donc l'ordre précis est :
@@ -122,7 +122,7 @@ node labs/lab-04-microtask-macrotask/walkthrough.js
 
 > Voici comment appliquer cette technique vous-même :
 >
-> 1. Prenez une feuille (ou un fichier texte).
+> 1. Prenez une feuille (où un fichier texte).
 > 2. Dessinez trois colonnes : **nextTick** | **Microtasks** | **Macrotasks**
 > 3. Parcourez le code ligne par ligne.
 > 4. Pour chaque appel asynchrone, placez le callback dans la bonne colonne.

@@ -4,16 +4,16 @@
 
 - Comprendre comment V8 compile le JavaScript en bytecode via l'interpreteur Ignition
 - Identifier les bytecodes fondamentaux : `LdaSmi`, `Star`, `Add`, `MulSmi`, `Return`
-- Comparer le bytecode genere selon les declarations (`let`, `var`, `const`) et la stabilite de types
+- Comparer le bytecode généré selon les declarations (`let`, `var`, `const`) et la stabilite de types
 - Distinguer code monomorphe (optimisable) vs megamorphe (non-optimisable)
 - Identifier quelles operations produisent un bytecode compact vs volumineux
 
-## Prerequis
+## Prérequis
 
 - Node.js v18+ (V8 v10+)
 - Connaissance du pipeline V8 : parsing -> Ignition (bytecode) -> TurboFan (JIT)
 
-## Commande d'execution
+## Commande d'exécution
 
 ```bash
 # Partie 1 — Observer le bytecode de hotFunction
@@ -35,7 +35,7 @@ node --print-bytecode --print-bytecode-filter=withManual exercise.js
 
 | Partie | Sujet |
 |--------|-------|
-| 1 | Ecrire `hotFunction`, l'appeler 10 000 fois, lire le bytecode |
+| 1 | Écrire `hotFunction`, l'appeler 10 000 fois, lire le bytecode |
 | 2 | Comparer le bytecode : `let` vs `var` vs `const`, types stables vs instables |
 | 3 | Code monomorphe vs megamorphe — comparer la taille du bytecode |
 | 4 | Operations natives : bytecode compact vs bytecode volumineux |
@@ -49,7 +49,7 @@ node --print-bytecode --print-bytecode-filter=withManual exercise.js
 - `Return` = retourne la valeur de l'accumulateur
 - Le bytecode monomorphe est plus court car V8 n'a pas besoin de gardes de type
 - `delete obj.prop` et l'acces dynamique `obj[key]` generent du bytecode plus lourd
-- Les slots `[N]` apres les opcodes sont des feedback vector slots pour le JIT
+- Les slots `[N]` après les opcodes sont des feedback vector slots pour le JIT
 
 ## Ressources
 

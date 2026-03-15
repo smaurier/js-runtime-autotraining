@@ -168,7 +168,7 @@ Tâche lourde à exécuter ?
 - « Quelle est la différence entre concurrence et parallélisme ? » → Concurrence = alternance, parallélisme = simultanéité
 - « Pourquoi ne pas utiliser `Atomics.wait()` sur le main thread ? » → Ça bloque le thread et gèle l'UI/event loop
 
-> « Avant-dernier module technique : le Projet Final où on assemble tout. »
+> « Avant-dernier module technique : le Projet Final ou on assemble tout. »
 
 ## Points d'attention pour l'enregistrement
 - Bien illustrer la différence concurrence/parallélisme avec l'analogie des cuisiniers

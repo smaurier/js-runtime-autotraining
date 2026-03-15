@@ -27,7 +27,7 @@ La spécification HTML et ECMA-262 distinguent deux catégories de tâches async
 
 **Macrotâche (task)** : une unité de travail discrète planifiée dans la file de tâches principale. Après chaque macrotâche, l'event loop vérifie s'il faut effectuer un rendu, puis passe à la macrotâche suivante.
 
-**Microtâche (microtask)** : une unité de travail légère qui s'exécute **immédiatement après** la tâche courante (ou la microtâche courante), avant que le contrôle ne soit rendu à l'event loop. Toutes les microtâches en attente sont vidées d'un coup.
+**Microtâche (microtask)** : une unité de travail légère qui s'exécute **immédiatement après** la tâche courante (où la microtâche courante), avant que le contrôle ne soit rendu à l'event loop. Toutes les microtâches en attente sont vidées d'un coup.
 
 ```
   Modèle d'exécution :
@@ -779,7 +779,7 @@ console.log('SYNC');
 **Ce que les frameworks font avec les microtâches** — et pourquoi c'est cross-engine :
 
 - **React** utilise `MessageChannel` (une macrotâche) pour planifier les mises à jour de rendu via son scheduler. Cela fonctionne de manière identique dans Chrome et Firefox car `MessageChannel` est standardisé.
-- **Vue.js** utilise `queueMicrotask()` (ou `Promise.resolve().then()` en fallback) pour batching les mises à jour réactives. Même comportement dans tous les moteurs.
+- **Vue.js** utilise `queueMicrotask()` (où `Promise.resolve().then()` en fallback) pour batching les mises à jour réactives. Même comportement dans tous les moteurs.
 - **Angular** (Zone.js) intercepte les APIs asynchrones pour détecter les changements. Le mécanisme repose sur les APIs standard, donc cross-engine.
 
 **`process.nextTick` est exclusif à Node.js** — il n'existe dans aucun navigateur (ni Chrome, ni Firefox, ni Safari). C'est une API propre au runtime Node.js, pas au moteur V8. Si tu portes du code Node.js vers Deno ou le navigateur, remplace `process.nextTick(fn)` par `queueMicrotask(fn)` (comportement presque identique, sauf la priorité par rapport aux Promises).
@@ -811,12 +811,6 @@ console.log('SYNC');
 10. **Pour debugger l'ordre** : dessinez la file de microtâches à chaque étape et simulez le vidage manuellement. C'est la seule méthode fiable.
 
 ---
-
-## Lab associé
-
-**Lab 04 — Résolution de 10 puzzles d'ordonnancement**
-
-Résoudre 10 puzzles d'ordre d'exécution de difficulté croissante, en documentant chaque étape du raisonnement (état de la file de microtâches et de la file de macrotâches). Implémenter un outil de visualisation qui affiche l'état des files à chaque étape.
 
 ---
 
@@ -927,3 +921,13 @@ Raisonnement pas à pas :
   - Vidage microtâches : `D`
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 04 microtasks](../screencasts/screencast-04-microtasks.md)
+2. **Lab** : [lab-04-microtask-macrotask](../labs/lab-04-microtask-macrotask/README)
+3. **Quiz** : [quiz 04 microtasks](../quizzes/quiz-04-microtasks.html)
+:::

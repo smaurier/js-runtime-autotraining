@@ -21,7 +21,7 @@
 
 > 🎯 **Analogie** : L'event loop, c'est comme un serveur dans un restaurant. Il ne cuisine pas lui-même (single-threaded), mais il prend les commandes, les transmet en cuisine (Web APIs/libuv), et sert les plats quand ils sont prêts. Il ne peut servir qu'un plat à la fois, mais il gère des dizaines de tables en parallèle grâce à cette organisation.
 >
-> Pour filer la métaphore : le **serveur**, c'est l'**event loop** — il coordonne tout mais ne fait qu'une chose à la fois. La **cuisine**, ce sont les **Web APIs** (navigateur) ou **libuv** (Node.js) — c'est là que le vrai travail de fond se passe, en parallèle. Le **comptoir** où les plats prêts attendent, c'est la **task queue** (file de macrotâches). Et les **clients prioritaires** qui passent toujours devant les autres au comptoir, ce sont les **microtâches** (Promises, `queueMicrotask`).
+> Pour filer la métaphore : le **serveur**, c'est l'**event loop** — il coordonne tout mais ne fait qu'une chose à la fois. La **cuisine**, ce sont les **Web APIs** (navigateur) ou **libuv** (Node.js) — c'est là que le vrai travail de fond se passe, en parallèle. Le **comptoir** ou les plats prêts attendent, c'est la **task queue** (file de macrotâches). Et les **clients prioritaires** qui passent toujours devant les autres au comptoir, ce sont les **microtâches** (Promises, `queueMicrotask`).
 
 ### 1. Pourquoi JavaScript est mono-thread mais non-bloquant
 
@@ -338,7 +338,7 @@ setTimeout(() => {
   ╚══════════════════════════════════════════╝
 ```
 
-Avec `process.nextTick`, c'est encore pire car il a une priorité **supérieure** aux microtâches :
+Avec `process.nextTick`, c'est encore pire car il à une priorité **supérieure** aux microtâches :
 
 ```typescript
 // Encore plus dangereux : bloque même les Promises
@@ -696,12 +696,6 @@ console.log('=== Fin synchrone ===');
 
 ---
 
-## Lab associé
-
-**Lab 03 — Prédiction d'ordre d'exécution**
-
-Écrire un programme Node.js qui mélange `setTimeout`, `setImmediate`, `process.nextTick`, `Promise.then` et `queueMicrotask` dans différents contextes (principal, I/O callback, timer callback). Prédire l'ordre de sortie avant d'exécuter, puis vérifier. Documenter les cas non-déterministes.
-
 ---
 
 ## Si tu es perdu
@@ -778,3 +772,14 @@ Raisonnement pas à pas :
    - **`A`** (`setTimeout` de 0ms, maintenant expiré)
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 03 event loop](../screencasts/screencast-03-event-loop.md)
+2. **Lab** : [lab-03-event-loop-order](../labs/lab-03-event-loop-order/README)
+3. **Visualisation** : [Event Loop](../visualizations/event-loop.html)
+4. **Quiz** : [quiz 03 event loop](../quizzes/quiz-03-event-loop.html)
+:::

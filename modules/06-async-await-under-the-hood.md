@@ -19,7 +19,7 @@
 
 ## Théorie
 
-> 🎯 **Analogie** : async/await, c'est comme mettre un marque-page dans un livre. Quand tu arrives à un passage qui demande d'attendre (await), tu poses ton marque-page (suspension), tu fais autre chose, et quand le résultat arrive, tu reprends ta lecture exactement où tu l'avais laissée.
+> 🎯 **Analogie** : async/await, c'est comme mettre un marque-page dans un livre. Quand tu arrives à un passage qui demandé d'attendre (await), tu poses ton marque-page (suspension), tu fais autre chose, et quand le résultat arrive, tu reprends ta lecture exactement ou tu l'avais laissée.
 
 ### 1. Une fonction `async` retourne toujours une Promise
 
@@ -648,19 +648,6 @@ Le top-level `await` (ES2022) fonctionne de manière identique dans tous les mot
 
 ---
 
-## Lab associé
-
-**Lab 06 — Orchestration asynchrone avancée**
-
-Fichier : `labs/lab-06-async-patterns-comparison/`
-
-Objectifs :
-1. Implémenter un `batchProcess(items, concurrency, asyncFn)` avec limite de concurrence.
-2. Comparer séquentiel, parallèle illimité et votre implémentation.
-3. Ajouter un retry avec backoff exponentiel.
-4. Implémenter un async generator produisant les résultats au fur et à mesure.
-5. Rendre l'ensemble annulable via `AbortSignal`.
-
 ---
 
 ## Si tu es perdu
@@ -792,3 +779,13 @@ File de microtâches : `[reprise-gamma->beta, PromiseResolveThenableJob(p), H]`
 4. **Oui, l'ordre change.** Sans `await`, `beta` retourne directement la Promise de `gamma`. La Promise de `beta` est alors résolue avec un thenable (la Promise de gamma), ce qui déclenche un `PromiseResolveThenableJob` supplémentaire. Le nombre de ticks entre `D` et `B` augmente. Paradoxalement, `return await` est **plus rapide** ici car il unwrappe la valeur (42, primitif) avant de la retourner, évitant le coût du thenable unwrapping.
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 06 async await](../screencasts/screencast-06-async-await.md)
+2. **Lab** : [lab-06-async-patterns-comparison](../labs/lab-06-async-patterns-comparison/README)
+3. **Quiz** : [quiz 06 async await](../quizzes/quiz-06-async-await.html)
+:::

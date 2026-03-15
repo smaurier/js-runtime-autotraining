@@ -2,19 +2,19 @@
 
 ## Objectifs
 
-- Maitriser la methodologie de diagnostic en 5 etapes (Observer, Mesurer, Hypothese, Corriger, Verifier)
-- Utiliser les flags V8 (`--trace-gc`, `--trace-deopt`, `--trace-ic`, `--cpu-prof`) pour identifier des problemes reels
-- Diagnostiquer et corriger 6 problemes de performance dans un programme deliberement defaillant
+- Maîtriser la méthodologie de diagnostic en 5 étapes (Observer, Mesurer, Hypothese, Corriger, Vérifier)
+- Utiliser les flags V8 (`--trace-gc`, `--trace-deopt`, `--trace-ic`, `--cpu-prof`) pour identifier des problèmes réels
+- Diagnostiquer et corriger 6 problèmes de performance dans un programme deliberement defaillant
 - Instrumenter le code avec `performance.mark()` / `performance.measure()` pour valider les corrections
-- Rediger un diagnostic structure pour chaque probleme (outil, cause racine, fix)
+- Rediger un diagnostic structure pour chaque problème (outil, cause racine, fix)
 
-## Prerequis
+## Prérequis
 
 - Node.js v20+
 - Modules 07-14 termines (GC, memory leaks, V8 architecture, hidden classes, performance patterns)
 - Connaissance des flags V8 de diagnostic
 
-## Commandes d'execution
+## Commandes d'exécution
 
 ```bash
 # Etape 1 : Lancer le programme et observer les symptomes
@@ -45,33 +45,33 @@ node solution.js
 | Partie | Sujet |
 |--------|-------|
 | 1 | Lancer avec les flags de diagnostic, observer les symptomes |
-| 2 | Identifier les 6 problemes de performance |
-| 3 | Rediger un diagnostic pour chaque probleme (outil + cause racine) |
-| 4 | Corriger chaque probleme dans le code |
-| 5 | Instrumenter avec performance.mark/measure, verifier les ameliorations |
+| 2 | Identifier les 6 problèmes de performance |
+| 3 | Rediger un diagnostic pour chaque problème (outil + cause racine) |
+| 4 | Corriger chaque problème dans le code |
+| 5 | Instrumenter avec performance.mark/measure, vérifier les ameliorations |
 
-## Les 6 problemes a trouver
+## Les 6 problèmes a trouver
 
-1. **Fuite memoire** — un cache qui grandit sans limite
-2. **Deoptimisation** — une fonction qui recoit des objets avec des shapes differentes
+1. **Fuite mémoire** — un cache qui grandit sans limite
+2. **Deoptimisation** — une fonction qui recoit des objets avec des shapes différentes
 3. **Pression GC** — des allocations massives de chaines dans une boucle chaude
-4. **IC megamorphique** — des objets heterogenes traites par une meme fonction
+4. **IC megamorphique** — des objets heterogenes traites par une même fonction
 5. **Operation bloquante** — un JSON.parse synchrone d'une enorme chaine dans le chemin critique
-6. **Fuite de listeners** — des handlers d'evenements ajoutes a chaque requete, jamais retires
+6. **Fuite de listeners** — des handlers d'événements ajoutes à chaque requête, jamais retires
 
 ## Indices
 
-- Probleme 1 : cherchez les structures de donnees qui grandissent sans jamais shrink
-- Probleme 2 : lancez avec `--trace-deopt` et cherchez "wrong map"
-- Probleme 3 : lancez avec `--trace-gc` et observez la frequence des Scavenge
-- Probleme 4 : lancez avec `--trace-ic` et cherchez "MEGAMORPHIC"
-- Probleme 5 : lancez avec `--cpu-prof` et cherchez le hotspot dans le flame chart
-- Probleme 6 : observez le nombre de listeners sur l'EventEmitter
+- Problème 1 : cherchez les structures de donnees qui grandissent sans jamais shrink
+- Problème 2 : lancez avec `--trace-deopt` et cherchez "wrong map"
+- Problème 3 : lancez avec `--trace-gc` et observez la frequence des Scavenge
+- Problème 4 : lancez avec `--trace-ic` et cherchez "MEGAMORPHIC"
+- Problème 5 : lancez avec `--cpu-prof` et cherchez le hotspot dans le flame chart
+- Problème 6 : observez le nombre de listeners sur l'EventEmitter
 
 ## Criteres de reussite
 
-- Les 6 problemes sont identifies et nommes correctement
+- Les 6 problèmes sont identifies et nommes correctement
 - Chaque diagnostic indique l'outil utilise et la cause racine
 - Chaque correction est implementee et fonctionnelle
-- Les mesures avant/apres montrent une amelioration significative
-- Le programme corrige ne presente plus de fuite memoire
+- Les mesures avant/après montrent une amelioration significative
+- Le programme corrige ne présenté plus de fuite mémoire

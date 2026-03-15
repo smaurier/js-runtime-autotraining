@@ -558,7 +558,7 @@ node --max-old-space-size=512 server.js
   │ WeakSet       │ Suivre l'appartenance d'objets à un ensemble     │
   │               │ sans les retenir (ex: "objets déjà visités").    │
   ├───────────────┼──────────────────────────────────────────────────┤
-  │ WeakRef       │ Cache où la valeur peut être collectée si la     │
+  │ WeakRef       │ Cache ou la valeur peut être collectée si la     │
   │               │ mémoire est sous pression. Combiner avec         │
   │               │ FinalizationRegistry pour le nettoyage.          │
   └───────────────┴──────────────────────────────────────────────────┘
@@ -1048,19 +1048,6 @@ Les fuites mémoire sont **indépendantes du moteur JavaScript** — les 5 patte
 
 ---
 
-## Lab associé
-
-**Lab 08 — Chasse aux fuites mémoire**
-
-Fichier : `labs/lab-08-memory-leaks/`
-
-1. Un serveur Express avec 5 fuites mémoire cachées est fourni.
-2. Lancer le serveur avec `node --inspect --expose-gc server.js`.
-3. Utiliser Chrome DevTools (chrome://inspect → Memory tab) pour prendre des heap snapshots.
-4. Identifier chaque fuite en utilisant la vue Comparison et l'arbre des Retainers.
-5. Corriger chaque fuite et vérifier que le heap se stabilise après un load test.
-6. Écrire un test automatisé qui vérifie l'absence de fuite (boucle de requêtes + mesure heap + assertion de stabilisation).
-
 ---
 
 ## Pour aller plus loin
@@ -1171,3 +1158,13 @@ componentWillUnmount() {
 **Bonus** : `[...prev.data, newData]` n'est pas une fuite à proprement parler — c'est un problème de **croissance non bornée**. L'accumulation est intentionnelle (chaque message est ajouté) mais sans limite. La différence avec une fuite : ici les données sont utilisées (pour l'affichage), tandis qu'une fuite concerne des données retenues mais inutilisées. La correction serait de garder seulement les N derniers messages : `data: [...prev.data.slice(-1000), newData]`.
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 08 memory leaks](../screencasts/screencast-08-memory-leaks.md)
+2. **Lab** : [lab-08-memory-leak-detection](../labs/lab-08-memory-leak-detection/README)
+3. **Quiz** : [quiz 08 memory leaks](../quizzes/quiz-08-memory-leaks.html)
+:::

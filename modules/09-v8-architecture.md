@@ -8,7 +8,7 @@
 
 ## Prérequis
 
-- Module 01 — Call Stack et Execution Context
+- Module 01 — Call Stack et Exécution Context
 - Module 07 — Garbage Collector (espaces mémoire V8)
 - Notions de base en compilation (AST, bytecode, code machine)
 - Familiarité avec la ligne de commande Node.js
@@ -28,7 +28,7 @@ Le pipeline est : `texte JS → AST → bytecode → (éventuellement) code mach
 
 ## Théorie
 
-> **Analogie pour débuter** : V8, c'est comme une usine de traduction. Ton code JavaScript arrive comme un texte en français, et l'usine doit le traduire en langage machine. L'usine a 4 niveaux de traduction : (1) une traduction orale rapide mais mot-à-mot (Ignition — l'interpréteur), (2) une traduction écrite un peu plus propre (Sparkplug — compilation rapide), (3) une traduction qui adapte les tournures de phrase (Maglev — optimisation intermédiaire), (4) une traduction littéraire parfaite mais qui prend du temps (TurboFan — optimisation maximale). L'usine commence toujours par le niveau 1, et ne monte que pour les textes qu'on lui demande de traduire encore et encore.
+> **Analogie pour débuter** : V8, c'est comme une usine de traduction. Ton code JavaScript arrive comme un texte en français, et l'usine doit le traduire en langage machine. L'usine a 4 niveaux de traduction : (1) une traduction orale rapide mais mot-à-mot (Ignition — l'interpréteur), (2) une traduction écrite un peu plus propre (Sparkplug — compilation rapide), (3) une traduction qui adapte les tournures de phrase (Maglev — optimisation intermédiaire), (4) une traduction littéraire parfaite mais qui prend du temps (TurboFan — optimisation maximale). L'usine commence toujours par le niveau 1, et ne monte que pour les textes qu'on lui demandé de traduire encore et encore.
 
 ### 1. V8 : un moteur au coeur d'un vaste écosystème
 
@@ -183,9 +183,9 @@ Voici la carte du territoire — chaque étape sera détaillée dans les section
 Ignition est le coeur du pipeline V8. Tout code JavaScript passe d'abord par Ignition.
 
 **Caractéristiques clés** :
-- **Register-based** (par opposition à stack-based comme la JVM). Chaque fonction a un nombre fixe de registres locaux (r0, r1, r2...) et un **accumulateur** implicite.
+- **Register-based** (par opposition à stack-based comme la JVM). Chaque fonction à un nombre fixe de registres locaux (r0, r1, r2...) et un **accumulateur** implicite.
 - Bytecode **compact** (~50% plus petit que le code machine équivalent, ~25% plus petit qu'un bytecode stack-based équivalent).
-- Chaque instruction bytecode a un **handler natif** pré-compilé en C++ (dispatch table).
+- Chaque instruction bytecode à un **handler natif** pré-compilé en C++ (dispatch table).
 - Collecte le **type feedback** dans les **Feedback Vectors** — c'est la donnée essentielle pour les compilateurs optimisants.
 
 #### L'accumulateur et les registres
@@ -413,7 +413,7 @@ TurboFan est le compilateur le plus agressif de V8. Il produit du code machine *
 
 #### Sea of Nodes IR
 
-TurboFan utilise une représentation intermédiaire unique : la **Sea of Nodes**, où les noeuds représentent des opérations et les arêtes représentent des dépendances. Les dépendances de **données** et de **contrôle** coexistent dans le même graphe, mais ne sont pas confondues.
+TurboFan utilise une représentation intermédiaire unique : la **Sea of Nodes**, ou les noeuds représentent des opérations et les arêtes représentent des dépendances. Les dépendances de **données** et de **contrôle** coexistent dans le même graphe, mais ne sont pas confondues.
 
 ```
   function clamp(x, min, max) {
@@ -856,7 +856,7 @@ V8 n'est pas le seul moteur JavaScript performant. SpiderMonkey (Firefox) et Jav
 - **SpiderMonkey a 3 tiers** (Interpreter → Baseline → WarpMonkey) contre **4 tiers pour V8** (Ignition → Sparkplug → Maglev → TurboFan). JSC en a également 4 (LLInt → Baseline → DFG → FTL).
 - **Baseline Interpreter de SpiderMonkey ≈ Ignition de V8** : les deux interprètent du bytecode et collectent du feedback de types.
 - **WarpMonkey ≈ TurboFan** : les deux sont des compilateurs optimisants spéculatifs. La différence principale est que WarpMonkey utilise **CacheIR** (informations de types basées sur les inline caches) tandis que TurboFan utilise des **Feedback Vectors**.
-- **JSC (JavaScriptCore)** a un pipeline en 4 étapes : LLInt → Baseline JIT → DFG (optimisations basées sur l'interprétation abstraite) → FTL (optimisations agressives).
+- **JSC (JavaScriptCore)** à un pipeline en 4 étapes : LLInt → Baseline JIT → DFG (optimisations basées sur l'interprétation abstraite) → FTL (optimisations agressives).
 
 ```
   V8 :           Ignition → Sparkplug → Maglev → TurboFan (→ Turboshaft)
@@ -882,19 +882,6 @@ V8 n'est pas le seul moteur JavaScript performant. SpiderMonkey (Firefox) et Jav
 10. `--print-bytecode`, `--trace-opt`, `--trace-deopt` et `--trace-parse` sont les outils essentiels d'inspection.
 
 ---
-
-## Lab associé
-
-**Lab 09 — Exploration du pipeline V8**
-
-Fichier : `labs/lab-09-v8-pipeline/`
-
-1. Écrire 5 fonctions de complexité croissante (identité, arithmétique, boucle, récursion, accès d'objet).
-2. Utiliser `--print-bytecode --print-bytecode-filter` pour analyser le bytecode de chacune.
-3. Identifier les registres, l'accumulateur, et les slots de feedback dans le bytecode.
-4. Utiliser `--trace-opt` pour observer quelles fonctions sont optimisées et par quel tier (Maglev vs TurboFan).
-5. Mesurer le temps de démarrage avec et sans lazy parsing (`--no-lazy` pour désactiver).
-6. Comparer le bytecode d'une boucle `for` vs `Array.prototype.map()` pour la même opération.
 
 ---
 
@@ -992,3 +979,14 @@ class Point {
 Pour en savoir plus sur les Hidden Classes et les Inline Caches, voir le **Module 11** qui couvre le sujet en profondeur.
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 09 v8 architecture](../screencasts/screencast-09-v8-architecture.md)
+2. **Lab** : [lab-09-v8-optimization](../labs/lab-09-v8-optimization/README)
+3. **Visualisation** : [Pipeline JIT](../visualizations/jit-pipeline.html)
+4. **Quiz** : [quiz 09 v8 architecture](../quizzes/quiz-09-v8-architecture.html)
+:::

@@ -3,18 +3,18 @@
 ## Objectifs
 
 - Implementer un ordonnanceur cooperatif de taches avec priorites et time-slicing
-- Comprendre la cedation au loop d'evenements (yield to event loop) via setTimeout/setImmediate
-- Implementer un rate limiter (limiteur de debit) : max N executions par fenetre de temps
+- Comprendre la cedation au loop d'événements (yield to event loop) via setTimeout/setImmediate
+- Implementer un rate limiter (limiteur de debit) : max N executions par fenêtre de temps
 - Implementer debounce et throttle from scratch, comprendre les implications event loop
 - Implementer une file de priorite avec preemption entre time slices
 
-## Prerequis
+## Prérequis
 
 - Node.js v18+ (ES modules)
 - Comprehension de l'event loop Node.js (microtasks, macrotasks, timers)
-- Connaissance de `performance.now()` pour la mesure de temps precise
+- Connaissance de `performance.now()` pour la mesure de temps précisé
 
-## Commande d'execution
+## Commande d'exécution
 
 ```bash
 node exercise.js
@@ -26,7 +26,7 @@ node solution.js
 | Partie | Sujet |
 |--------|-------|
 | 1 | Scheduler cooperatif : addTask(fn, priority), run(), cancel(taskId), time-slicing 5ms |
-| 2 | Rate limiter : max N executions par fenetre de temps |
+| 2 | Rate limiter : max N executions par fenêtre de temps |
 | 3 | Debounce et throttle from scratch avec explications event loop |
 | 4 | File de priorite avec preemption des taches high sur les low |
 
@@ -62,9 +62,9 @@ await pq.run();  // les high preemptent les low entre time slices
 
 ## Criteres de reussite
 
-- Le scheduler execute les taches high avant medium avant low
-- Chaque tache cede au loop apres 5ms maximum de travail CPU
-- cancel(taskId) empeche l'execution d'une tache non-demarree
-- Le rate limiter bloque les appels excessifs dans la fenetre
-- Debounce reporte l'execution au dernier appel, throttle espace les executions
+- Le scheduler exécuté les taches high avant medium avant low
+- Chaque tache cede au loop après 5ms maximum de travail CPU
+- cancel(taskId) empeche l'exécution d'une tache non-demarree
+- Le rate limiter bloque les appels excessifs dans la fenêtre
+- Debounce reporte l'exécution au dernier appel, throttle espace les executions
 - Les taches high preemptent les low entre time slices dans la partie 4

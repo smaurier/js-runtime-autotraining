@@ -39,7 +39,7 @@
 
 **Action** : Dessiner ou afficher un schéma du pipeline `Source → AST → Bytecode → Optimized Code`.
 
-> On va aussi voir que ce pipeline ne se fait pas en isolation : il y a la **call stack**,
+> On va aussi voir que ce pipeline ne se fait pas en isolation : il y à la **call stack**,
 > la **boucle d'événements**, le **garbage collector**, et bien d'autres composants
 > qui interagissent en permanence.
 

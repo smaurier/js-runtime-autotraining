@@ -1,6 +1,6 @@
 # Module 11 — Hidden Classes & Inline Caching
 
-> **Objectif** : Ce module est la référence unique et approfondie sur les Hidden Classes (Maps) et l'Inline Caching dans V8. Comprendre la structure mémoire interne des objets JavaScript (JSObject header, in-object properties, backing store), les chaînes et arbres de transitions de Maps, les descriptor arrays, le slack tracking, la dépréciation de Maps, le dictionary mode, l'Inline Caching (IC) et ses états, les Elements Kinds des tableaux, le property type tracking, et les intrinsics V8 pour le diagnostic. Ce module ne revient pas sur le pipeline V8 (Module 09) ni sur les optimisations JIT (Module 10) — il se concentre exclusivement sur la manière dont V8 représente et accède aux propriétés des objets.
+> **Objectif** : Ce module est la référence unique et approfondie sur les Hidden Classes (Maps) et l'Inline Caching dans V8. Comprendre la structure mémoire interne des objets JavaScript (JSObject header, in-object properties, backing store), les chaînes et arbres de transitions de Maps, les descriptor arrays, le slack tracking, la dépréciation de Maps, le dictionary mode, l'Inline Caching (IC) et ses états, les Éléments Kinds des tableaux, le property type tracking, et les intrinsics V8 pour le diagnostic. Ce module ne revient pas sur le pipeline V8 (Module 09) ni sur les optimisations JIT (Module 10) — il se concentre exclusivement sur la manière dont V8 représente et accède aux propriétés des objets.
 
 > **Difficulté** : ⭐⭐⭐⭐ (Expert)
 
@@ -31,7 +31,7 @@ struct Point { double x; double y; };
 // Temps : ~1 ns
 ```
 
-> **Note** : même si tu ne connais pas le C++, l'idée est simple. Dans un langage statique comme C++, le compilateur sait **avant l'exécution** où chaque propriété se trouve en mémoire. En JavaScript, cette information n'existe pas à l'avance — d'où l'invention des Hidden Classes.
+> **Note** : même si tu ne connais pas le C++, l'idée est simple. Dans un langage statique comme C++, le compilateur sait **avant l'exécution** ou chaque propriété se trouve en mémoire. En JavaScript, cette information n'existe pas à l'avance — d'où l'invention des Hidden Classes.
 
 En JavaScript, un objet est un dictionnaire ouvert. On peut ajouter, supprimer, changer le type de n'importe quelle propriété à tout moment.
 
@@ -517,7 +517,7 @@ Les étapes 2 et 3 sont coûteuses. L'IC les court-circuite en se souvenant du r
 
 ---
 
-### 13. Elements Kinds : le système de types des tableaux
+### 13. Éléments Kinds : le système de types des tableaux
 
 V8 classifie les tableaux selon le type de leurs éléments. Les transitions sont **irréversibles** (lattice à sens unique) :
 
@@ -712,7 +712,7 @@ console.log(%HaveSameMap(a, d)); // false
 
 #### %DebugPrint(obj)
 
-Affiche les informations internes détaillées d'un objet : sa Map, ses propriétés, le elements kind (pour les tableaux), le type de chaque champ, etc.
+Affiche les informations internes détaillées d'un objet : sa Map, ses propriétés, le éléments kind (pour les tableaux), le type de chaque champ, etc.
 
 ```js
 // node --allow-natives-syntax
@@ -939,7 +939,7 @@ Sortie typique :
 [...] LoadIC [...] getX_mega [...] P -> N (megamorphic)
 ```
 
-### Demo 3 : Transitions d'Elements Kinds
+### Demo 3 : Transitions d'Éléments Kinds
 
 ```js
 // demo-array-kinds.mjs
@@ -971,7 +971,7 @@ const c = Array.from({ length: 5 }, () => 0);
 %DebugPrint(c);
 ```
 
-### Demo 4 : Map deprecation en action
+### Demo 4 : Map déprécation en action
 
 ```js
 // demo-map-deprecation.mjs
@@ -1119,7 +1119,7 @@ Quel que soit le moteur (V8, SpiderMonkey, JSC), les mêmes bonnes pratiques s'a
 
 4. **Slack tracking** : V8 pré-alloue des slots in-object supplémentaires pour les premiers objets d'un constructeur, puis réduit la taille après ~8 instances.
 
-5. **Map deprecation** : quand le type d'une propriété change (Smi → Double → HeapObject), la Map est dépréciée et les objets sont migrés paresseusement vers une nouvelle Map.
+5. **Map déprécation** : quand le type d'une propriété change (Smi → Double → HeapObject), la Map est dépréciée et les objets sont migrés paresseusement vers une nouvelle Map.
 
 6. **Property type tracking** : V8 traque le type de chaque propriété (Smi/Double/HeapObject) dans les descriptors. La transition de type est irréversible.
 
@@ -1127,7 +1127,7 @@ Quel que soit le moteur (V8, SpiderMonkey, JSC), les mêmes bonnes pratiques s'a
 
 8. **Inline Caching** — les 4 états : UNINITIALIZED → MONOMORPHIC (1 Map, optimal) → POLYMORPHIC (2-4 Maps, acceptable) → MEGAMORPHIC (5+ Maps, lent). Les seuils sont des paramètres internes V8.
 
-9. **Elements Kinds** : les tableaux ont un lattice irréversible de PACKED_SMI → PACKED_DOUBLE → PACKED_ELEMENTS → HOLEY. Garder les tableaux PACKED et homogènes.
+9. **Éléments Kinds** : les tableaux ont un lattice irréversible de PACKED_SMI → PACKED_DOUBLE → PACKED_ELEMENTS → HOLEY. Garder les tableaux PACKED et homogènes.
 
 10. **`%HaveSameMap()`**, **`%DebugPrint()`**, **`%GetOptimizationStatus()`** sont les intrinsics V8 essentiels pour le diagnostic.
 
@@ -1135,31 +1135,12 @@ Quel que soit le moteur (V8, SpiderMonkey, JSC), les mêmes bonnes pratiques s'a
 
 ---
 
-## Lab associé
-
-**Lab 11 — Diagnostiquer et corriger les déoptimisations de shape**
-
-Fichier : `labs/lab-11-hidden-classes/`
-
-1. On vous fournit un module `user-service.js` qui crée des objets utilisateur de 5 manières différentes (literal, constructeur, classe, factory, Object.create).
-2. Lancez avec `--allow-natives-syntax` et vérifiez avec `%HaveSameMap` quels objets partagent la même Map.
-3. Identifiez les 3 endroits où le code crée des Maps inutilement différentes.
-4. Refactorez pour que tous les objets utilisateur partagent la même Map.
-5. Utilisez `%DebugPrint` pour vérifier les elements kinds des tableaux dans le module.
-6. Benchmarkez avant/après avec le script fourni.
-7. **Bonus** : utilisez `--trace-ic` pour identifier les sites IC mégamorphiques et les corriger.
-
-Critères de validation :
-- `%HaveSameMap` retourne `true` pour tous les objets après correction
-- Le benchmark montre une amélioration >= 30%
-- Aucun site mégamorphique dans la trace IC
-
 ---
 
 ## Pour aller plus loin
 
 - [V8 Blog — Fast properties in V8 (Maps)](https://v8.dev/blog/fast-properties)
-- [V8 Blog — Elements kinds in V8](https://v8.dev/blog/elements-kinds)
+- [V8 Blog — Éléments kinds in V8](https://v8.dev/blog/elements-kinds)
 - [V8 Blog — What's up with monomorphism?](https://mrale.ph/blog/2015/01/11/whats-up-with-monomorphism.html)
 - [Mathias Bynens — V8 Internals for JavaScript Developers (vidéo)](https://www.youtube.com/watch?v=m9cTaYI95Zc)
 - [Benedikt Meurer — Speculative Optimization in V8](https://benediktmeurer.de/2017/12/13/an-introduction-to-speculative-optimization-in-v8/)
@@ -1225,3 +1206,14 @@ for (let i = 0; i < 100_000; i++) {
 ```
 
 Objectif : amélioration d'au moins 50% du temps d'exécution.
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 11 hidden classes](../screencasts/screencast-11-hidden-classes.md)
+2. **Lab** : [lab-11-hidden-classes](../labs/lab-11-hidden-classes/README)
+3. **Visualisation** : [Hidden Classes](../visualizations/hidden-classes.html)
+4. **Quiz** : [quiz 11 hidden classes](../quizzes/quiz-11-hidden-classes.html)
+:::

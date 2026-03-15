@@ -63,7 +63,7 @@
 **Action** : Ouvrir `labs/lab-03-event-loop-order/exercise.js`.
 
 > Ce fichier contient un mélange de `setTimeout`, `setImmediate`, `Promise.resolve().then`,
-> `process.nextTick`, et du code synchrone. L'exercice vous demande de **prédire
+> `process.nextTick`, et du code synchrone. L'exercice vous demandé de **prédire
 > l'ordre d'affichage** avant de lancer le script.
 
 **Action** : Laisser un moment pour que le spectateur réfléchisse.

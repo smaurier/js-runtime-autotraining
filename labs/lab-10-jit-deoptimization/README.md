@@ -4,16 +4,16 @@
 
 - Comprendre le cycle optimisation / deoptimisation de TurboFan
 - Savoir provoquer et observer des deoptimisations avec `--trace-opt` et `--trace-deopt`
-- Identifier les causes principales de deoptimisation : changement de type, hidden class, ajout de proprietes
+- Identifier les causes principales de deoptimisation : changement de type, hidden class, ajout de propriétés
 - Corriger chaque fonction deoptimisee pour qu'elle reste stable
 - Mesurer l'impact concret sur les performances avec `performance.now()`
 
-## Prerequis
+## Prérequis
 
 - Node.js v18+
 - Lab 09 termine (comprehension du bytecode et du feedback de type)
 
-## Commande d'execution
+## Commande d'exécution
 
 ```bash
 # Observer les optimisations et deoptimisations
@@ -27,9 +27,9 @@ node --trace-opt --trace-deopt --trace-deopt-verbose exercise.js
 
 | Partie | Sujet |
 |--------|-------|
-| 1 | Ecrire une fonction optimisee, verifier "optimized" dans la trace |
+| 1 | Écrire une fonction optimisee, vérifier "optimized" dans la trace |
 | 2 | Provoquer une deoptimisation par changement de type |
-| 3 | Trois scenarios de deopt : (a) type, (b) hidden class, (c) ajout de proprietes |
+| 3 | Trois scenarios de deopt : (a) type, (b) hidden class, (c) ajout de propriétés |
 | 4 | Corriger chaque fonction pour la rendre optimization-stable |
 | 5 | Benchmark : optimise vs deoptimise avec `performance.now()` |
 
@@ -46,8 +46,8 @@ node --trace-opt --trace-deopt --trace-deopt-verbose exercise.js
 | Cause | Exemple | Message typique |
 |-------|---------|-----------------|
 | Changement de type | `f(1)` puis `f("a")` | "Insufficient type feedback" |
-| Hidden class | Objet de forme differente | "wrong map" |
-| Ajout de proprietes | `obj.newProp = x` apres optimisation | "map changed" |
+| Hidden class | Objet de forme différente | "wrong map" |
+| Ajout de propriétés | `obj.newProp = x` après optimisation | "map changed" |
 
 ## Criteres de reussite
 
@@ -55,4 +55,4 @@ node --trace-opt --trace-deopt --trace-deopt-verbose exercise.js
 - Partie 2 : la deoptimisation est visible dans `--trace-deopt`
 - Partie 3 : les 3 scenarios sont implementes et chacun provoque une deopt
 - Partie 4 : les fonctions corrigees restent optimisees
-- Partie 5 : le benchmark montre une difference mesurable (au moins 2x)
+- Partie 5 : le benchmark montre une différence mesurable (au moins 2x)

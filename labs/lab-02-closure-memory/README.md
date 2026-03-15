@@ -35,7 +35,7 @@ Mesurez la mémoire pour chaque cas. V8 optimise-t-il le cas 2 ? Et le cas 3 ?
 
 ### Partie 3 — Trouver et corriger la fuite mémoire
 
-La fonction `createLeakyFactory()` crée des gestionnaires d'événements. Elle a un bug subtil : elle retient accidentellement des données volumineuses via sa closure. Identifiez le problème et corrigez-le dans `createFixedFactory()`.
+La fonction `createLeakyFactory()` crée des gestionnaires d'événements. Elle à un bug subtil : elle retient accidentellement des données volumineuses via sa closure. Identifiez le problème et corrigez-le dans `createFixedFactory()`.
 
 ## Ce qu'il faut observer
 

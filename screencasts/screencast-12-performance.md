@@ -34,8 +34,8 @@
 - Enregistrer : temps total, temps CPU, mémoire consommée
 
 #### Étape 2 : Identifier le bottleneck
-- **CPU profiler** : flame chart → où le temps est passé
-- **Heap profiler** : allocation timeline → où la mémoire est allouée
+- **CPU profiler** : flame chart → ou le temps est passé
+- **Heap profiler** : allocation timeline → ou la mémoire est allouée
 - **Traces V8** : `--trace-opt`, `--trace-deopt` → est-ce que le moteur est malheureux ?
 - Chercher le **hotspot** : la fonction qui consomme le plus de temps
 

@@ -13,7 +13,7 @@
 | 06 | [Async/Await](/quizzes/quiz-06-async-await.html) | await, return await, for await |
 | 07 | [GC](/quizzes/quiz-07-gc.html) | Mark-and-sweep, générationnel, tri-color |
 | 08 | [Memory Leaks](/quizzes/quiz-08-memory-leaks.html) | 5 patterns, 3 snapshots, WeakMap |
-| 09 | [V8 Architecture](/quizzes/quiz-09-v8-architecture.html) | Pipeline, Feedback Vector, Elements |
+| 09 | [V8 Architecture](/quizzes/quiz-09-v8-architecture.html) | Pipeline, Feedback Vector, Éléments |
 | 10 | [JIT](/quizzes/quiz-10-jit.html) | Spéculation, inlining, déoptimisation |
 | 11 | [Hidden Classes](/quizzes/quiz-11-hidden-classes.html) | Maps, IC, transitions |
 | 12 | [Performance](/quizzes/quiz-12-performance.html) | Profiling, anti-patterns, Amdahl |

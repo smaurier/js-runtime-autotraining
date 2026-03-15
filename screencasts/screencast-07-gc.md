@@ -35,18 +35,18 @@
 >
 > La mémoire heap est divisée en deux espaces :
 >
-> - **Young Generation** (Nursery + Intermediate) — petite, collectée fréquemment.
+> - **Young Génération** (Nursery + Intermediate) — petite, collectée fréquemment.
 >   Les nouveaux objets arrivent ici. Le GC utilise un algorithme de **Scavenge**
 >   (semi-space copying) : les objets survivants sont copiés dans l'autre demi-espace.
 >   Rapide, mais coûteux en espace (50% inutilisé).
 >
-> - **Old Generation** — plus grande, collectée rarement. Les objets qui ont
+> - **Old Génération** — plus grande, collectée rarement. Les objets qui ont
 >   survécu à 2 Scavenges sont "promus" ici. Le GC utilise un algorithme
 >   de **Mark-Sweep-Compact**.
 
 **Action** : Afficher un schéma Young Gen / Old Gen avec les flèches de promotion.
 
-> L'algorithme Mark-Sweep-Compact de l'Old Generation utilise le **tri-color marking** :
+> L'algorithme Mark-Sweep-Compact de l'Old Génération utilise le **tri-color marking** :
 >
 > 1. **Blanc** — L'objet n'a pas encore été visité. À la fin, tout objet blanc est considéré mort.
 > 2. **Gris** — L'objet a été visité, mais ses références n'ont pas toutes été explorées.
@@ -83,8 +83,8 @@ node --expose-gc --trace-gc labs/lab-07-gc-observation/exercise.js
 **Action** : Commenter la sortie du `--trace-gc`.
 
 > Regardez les lignes. Vous voyez des événements comme :
-> - `Scavenge` — collecte de la Young Generation (quelques millisecondes).
-> - `Mark-Sweep` — collecte de l'Old Generation (plus long, mais incrémental).
+> - `Scavenge` — collecte de la Young Génération (quelques millisecondes).
+> - `Mark-Sweep` — collecte de l'Old Génération (plus long, mais incrémental).
 >
 > La colonne de taille mémoire montre l'avant/après de chaque collecte.
 > Observez comment la mémoire diminue après le déréférencement des objets.

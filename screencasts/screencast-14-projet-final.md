@@ -55,7 +55,7 @@
 - Chaque macrotask est suivie d'un drain complet des microtasks
 - Un `setTimeout(fn, 0)` n'exécute `fn` qu'après le drain des microtasks en cours
 
-**Transition** : « Lançons les tests et voyons où on en est. »
+**Transition** : « Lançons les tests et voyons ou on en est. »
 
 ### [04:30-07:00] Démonstration — Tests en rouge et premiers pas
 
@@ -65,8 +65,8 @@ cd labs/lab-14-mini-event-loop && node --test
 ```
 - Montrer que tous les tests échouent (rouge)
 - Lire les noms des tests pour comprendre ce qui est attendu :
-  - « should execute synchronous code in order »
-  - « should execute microtasks before macrotasks »
+  - « should exécuté synchronous code in order »
+  - « should exécuté microtasks before macrotasks »
   - « should drain all microtasks before next macrotask »
   - « should handle nested microtasks »
   - etc.

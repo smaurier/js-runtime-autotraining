@@ -25,7 +25,7 @@ Pile LIFO (Last In, First Out) qui enregistre les frames d'exécution des foncti
 ### Closure {#closure}
 Fonction qui capture les variables de son scope lexical englobant. La closure maintient une référence vers le `LexicalEnvironment` parent, ce qui peut empêcher le garbage collector de libérer ces variables.
 
-### Context (Execution Context) {#execution-context}
+### Context (Exécution Context) {#exécution-context}
 Structure créée par V8 à chaque appel de fonction, contenant le `LexicalEnvironment`, le `VariableEnvironment`, le `this` binding et la référence au scope externe.
 
 ## D
@@ -35,7 +35,7 @@ Processus par lequel TurboFan abandonne le code machine optimisé et revient au 
 
 ## E
 
-### Elements Kinds {#elements-kinds}
+### Éléments Kinds {#éléments-kinds}
 Classification interne de V8 pour les tableaux selon le type de leurs éléments (`PACKED_SMI_ELEMENTS`, `PACKED_DOUBLE_ELEMENTS`, `PACKED_ELEMENTS`, `HOLEY_*`). Les transitions vont du plus spécifique au plus générique et sont irréversibles.
 
 ### Escape Analysis {#escape-analysis}
@@ -44,8 +44,8 @@ Optimisation de TurboFan qui détermine si un objet peut être alloué sur la pi
 ### Event Loop {#event-loop}
 Boucle principale du runtime JavaScript qui orchestre l'exécution du code synchrone, des microtasks et des macrotasks. Elle vérifie la call stack, vide la file de microtasks, puis traite la prochaine macrotask.
 
-### Execution Context {#context}
-Voir [Context (Execution Context)](#execution-context).
+### Exécution Context {#context}
+Voir [Context (Exécution Context)](#execution-context).
 
 ## F
 
@@ -58,15 +58,15 @@ API ES2021 permettant d'enregistrer un callback qui sera appelé quand un objet 
 ## G
 
 ### Garbage Collector {#garbage-collector}
-Mécanisme automatique de libération de la mémoire. V8 utilise un GC générationnel avec Scavenger (Young Generation) et Mark-Compact (Old Generation), orchestré par Orinoco.
+Mécanisme automatique de libération de la mémoire. V8 utilise un GC générationnel avec Scavenger (Young Génération) et Mark-Compact (Old Génération), orchestré par Orinoco.
 
 ### Generational GC {#generational-gc}
-Stratégie de garbage collection basée sur l'hypothèse générationnelle : la plupart des objets meurent jeunes. V8 sépare le heap en Young Generation (collecte fréquente, rapide) et Old Generation (collecte rare, plus coûteuse).
+Stratégie de garbage collection basée sur l'hypothèse générationnelle : la plupart des objets meurent jeunes. V8 sépare le heap en Young Génération (collecte fréquente, rapide) et Old Génération (collecte rare, plus coûteuse).
 
 ## H
 
 ### Heap {#heap}
-Zone de mémoire dynamique où sont alloués les objets JavaScript. Divisé en Young Generation (nursery + intermediate) et Old Generation dans V8.
+Zone de mémoire dynamique ou sont alloués les objets JavaScript. Divisé en Young Génération (nursery + intermediate) et Old Génération dans V8.
 
 ### Hidden Class (Map) {#hidden-class}
 Structure interne de V8 (appelée « Map ») qui décrit la forme d'un objet : quelles propriétés il possède, à quels offsets elles se trouvent, et quel est leur type. Les objets de même forme partagent la même Map.
@@ -93,7 +93,7 @@ Compilation Just-In-Time : compilation du bytecode en code machine natif pendant
 ## L
 
 ### LexicalEnvironment {#lexical-environment}
-Composant de l'Execution Context qui contient les liaisons (bindings) `let`, `const` et des fonctions déclarées. Forme une chaîne avec les environnements parents pour la résolution des variables.
+Composant de l'Exécution Context qui contient les liaisons (bindings) `let`, `const` et des fonctions déclarées. Forme une chaîne avec les environnements parents pour la résolution des variables.
 
 ## M
 
@@ -140,7 +140,7 @@ Environnement d'exécution JavaScript isolé avec ses propres globaux (`Object`,
 ## S
 
 ### Scavenger {#scavenger}
-Algorithme de garbage collection utilisé pour la Young Generation dans V8. Utilise un espace semi-space (from-space / to-space) et copie les objets survivants, ce qui est très rapide pour les collectes fréquentes.
+Algorithme de garbage collection utilisé pour la Young Génération dans V8. Utilise un espace semi-space (from-space / to-space) et copie les objets survivants, ce qui est très rapide pour les collectes fréquentes.
 
 ### Scope Chain {#scope-chain}
 Chaîne de LexicalEnvironments reliant un scope à ses scopes englobants. Utilisée pour la résolution des variables : V8 remonte la chaîne jusqu'à trouver la liaison ou atteindre le scope global.
@@ -175,7 +175,7 @@ Objet possédant une méthode `.then()`. Les Promises peuvent « absorber » un 
 Pool de threads (4 par défaut dans libuv/Node.js) utilisé pour les opérations bloquantes (I/O fichier, DNS, crypto, zlib). Les résultats sont renvoyés vers l'event loop via des callbacks.
 
 ### Tri-color Marking {#tri-color}
-Technique de marquage utilisée par le GC où les objets sont colorés en blanc (non visité), gris (visité mais enfants non traités) et noir (visité et enfants traités). Permet un marquage incrémental et concurrent.
+Technique de marquage utilisée par le GC ou les objets sont colorés en blanc (non visité), gris (visité mais enfants non traités) et noir (visité et enfants traités). Permet un marquage incrémental et concurrent.
 
 ### TurboFan {#turbofan}
 Compilateur JIT optimisant de V8. Utilise le feedback de type collecté par Ignition pour générer du code machine hautement optimisé avec des optimisations spéculatives (inlining, escape analysis, etc.).
@@ -188,7 +188,7 @@ Moteur JavaScript open-source développé par Google, utilisé dans Chrome et No
 ## W
 
 ### WeakMap {#weakmap}
-Collection clé-valeur où les clés sont des objets tenus faiblement : elles n'empêchent pas le garbage collector de collecter l'objet clé. Utile pour associer des métadonnées à des objets sans créer de fuite mémoire.
+Collection clé-valeur ou les clés sont des objets tenus faiblement : elles n'empêchent pas le garbage collector de collecter l'objet clé. Utile pour associer des métadonnées à des objets sans créer de fuite mémoire.
 
 ### WeakRef {#weakref}
 Référence faible vers un objet qui n'empêche pas sa collecte par le GC. Permet de mettre en cache des objets coûteux tout en laissant le GC les libérer si la mémoire est insuffisante.

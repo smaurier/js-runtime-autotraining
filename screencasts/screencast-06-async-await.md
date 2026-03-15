@@ -54,7 +54,7 @@ function fetchData() {
 
 > À chaque `await`, la fonction est **suspendue**. Son état (variables locales,
 > position dans le code) est sauvegardé. Quand la Promise attendue se résout,
-> la fonction **reprend** exactement où elle s'était arrêtée.
+> la fonction **reprend** exactement ou elle s'était arrêtée.
 >
 > C'est exactement le même mécanisme que les **générateurs** (`function*` / `yield`),
 > mais spécialisé pour les Promises. D'ailleurs, avant que `async/await` n'existe
@@ -74,7 +74,7 @@ function fetchData() {
 **Action** : Ouvrir `labs/lab-06-async-patterns-comparison/exercise.js`.
 
 > Ce lab mélange des appels `async/await` avec des Promises classiques et
-> des `process.nextTick`. L'exercice demande de prédire l'ordre d'exécution.
+> des `process.nextTick`. L'exercice demandé de prédire l'ordre d'exécution.
 
 ```javascript
 async function foo() {
@@ -114,7 +114,7 @@ node labs/lab-06-async-patterns-comparison/exercise.js
 
 ### [08:00-11:00] Approfondissement — return vs return await en try/catch
 
-> Il y a un piège classique que beaucoup de développeurs rencontrent en production.
+> Il y à un piège classique que beaucoup de développeurs rencontrent en production.
 > Quelle est la différence entre `return promise` et `return await promise` ?
 
 **Action** : Créer un fichier de démo en live.

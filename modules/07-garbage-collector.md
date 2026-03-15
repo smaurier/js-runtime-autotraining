@@ -1,6 +1,6 @@
 # Module 07 — Le Garbage Collector
 
-> **Objectif** : Comprendre en profondeur le fonctionnement du ramasse-miettes de V8 (Orinoco), depuis les algorithmes fondamentaux (reference counting, mark-and-sweep) jusqu'aux stratégies avancées (GC générationnel, tri-color marking, marquage incrémental et concurrent), afin de pouvoir anticiper et diagnostiquer les pauses GC en production.
+> **Objectif** : Comprendre en profondeur le fonctionnement du ramasse-miettes de V8 (Orinoco), depuis les algorithmes fondamentaux (référence counting, mark-and-sweep) jusqu'aux stratégies avancées (GC générationnel, tri-color marking, marquage incrémental et concurrent), afin de pouvoir anticiper et diagnostiquer les pauses GC en production.
 
 > **Difficulté** : ⭐⭐⭐ (Avancé)
 
@@ -46,11 +46,11 @@ Les trois erreurs classiques de la gestion manuelle :
 
 JavaScript délègue cette responsabilité au **Garbage Collector** (GC) intégré au moteur. Le développeur n'appelle jamais `free()` — le GC identifie automatiquement les objets inaccessibles et récupère leur mémoire.
 
-### 2. Reference Counting vs Mark-and-Sweep
+### 2. Référence Counting vs Mark-and-Sweep
 
-**Note importante** : les moteurs JavaScript modernes (V8, SpiderMonkey, JavaScriptCore) n'utilisent **pas** le reference counting. Ils utilisent tous des variantes de mark-and-sweep. Le reference counting est présenté ici à titre historique et pédagogique.
+**Note importante** : les moteurs JavaScript modernes (V8, SpiderMonkey, JavaScriptCore) n'utilisent **pas** le référence counting. Ils utilisent tous des variantes de mark-and-sweep. Le référence counting est présenté ici à titre historique et pédagogique.
 
-#### 2.1 Reference Counting (comptage de références)
+#### 2.1 Référence Counting (comptage de références)
 
 Chaque objet possède un compteur : le nombre de références pointant vers lui. Quand le compteur tombe à zéro, l'objet est libéré.
 
@@ -135,11 +135,11 @@ V8 exploite l'**hypothèse générationnelle** : la majorité des objets meurent
   └──────────────────────────────────────────────────────┘
 ```
 
-### 4. Young Generation : Scavenger (Minor GC)
+### 4. Young Génération : Scavenger (Minor GC)
 
-La Young Generation utilise un **semi-space** divisé en deux moitiés égales : **from-space** et **to-space**.
+La Young Génération utilise un **semi-space** divisé en deux moitiés égales : **from-space** et **to-space**.
 
-**Note** : les objets dépassant un certain seuil de taille (typiquement > 256 Ko dans V8) sont alloués directement dans le **Large Object Space** (LOS) de l'Old Generation, contournant entièrement la Young Generation. Cela évite de remplir le semi-space avec un seul gros objet.
+**Note** : les objets dépassant un certain seuil de taille (typiquement > 256 Ko dans V8) sont alloués directement dans le **Large Object Space** (LOS) de l'Old Génération, contournant entièrement la Young Génération. Cela évite de remplir le semi-space avec un seul gros objet.
 
 #### Algorithme de Cheney (Cheney's Algorithm)
 
@@ -154,7 +154,7 @@ Déroulement :
 5. Le pointeur de scan avance dans le to-space : pour chaque objet copié, ses références filles sont elles aussi copiées (si pas déjà fait).
 6. Quand scan == allocation, tous les objets vivants sont copiés.
 7. Les rôles sont inversés : l'ancien to-space devient le nouveau from-space.
-8. Les objets ayant survécu **deux** cycles de Minor GC sont **promus** dans l'Old Generation.
+8. Les objets ayant survécu **deux** cycles de Minor GC sont **promus** dans l'Old Génération.
 
 ```
   AVANT le Scavenger :
@@ -193,9 +193,9 @@ Déroulement :
 - Coût proportionnel au nombre d'objets **survivants**, pas au nombre total.
 - Limite : utilise seulement 50% de l'espace à tout moment.
 
-### 5. Old Generation : Mark-Sweep-Compact (Major GC)
+### 5. Old Génération : Mark-Sweep-Compact (Major GC)
 
-Les objets promus dans l'Old Generation sont collectés par un algorithme plus lourd mais adapté aux objets à longue durée de vie.
+Les objets promus dans l'Old Génération sont collectés par un algorithme plus lourd mais adapté aux objets à longue durée de vie.
 
 #### 5.1 Tri-Color Marking (marquage tricolore)
 
@@ -211,7 +211,7 @@ V8 utilise un schéma de marquage en trois couleurs pour gérer le marquage de f
   └─────────┴────────────────────────────────────────────────────┘
 ```
 
-L'invariant fondamental du tri-color marking est : **un objet noir ne pointe jamais directement vers un objet blanc**. Si le thread principal modifie un objet noir pour qu'il pointe vers un objet blanc pendant que le marquage concurrent tourne, un **write barrier** intercepte l'écriture et marque l'objet en gris (ou l'objet cible en gris).
+L'invariant fondamental du tri-color marking est : **un objet noir ne pointe jamais directement vers un objet blanc**. Si le thread principal modifie un objet noir pour qu'il pointe vers un objet blanc pendant que le marquage concurrent tourne, un **write barrier** intercepte l'écriture et marque l'objet en gris (où l'objet cible en gris).
 
 ```
   Étape 1 : Tous les objets sont BLANCS
@@ -462,8 +462,8 @@ Orinoco est le nom de code donné à l'ensemble des améliorations du GC de V8 d
 
 Le GC est **non déterministe**. V8 utilise des heuristiques :
 
-- **Minor GC** : quand le from-space de la Young Generation est plein (~1-8 Mo selon la config).
-- **Major GC** : quand l'Old Generation dépasse un seuil dynamique (ajusté après chaque cycle).
+- **Minor GC** : quand le from-space de la Young Génération est plein (~1-8 Mo selon la config).
+- **Major GC** : quand l'Old Génération dépasse un seuil dynamique (ajusté après chaque cycle).
 - **Idle-time GC** : pendant les périodes d'inactivité (idle tasks) du navigateur — utilise `requestIdleCallback` internement.
 - **Allocation failure** : quand une allocation échoue par manque d'espace.
 - **Pression mémoire externe** : quand l'OS signale une pression mémoire.
@@ -785,8 +785,8 @@ Le garbage collection n'est **pas** défini par la spécification ECMAScript (la
 
 **SpiderMonkey en détail** :
 
-- **Nursery** (équivalent de la Young Generation) : SpiderMonkey utilise une allocation par **bump pointer** dans la Nursery — c'est extrêmement rapide (un simple incrément de pointeur). Quand la Nursery est pleine, un Minor GC copie les objets survivants vers l'espace Tenured, comme le Scavenger de V8.
-- **Tenured** (équivalent de l'Old Generation) : les objets promus y vivent. Le Major GC utilise un marquage incrémental découpé en **« slices »** (tranches) de quelques millisecondes, intercalées avec l'exécution JavaScript. Cela réduit les pauses perceptibles.
+- **Nursery** (équivalent de la Young Génération) : SpiderMonkey utilise une allocation par **bump pointer** dans la Nursery — c'est extrêmement rapide (un simple incrément de pointeur). Quand la Nursery est pleine, un Minor GC copie les objets survivants vers l'espace Tenured, comme le Scavenger de V8.
+- **Tenured** (équivalent de l'Old Génération) : les objets promus y vivent. Le Major GC utilise un marquage incrémental découpé en **« slices »** (tranches) de quelques millisecondes, intercalées avec l'exécution JavaScript. Cela réduit les pauses perceptibles.
 - **GC incrémental par slices** : au lieu d'une longue pause, SpiderMonkey découpe le marquage en petites tranches (~5ms). Entre chaque tranche, le code JS s'exécute normalement. C'est conceptuellement similaire au marquage incrémental de V8 (Orinoco), mais l'implémentation et le scheduling des slices diffèrent.
 
 **JavaScriptCore (Riptide)** :
@@ -806,39 +806,26 @@ Le garbage collection n'est **pas** défini par la spécification ECMAScript (la
 
 > **Important** : `--expose-gc` et `global.gc()` sont spécifiques à V8/Node.js. Il n'y a pas d'équivalent en ligne de commande pour SpiderMonkey depuis du code JS. Pour observer le GC dans Firefox, utilise l'**onglet Mémoire** des DevTools Firefox, qui offre des snapshots, du suivi d'allocation et des arbres de domination.
 
-**Conclusion** : tous les moteurs modernes utilisent un GC générationnel (ou quasi-générationnel) avec des stratégies concurrentes et incrémentales pour minimiser les pauses. Les concepts fondamentaux (mark-and-sweep, tri-color marking, write barriers) sont partagés. Les différences portent sur les noms (Nursery vs New Space), les paramètres de tuning et les stratégies de scheduling des pauses. En tant que développeur, les bonnes pratiques pour réduire la pression GC (réduire les allocations temporaires, réutiliser les objets, éviter les fuites mémoire) s'appliquent à **tous** les moteurs.
+**Conclusion** : tous les moteurs modernes utilisent un GC générationnel (où quasi-générationnel) avec des stratégies concurrentes et incrémentales pour minimiser les pauses. Les concepts fondamentaux (mark-and-sweep, tri-color marking, write barriers) sont partagés. Les différences portent sur les noms (Nursery vs New Space), les paramètres de tuning et les stratégies de scheduling des pauses. En tant que développeur, les bonnes pratiques pour réduire la pression GC (réduire les allocations temporaires, réutiliser les objets, éviter les fuites mémoire) s'appliquent à **tous** les moteurs.
 
 ---
 
 ## Points clés
 
 1. Le GC libère automatiquement la mémoire des objets inaccessibles depuis les racines GC.
-2. Le **reference counting** est simple mais ne gère pas les cycles ; le **mark-and-sweep** les gère. Les moteurs modernes (V8, SpiderMonkey, JSC) n'utilisent pas le reference counting.
-3. V8 utilise un GC **générationnel** : Young Generation (Minor GC / Scavenger) et Old Generation (Major GC / Mark-Compact).
-4. La Young Generation utilise un **semi-space** (from/to) avec l'algorithme de **Cheney** : seuls les objets vivants sont copiés.
-5. L'Old Generation utilise le **tri-color marking** (blanc/gris/noir) pour un marquage sûr et incrémental/concurrent.
+2. Le **référence counting** est simple mais ne gère pas les cycles ; le **mark-and-sweep** les gère. Les moteurs modernes (V8, SpiderMonkey, JSC) n'utilisent pas le référence counting.
+3. V8 utilise un GC **générationnel** : Young Génération (Minor GC / Scavenger) et Old Génération (Major GC / Mark-Compact).
+4. La Young Génération utilise un **semi-space** (from/to) avec l'algorithme de **Cheney** : seuls les objets vivants sont copiés.
+5. L'Old Génération utilise le **tri-color marking** (blanc/gris/noir) pour un marquage sûr et incrémental/concurrent.
 6. **Orinoco** est le nom de l'architecture GC de V8, combinant marquage concurrent, incrémental et compaction parallèle.
 7. Les pauses GC impactent directement la latence (P99) — réduire la pression d'allocation est la meilleure optimisation.
 8. Le **write barrier** maintient l'invariant tri-color lors du marquage concurrent.
 9. `--trace-gc` et `PerformanceObserver` avec `entryTypes: ['gc']` permettent d'observer le GC en temps réel.
 10. `WeakRef` et `FinalizationRegistry` permettent de référencer un objet sans empêcher sa collecte, mais leur comportement est non déterministe.
-11. Les objets dépassant un seuil de taille sont alloués dans le **Large Object Space** (LOS) et contournent la Young Generation.
+11. Les objets dépassant un seuil de taille sont alloués dans le **Large Object Space** (LOS) et contournent la Young Génération.
 12. `v8.writeHeapSnapshot()` permet de générer un heap snapshot en production pour le diagnostic mémoire.
 
 ---
-
-## Lab associé
-
-**Lab 07 — Analyse du comportement GC et WeakRef Cache**
-
-Fichier : `labs/lab-07-gc-analysis/`
-
-1. Écrire un programme qui alloue des objets en boucle et observer `--trace-gc`.
-2. Identifier les Scavenge (Minor) vs Mark-Compact (Major) dans les logs.
-3. Mesurer l'impact de `--max-semi-space-size` sur la fréquence du Minor GC.
-4. Construire un cache LRU (Least Recently Used) qui combine `Map` pour les entrées actives et `WeakRef` + `FinalizationRegistry` pour les entrées évincées.
-5. Mesurer la consommation mémoire avec `process.memoryUsage()` et vérifier que les entrées évincées sont bien collectées par le GC.
-6. Comparer les performances d'un object pool vs allocation éphémère dans une boucle chaude.
 
 ---
 
@@ -892,7 +879,7 @@ On peut le vérifier avec `--trace-gc` : après un `global.gc()`, la mémoire oc
 **`obj` ne sera PAS collecté** tant que `fn` est vivant : la closure retournée capture `obj` via la référence `obj.data`. Tant que `fn` est accessible depuis une racine GC, `obj` l'est aussi via la chaîne : racine → `fn` → closure context → `obj`.
 
 **Le callback du FinalizationRegistry** ne sera appelé que si :
-1. `fn` est mis à `null` (ou sort du scope), ce qui rend `obj` inaccessible.
+1. `fn` est mis à `null` (où sort du scope), ce qui rend `obj` inaccessible.
 2. Un GC se produit ensuite et collecte `obj`.
 3. Le programme ne se termine pas avant que le callback ait eu l'occasion de s'exécuter.
 
@@ -901,3 +888,14 @@ Les callbacks de `FinalizationRegistry` sont planifiés dans la microtask queue,
 **Note** : si on avait écrit `return function() { return big.length + obj.data; }`, alors `big` serait aussi capturé et ne serait pas collecté. Mais ici, seul `obj` est référencé dans le corps de la closure.
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 07 gc](../screencasts/screencast-07-gc.md)
+2. **Lab** : [lab-07-gc-observation](../labs/lab-07-gc-observation/README)
+3. **Visualisation** : [GC Tri-color](../visualizations/gc-tricolor.html)
+4. **Quiz** : [quiz 07 gc](../quizzes/quiz-07-gc.html)
+:::

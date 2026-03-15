@@ -69,15 +69,15 @@ Le moteur JavaScript est **mono-threadé** (il ne fait qu'une seule chose à la 
 
 ### 3. Qu'est-ce qu'un contexte d'exécution ?
 
-Un **Execution Context** (EC, ou contexte d'exécution) est une structure interne créée par le moteur JS à chaque invocation de code. Pense-le comme une "fiche descriptive" que le moteur crée pour savoir : quelles variables existent ici ? Quelle est la valeur de `this` ? Quel est le scope parent ?
+Un **Exécution Context** (EC, ou contexte d'exécution) est une structure interne créée par le moteur JS à chaque invocation de code. Pense-le comme une "fiche descriptive" que le moteur crée pour savoir : quelles variables existent ici ? Quelle est la valeur de `this` ? Quel est le scope parent ?
 
 Il existe trois types :
 
 | Type | Créé quand... |
 |------|---------------|
-| **Global Execution Context** | Le script commence à s'exécuter |
-| **Function Execution Context** | Une fonction est appelée |
-| **Eval Execution Context** | `eval()` est invoqué (voir section dédiée plus bas) |
+| **Global Exécution Context** | Le script commence à s'exécuter |
+| **Function Exécution Context** | Une fonction est appelée |
+| **Eval Exécution Context** | `eval()` est invoqué (voir section dédiée plus bas) |
 
 Chaque contexte d'exécution contient trois composants internes (définis dans la spécification ECMAScript) :
 
@@ -109,7 +109,7 @@ Chaque contexte d'exécution contient trois composants internes (définis dans l
 
 Chaque contexte d'exécution passe par **deux phases distinctes**. C'est l'un des concepts les plus importants de ce module.
 
-#### Phase de création (Creation Phase)
+#### Phase de création (Création Phase)
 
 Le moteur parcourt le code **sans l'exécuter** et :
 
@@ -125,7 +125,7 @@ Le moteur parcourt le code **sans l'exécuter** et :
    - En mode strict : `this` = `undefined` (dans les fonctions)
    - Dans une méthode : `this` = l'objet appelant
 
-#### Phase d'exécution (Execution Phase)
+#### Phase d'exécution (Exécution Phase)
 
 Le moteur exécute le code ligne par ligne. Les variables reçoivent leurs valeurs réelles, les expressions sont évaluées, les fonctions sont appelées.
 
@@ -196,7 +196,7 @@ En V8 (le moteur de Chrome/Node.js), la pile est une zone mémoire contiguë. Ch
 
 ### 7. Stack Overflow
 
-La call stack a une **taille limitée** (dépend du moteur et de l'OS, typiquement ~10 000 à ~25 000 frames dans V8). Un dépassement provoque une erreur `RangeError: Maximum call stack size exceeded`.
+La call stack à une **taille limitée** (dépend du moteur et de l'OS, typiquement ~10 000 à ~25 000 frames dans V8). Un dépassement provoque une erreur `RangeError: Maximum call stack size exceeded`.
 
 ```typescript
 // Stack overflow classique : récursion infinie
@@ -339,7 +339,7 @@ console.log(arrFromIframe instanceof iframeArray);     // true
 console.log(Array.isArray(arrFromIframe)); // true ✓
 ```
 
-Chaque Realm a son propre **Global Execution Context**, son propre `window`, et ses propres prototypes. Deux Realms = deux ensembles de built-ins distincts.
+Chaque Realm a son propre **Global Exécution Context**, son propre `window`, et ses propres prototypes. Deux Realms = deux ensembles de built-ins distincts.
 
 ### 11. Direct eval vs indirect eval
 
@@ -641,15 +641,11 @@ measures.forEach((m: PerformanceEntry) => {
 
 ---
 
-## Lab associé
-
-Voir `labs/01-call-stack-lab.js` — Exercice de traçage manuel de la call stack avec vérification par `Error().stack`.
-
 ---
 
 ## Pour aller plus loin
 
-- [ECMAScript Specification — Execution Contexts](https://tc39.es/ecma262/#sec-execution-contexts)
+- [ECMAScript Specification — Exécution Contexts](https://tc39.es/ecma262/#sec-execution-contexts)
 - [ECMAScript Specification — Realms](https://tc39.es/ecma262/#sec-code-realms)
 - [V8 Blog — Blazingly fast parsing](https://v8.dev/blog/scanner) — contexte sur l'exécution interne V8
 - [V8 Blog — TurboFan JIT](https://v8.dev/docs/turbofan)
@@ -712,3 +708,14 @@ undefined
 - Troisième `console.log(x)` : on est dans le contexte global, `x` vaut toujours `1` (jamais modifié).
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 01 call stack](../screencasts/screencast-01-call-stack.md)
+2. **Lab** : [lab-01-call-stack-observation](../labs/lab-01-call-stack-observation/README)
+3. **Visualisation** : [Call Stack](../visualizations/call-stack.html)
+4. **Quiz** : [quiz 01 call stack](../quizzes/quiz-01-call-stack.html)
+:::

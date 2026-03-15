@@ -151,7 +151,7 @@ function sumOfSquares(a, b) {
 }
 ```
 
-**Le budget d'inlining** : TurboFan ne peut pas tout inliner — il y a un budget de taille (en noeuds dans le graphe). Chaque inlining augmente la taille du graphe. Quand le budget est dépassé, TurboFan arrête d'inliner.
+**Le budget d'inlining** : TurboFan ne peut pas tout inliner — il y à un budget de taille (en noeuds dans le graphe). Chaque inlining augmente la taille du graphe. Quand le budget est dépassé, TurboFan arrête d'inliner.
 
 ```
   ┌──────────────────────────────────────────────────────────────────┐
@@ -585,7 +585,7 @@ async function fetchData() {
 - Résultat : `return await` n'a pas de surcoût par rapport à `return` dans le cas succès, mais il préserve la stack trace et le try/catch.
 - **Recommandation** : toujours utiliser `return await` dans une fonction async, surtout si elle est dans un try/catch.
 
-> **Note (2025+)** : Turboshaft remplace progressivement le backend de TurboFan comme pipeline d'optimisation par defaut dans V8. L'architecture reste la meme (Ignition → bytecode → optimisation), mais le backend genere un code machine plus performant avec des temps de compilation reduits. Voir le Module 09 (section 7) et le [blog V8 sur Turboshaft](https://v8.dev/blog/turboshaft) pour les details.
+> **Note (2025+)** : Turboshaft remplace progressivement le backend de TurboFan comme pipeline d'optimisation par defaut dans V8. L'architecture reste la même (Ignition → bytecode → optimisation), mais le backend généré un code machine plus performant avec des temps de compilation reduits. Voir le Module 09 (section 7) et le [blog V8 sur Turboshaft](https://v8.dev/blog/turboshaft) pour les details.
 
 ---
 
@@ -778,7 +778,7 @@ Les concepts d'optimisation spéculative et de déoptimisation sont **universels
 - **DFG de JSC** utilise une approche unique : l'**interprétation abstraite** (abstract interpretation). Il exécute symboliquement le bytecode pour inférer les types possibles, plutôt que de se baser uniquement sur le feedback runtime.
 - **`--trace-opt` est spécifique à V8/Node.js.** Pour Firefox, le diagnostic JIT passe par `about:config` et des flags internes moins accessibles. En pratique, les développeurs Firefox utilisent le **Firefox Profiler** (profiler.firefox.com) pour observer les effets des optimisations.
 
-> **À retenir** : tous les moteurs JS modernes font de l'optimisation spéculative + déoptimisation (ou bailout). Les principes que tu apprends ici avec V8 s'appliquent conceptuellement à SpiderMonkey et JSC — seule la terminologie change.
+> **À retenir** : tous les moteurs JS modernes font de l'optimisation spéculative + déoptimisation (où bailout). Les principes que tu apprends ici avec V8 s'appliquent conceptuellement à SpiderMonkey et JSC — seule la terminologie change.
 
 ---
 
@@ -788,7 +788,7 @@ Les concepts d'optimisation spéculative et de déoptimisation sont **universels
 
 2. **Le type feedback** est collecté dans les Feedback Vectors par Ignition et consommé par Maglev et TurboFan pour spécialiser le code.
 
-3. **L'inlining** est l'optimisation reine : elle élimine le coût d'appel et ouvre la porte à d'autres optimisations (escape analysis, constant folding). TurboFan a un budget d'inlining.
+3. **L'inlining** est l'optimisation reine : elle élimine le coût d'appel et ouvre la porte à d'autres optimisations (escape analysis, constant folding). TurboFan à un budget d'inlining.
 
 4. **L'escape analysis** élimine les allocations d'objets temporaires dans les hot loops — mais l'objet ne doit pas s'échapper de la fonction.
 
@@ -805,19 +805,6 @@ Les concepts d'optimisation spéculative et de déoptimisation sont **universels
 10. **`--trace-opt` et `--trace-deopt`** sont les outils essentiels. La méthodologie : identifier les fonctions chaudes, repérer les deopts, corriger les types instables.
 
 ---
-
-## Lab associé
-
-**Lab 10 — Optimisation JIT en pratique**
-
-Fichier : `labs/lab-10-jit-optimization/`
-
-1. Écrire une fonction de traitement de données et la profiler avec `--trace-opt`. Confirmer qu'elle est compilée par TurboFan.
-2. Introduire intentionnellement une déoptimisation (type change) et l'observer avec `--trace-deopt`.
-3. Corriger le code pour maintenir des types monomorphiques. Mesurer la différence de performance.
-4. Créer un benchmark qui provoque un OSR observable dans `--trace-opt`.
-5. Implémenter un object pool pour une boucle chaude et mesurer la réduction de pression GC (moins de Scavenge dans `--trace-gc`).
-6. Vérifier que l'escape analysis fonctionne : créer des objets temporaires dans une boucle et confirmer que TurboFan les élimine.
 
 ---
 
@@ -903,3 +890,14 @@ for (let i = 0; i < 100000; i++) {
    - Les types sont stables et monomorphiques
 4. Mesurez la différence de performance avec `console.time()` / `console.timeEnd()`.
 5. **Bonus** : vérifiez avec `--trace-opt --trace-deopt` que votre version corrigée ne produit aucune déoptimisation.
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 10 jit](../screencasts/screencast-10-jit.md)
+2. **Lab** : [lab-10-jit-deoptimization](../labs/lab-10-jit-deoptimization/README)
+3. **Visualisation** : [Pipeline JIT](../visualizations/jit-pipeline.html)
+4. **Quiz** : [quiz 10 jit](../quizzes/quiz-10-jit.html)
+:::

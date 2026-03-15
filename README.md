@@ -7,7 +7,7 @@ Formation avancée sur le fonctionnement interne du runtime JavaScript (V8, even
 ## Prérequis
 
 - JavaScript courant (ES2020+, async/await, Promises, closures)
-- Avoir complété les formations Vue/Angular/React (ou équivalent)
+- Avoir complété les formations Vue/Angular/React (où équivalent)
 - Node.js 20+ installé
 - Chrome DevTools (onglets Performance et Memory)
 

@@ -149,7 +149,7 @@ Quand on appelle `resolve(x)`, la valeur `x` subit une analyse appelée la **Pro
 
 ### 4. Le thenable unwrapping et le tick supplémentaire
 
-C'est l'un des aspects les plus subtils et les moins compris des Promises. Quand on résout une Promise avec un **thenable** (un objet qui a une méthode `.then()`), V8 crée un job spécial :
+C'est l'un des aspects les plus subtils et les moins compris des Promises. Quand on résout une Promise avec un **thenable** (un objet qui à une méthode `.then()`), V8 crée un job spécial :
 
 ```typescript
 // Cas 1 : résolution avec une valeur primitive
@@ -1007,18 +1007,6 @@ Promise.resolve()
 
 ---
 
-## Lab associé
-
-**Lab 05 — Implémenter MyPromise et passer la suite de tests Promises/A+**
-
-Compléter l'implémentation de `MyPromise` présentée dans ce module, puis la valider avec la suite de tests officielle `promises-aplus-tests` (878 tests). Ajouter ensuite les méthodes statiques `all`, `race`, `allSettled`, `any` et écrire des tests unitaires pour chacune.
-
-```bash
-npm install promises-aplus-tests
-# Adapter l'export de MyPromise avec l'adaptateur requis
-npx promises-aplus-tests ./mypromise-adapter.js
-```
-
 ---
 
 ## Si tu es perdu
@@ -1110,3 +1098,13 @@ Déroulement :
 L'observation clé est que `resolve(Promise.resolve('B'))` cause **2 ticks de retard** avant que p1 ne soit settled : un tick pour le PromiseResolveThenableJob, puis un tick pour le `.then()` interne du thenable. C'est pourquoi `B` apparaît après `D` et `E` alors qu'on pourrait naïvement s'attendre à le voir plus tôt.
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 05 promises](../screencasts/screencast-05-promises.md)
+2. **Lab** : [lab-05-promise-implementation](../labs/lab-05-promise-implementation/README)
+3. **Quiz** : [quiz 05 promises](../quizzes/quiz-05-promises.html)
+:::

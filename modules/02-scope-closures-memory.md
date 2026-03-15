@@ -20,9 +20,9 @@
 
 ### 1. Portée lexicale (Lexical Scoping)
 
-> 💡 **Rappel** : la **portée** (scope) d'une variable, c'est la zone du code où cette variable est accessible. Si tu déclares une variable à l'intérieur d'une fonction, elle n'est accessible que dans cette fonction — c'est sa portée.
+> 💡 **Rappel** : la **portée** (scope) d'une variable, c'est la zone du code ou cette variable est accessible. Si tu déclares une variable à l'intérieur d'une fonction, elle n'est accessible que dans cette fonction — c'est sa portée.
 
-JavaScript utilise la **portée lexicale** (ou statique) : la portée d'une variable est déterminée par sa **position dans le code source**, pas par l'endroit où la fonction est appelée.
+JavaScript utilise la **portée lexicale** (où statique) : la portée d'une variable est déterminée par sa **position dans le code source**, pas par l'endroit où la fonction est appelée.
 
 ```typescript
 const x = 'global';
@@ -47,7 +47,7 @@ Dit autrement : la **structure** (quel scope contient quel autre) est fixe dès 
 
 ### 2. Chaîne de scopes (Scope Chain)
 
-Chaque contexte d'exécution a une référence `outer` dans son LexicalEnvironment qui pointe vers l'environnement lexical parent. Cela forme une **chaîne** — comme les maillons d'une chaîne, chaque scope est relié au scope qui le contient :
+Chaque contexte d'exécution à une référence `outer` dans son LexicalEnvironment qui pointe vers l'environnement lexical parent. Cela forme une **chaîne** — comme les maillons d'une chaîne, chaque scope est relié au scope qui le contient :
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -90,7 +90,7 @@ Quand le moteur cherche une variable, il remonte la chaîne maillon par maillon.
 
 Avant la définition technique, prenons une image.
 
-**Une closure, c'est comme un sac à dos que la fonction emporte avec elle quand elle quitte sa maison (son scope).** Imagine une fonction `inner()` qui est "née" à l'intérieur de `outer()`. Quand `outer()` se termine, son scope est normalement détruit (le stack frame est dépilé). Mais si `inner()` est retournée vers l'extérieur, elle emporte dans un "sac à dos" les variables du scope de `outer()` dont elle a besoin. Elle peut être appelée n'importe où et aura toujours accès à ces variables. Ce sac à dos, c'est la **closure**.
+**Une closure, c'est comme un sac à dos que la fonction emporte avec elle quand elle quitte sa maison (son scope).** Imagine une fonction `inner()` qui est "née" à l'intérieur de `outer()`. Quand `outer()` se termine, son scope est normalement détruit (le stack frame est dépilé). Mais si `inner()` est retournée vers l'extérieur, elle emporte dans un "sac à dos" les variables du scope de `outer()` dont elle a besoin. Elle peut être appelée n'importe ou et aura toujours accès à ces variables. Ce sac à dos, c'est la **closure**.
 
 ### 4. Qu'est-ce qu'une closure — définition technique
 
@@ -745,10 +745,6 @@ demo();
 
 ---
 
-## Lab associé
-
-Voir `labs/02-closures-memory-lab.js` — Exercices de traçage de scope chain, mesure mémoire, et détection de fuites.
-
 ---
 
 ## Pour aller plus loin
@@ -770,7 +766,7 @@ Voir `labs/02-closures-memory-lab.js` — Exercices de traçage de scope chain, 
 
 Voici un résumé ultra-simplifié de ce module. Si tu as compris ces points, tu as saisi l'essentiel :
 
-1. **Le scope** = la zone du code où une variable est accessible. C'est déterminé par **où** tu écris le code, pas par quand il s'exécute.
+1. **Le scope** = la zone du code ou une variable est accessible. C'est déterminé par **où** tu écris le code, pas par quand il s'exécute.
 
 2. **La chaîne de scopes** = quand le moteur cherche une variable, il regarde d'abord dans le scope actuel, puis dans le scope parent, puis dans le parent du parent, etc. Comme remonter les étages d'un immeuble pour trouver quelqu'un.
 
@@ -824,3 +820,13 @@ Bien que `var` soit utilisé (un seul `i` partagé dans le scope de `createFunct
 C'est le pattern classique pré-ES6 pour résoudre le problème de closure dans les boucles. Avec ES6+, il suffit d'utiliser `let i` à la place de `var i`.
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 02 scope closures](../screencasts/screencast-02-scope-closures.md)
+2. **Lab** : [lab-02-closure-memory](../labs/lab-02-closure-memory/README)
+3. **Quiz** : [quiz 02 scope closures](../quizzes/quiz-02-scope-closures.html)
+:::

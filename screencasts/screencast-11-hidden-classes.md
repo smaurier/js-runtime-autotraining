@@ -29,7 +29,7 @@
 ### [01:30-04:30] Concept clé — Maps, Transition Trees et IC States
 
 #### Hidden Classes (Maps)
-- Chaque objet JS a un pointeur caché vers sa **Map** (Hidden Class)
+- Chaque objet JS à un pointeur caché vers sa **Map** (Hidden Class)
 - La Map décrit : quelles propriétés existent, dans quel ordre, à quel offset
 - Deux objets avec les mêmes propriétés dans le même ordre partagent la même Map
 

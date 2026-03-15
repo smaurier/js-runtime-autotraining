@@ -92,7 +92,7 @@ node -e "for(var i=0;i<3;i++){setTimeout(()=>console.log('var:',i),100)} for(let
 node labs/lab-02-closure-memory/exercise.js
 ```
 
-> L'exercice vous demande d'identifier pourquoi un tableau grandit en mémoire
+> L'exercice vous demandé d'identifier pourquoi un tableau grandit en mémoire
 > à cause d'une closure qui retient des références inutiles.
 
 ### [08:00-11:00] Approfondissement — Inspecter [[Scopes]] dans DevTools
@@ -113,7 +113,7 @@ console.dir(counter);
 ```
 
 > Développez l'objet affiché. Vous voyez la propriété `[[Scopes]]`.
-> À l'intérieur, il y a un objet **Closure** qui contient `count: 0`.
+> À l'intérieur, il y à un objet **Closure** qui contient `count: 0`.
 > C'est la preuve concrète que la variable est capturée.
 >
 > Maintenant, appelons `counter()` trois fois et refaisons `console.dir(counter)`.

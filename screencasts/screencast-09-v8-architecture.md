@@ -116,11 +116,11 @@ node --trace-opt --trace-deopt labs/lab-09-v8-optimization/exercise.js
 ### [11:30-14:00] Récap — Ce qu'il faut retenir
 
 #### Feedback Vector
-- Chaque fonction a un vecteur qui enregistre les types vus à chaque opération
+- Chaque fonction à un vecteur qui enregistre les types vus à chaque opération
 - C'est la source de vérité pour les décisions d'optimisation
 - États : uninitialized → monomorphic → polymorphic → megamorphic
 
-#### Elements Kinds
+#### Éléments Kinds
 - V8 catégorise les tableaux par le type de leurs éléments
 - `PACKED_SMI_ELEMENTS` (entiers) → `PACKED_DOUBLE_ELEMENTS` (flottants) → `PACKED_ELEMENTS` (mixte)
 - Les transitions ne vont que dans un sens (dégradation)

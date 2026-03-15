@@ -44,7 +44,7 @@ node -e "function a() { b(); } function b() { c(); } function c() { throw new Er
 > 2. **VariableEnvironment** — les liaisons `var` (historiquement séparé du LexicalEnvironment).
 > 3. **ThisBinding** — la valeur de `this` dans ce contexte.
 >
-> Le premier contexte empilé est toujours le **Global Execution Context**.
+> Le premier contexte empilé est toujours le **Global Exécution Context**.
 > Il est créé avant même que votre première ligne ne s'exécute.
 
 **Action** : Schéma de la pile avec Global EC en bas, puis des frames empilées.
@@ -65,7 +65,7 @@ node -e "function a() { b(); } function b() { c(); } function c() { throw new Er
 **Action** : Ouvrir `labs/lab-01-call-stack-observation/exercise.js` dans l'éditeur.
 
 > Ce fichier contient plusieurs fonctions qui s'appellent mutuellement.
-> L'exercice vous demande de **prédire l'état de la call stack** à différents
+> L'exercice vous demandé de **prédire l'état de la call stack** à différents
 > moments de l'exécution, puis de vérifier avec `console.trace()`.
 
 **Commandes à exécuter** :
@@ -108,7 +108,7 @@ node --inspect-brk labs/lab-01-call-stack-observation/exercise.js
 **Action** : Cliquer step par step, commenter chaque frame.
 
 > Essayons avec `factorial(5)` : on voit 6 frames empilées (de `factorial(5)` à `factorial(0)`).
-> C'est pour ça qu'une récursion infinie explose — la pile a une taille maximale
+> C'est pour ça qu'une récursion infinie explose — la pile à une taille maximale
 > (environ 10 000-15 000 frames dans V8, selon la complexité de chaque frame).
 
 ### [11:00-14:00] Récap — Hoisting, TDZ et Stack Overflow

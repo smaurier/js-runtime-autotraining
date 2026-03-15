@@ -75,7 +75,7 @@ Si tu n'as jamais travaillé avec des threads, voici l'essentiel :
 
 JavaScript contourne ces problèmes en étant **mono-thread par défaut**. Les Web Workers et Worker Threads ajoutent du parallélisme, mais chaque Worker a **sa propre mémoire isolée** — sauf si tu utilises explicitement `SharedArrayBuffer`.
 
-> **Pas de panique** : dans 99% des cas en JavaScript, tu n'auras jamais de race condition parce que le modèle par défaut (message passing via `postMessage`) est sûr. `SharedArrayBuffer` + `Atomics` sont des outils avancés pour les cas rares où la copie de données est trop coûteuse.
+> **Pas de panique** : dans 99% des cas en JavaScript, tu n'auras jamais de race condition parce que le modèle par défaut (message passing via `postMessage`) est sûr. `SharedArrayBuffer` + `Atomics` sont des outils avancés pour les cas rares ou la copie de données est trop coûteuse.
 
 ### 2. Web Workers / Worker Threads : vrai parallélisme
 
@@ -1168,18 +1168,6 @@ Le scheduling et la concurrence en JavaScript reposent en grande partie sur des 
 
 ---
 
-## Lab associé
-
-**Lab 13 — Scheduler coopératif** (`labs/13-cooperative-scheduler/`)
-
-Dans ce lab, vous implémenterez un scheduler coopératif complet avec :
-
-1. Trois niveaux de priorité et préemption des tâches basse priorité
-2. Time slicing automatique (yield après N ms)
-3. Dépendances entre tâches (une tâche attend la fin d'une autre)
-4. Un mode "Worker pool" qui distribue les tâches CPU-intensives sur des Worker Threads
-5. Des métriques de performance : temps d'attente, temps d'exécution, throughput
-
 ---
 
 ## Pour aller plus loin
@@ -1287,3 +1275,13 @@ principal du navigateur (il est bloquant). Utilisez `Atomics.waitAsync`
 sur le thread principal, qui retourne une Promise.
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 13 scheduling](../screencasts/screencast-13-scheduling.md)
+2. **Lab** : [lab-13-scheduler-implementation](../labs/lab-13-scheduler-implementation/README)
+3. **Quiz** : [quiz 13 scheduling](../quizzes/quiz-13-scheduling.html)
+:::

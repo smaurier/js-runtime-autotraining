@@ -129,7 +129,7 @@ node labs/lab-05-promise-implementation/exercise-step2.js
 
 **Action** : Ouvrir `exercise-step3.js`.
 
-> C'est ici que ça se complique. Si `onFulfilled` retourne une Promise (ou un
+> C'est ici que ça se complique. Si `onFulfilled` retourne une Promise (où un
 > thenable — un objet avec une méthode `.then`), on ne doit pas résoudre avec
 > cet objet directement. On doit **l'unwrapper** : attendre que cette Promise
 > interne se résolve, puis résoudre la Promise externe avec le résultat.
@@ -157,7 +157,7 @@ const resolvePromise = (promise, value, resolve, reject) => {
 node labs/lab-05-promise-implementation/exercise-step3.js
 ```
 
-> Tous les tests passent. On a une implémentation fonctionnelle de Promise !
+> Tous les tests passent. On à une implémentation fonctionnelle de Promise !
 > Elle n'est pas complète (il manquerait `Promise.all`, `Promise.race`,
 > `finally`, etc.), mais le coeur est là.
 
@@ -173,11 +173,11 @@ node labs/lab-05-promise-implementation/exercise-step3.js
 >
 > **L'insight fondamental** : `.then()` ne "modifie" pas la Promise existante.
 > Il crée une nouvelle Promise dont la résolution dépend du retour du callback.
-> C'est un pipeline de transformations, où chaque maillon est une nouvelle Promise.
+> C'est un pipeline de transformations, ou chaque maillon est une nouvelle Promise.
 
 **Action** : Mentionner le quiz et le module suivant.
 
-> Faites le quiz du module 05. L'exercice bonus du lab vous demande d'implémenter
+> Faites le quiz du module 05. L'exercice bonus du lab vous demandé d'implémenter
 > `Promise.all()` — essayez, c'est un excellent exercice !
 >
 > Au prochain screencast, on verra comment `async/await` est implémenté en interne

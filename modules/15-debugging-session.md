@@ -1710,3 +1710,24 @@ function processData(data: { id: string; items: Array<{ type: string; value: num
 - Requêtes/s stables à ~500 (au lieu de dégradation vers 320)
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 15 debugging](../screencasts/screencast-15-debugging.md)
+2. **Lab** : [lab-15-debugging-session](../labs/lab-15-debugging-session/README)
+3. **Quiz** : [quiz 15 debugging](../quizzes/quiz-15-debugging.html)
+:::
+
+---
+
+<!-- navigation-inter-cours -->
+
+::: info Cours suivant
+Bravo, tu as termine le cours **JS Runtime** ! 
+Le prochain cours du curriculum est **Vue.js**.
+
+[Commencer Vue.js →](../../03-vue/cours/01-debutant/00-typer-vue3.md)
+:::

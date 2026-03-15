@@ -2,13 +2,13 @@
 
 ## Objectifs
 
-- Comprendre en profondeur le fonctionnement de la boucle d'evenements Node.js
-- Implementer un simulateur qui reproduit l'ordre d'execution correct
-- Maitriser la priorite : call stack > microtasks > macrotasks
+- Comprendre en profondeur le fonctionnement de la boucle d'événements Node.js
+- Implementer un simulateur qui reproduit l'ordre d'exécution correct
+- Maîtriser la priorite : call stack > microtasks > macrotasks
 - Comprendre que TOUTES les microtaches sont drainées avant la prochaine macrotache
-- Verifier la comprehension avec 5 programmes-puzzle
+- Vérifier la comprehension avec 5 programmes-puzzle
 
-## Prerequis
+## Prérequis
 
 - Node.js 20+
 - Modules 03-04 (Event Loop en detail)
@@ -25,7 +25,7 @@ node solution.js
 
 ## Description
 
-Vous devez implementer une classe `MiniEventLoop` qui simule le comportement de la boucle d'evenements JavaScript.
+Vous devez implementer une classe `MiniEventLoop` qui simule le comportement de la boucle d'événements JavaScript.
 
 ### Architecture interne
 
@@ -65,16 +65,16 @@ loop.run([
 // Resultat attendu : ['Hello', 'microtask', 'timeout']
 ```
 
-### Regles de la boucle d'evenements
+### Regles de la boucle d'événements
 
-1. **Synchrone d'abord** : tout le code du body s'execute d'abord (push sur la call stack)
+1. **Synchrone d'abord** : tout le code du body s'exécuté d'abord (push sur la call stack)
 2. **process.nextTick** est une microtache prioritaire (avant les Promise.then)
 3. **Promise.then / queueMicrotask** : microtaches standard
 4. **setTimeout** : macrotache
-5. Apres chaque macrotache, TOUTES les microtaches accumulees sont drainées
-6. Les microtaches peuvent en creer d'autres (qui seront drainées dans le meme cycle)
+5. Après chaque macrotache, TOUTES les microtaches accumulees sont drainées
+6. Les microtaches peuvent en créer d'autres (qui seront drainées dans le même cycle)
 
-## Travail demande
+## Travail demandé
 
 1. Implementer la classe `MiniEventLoop` (~100-150 lignes)
 2. Faire passer les 5 programmes-puzzle (tests en bas du fichier)
@@ -83,5 +83,5 @@ loop.run([
 
 - Les 5 programmes produisent la sortie attendue
 - L'ordre microtask > macrotask est respecte
-- process.nextTick s'execute avant Promise.then
+- process.nextTick s'exécuté avant Promise.then
 - Les microtaches imbriquees sont drainées dans le bon ordre

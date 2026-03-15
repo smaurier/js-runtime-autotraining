@@ -1663,28 +1663,6 @@ sched.run().then(async () => {
 
 ---
 
-## Lab associé
-
-Ce module **est** le lab. Les trois parties constituent le projet final évalué.
-
-**Livrables attendus :**
-
-```
-projet-final/
-  |- mini-event-loop.mjs          (Partie 1)
-  |- mini-event-loop.test.mjs     (tests unitaires)
-  |- task-scheduler.mjs            (Partie 2)
-  |- task-scheduler.test.mjs       (tests unitaires)
-  |- audit/
-  |    |- broken-app.mjs           (programme original, non modifié)
-  |    |- fixed-app.mjs            (programme corrigé)
-  |    |- rapport-audit.md         (rapport structuré)
-  |    |- benchmarks/              (captures, profils, mesures)
-  |- README.md                     (instructions d'exécution)
-```
-
-**Date limite** : 2 semaines après la fin du Module 13.
-
 ---
 
 ## Pour aller plus loin
@@ -1817,7 +1795,7 @@ déjà présentes.
 
 Plus précisément, dans `tick()`, l'ordre est : timers -> macrotask -> microtasks.
 Mais si le programme commence par `loop.queueMicrotask(fn)` puis `loop.run()`,
-la microtask ne sera exécutée qu'après le premier macrotask (s'il y en a un)
+la microtask ne sera exécutée qu'après le premier macrotask (s'il y en à un)
 ou pas du tout (si `tick()` retourne `false` car il n'y a pas de macrotask
 mais seulement des microtasks dans la file initiale).
 
@@ -1844,3 +1822,13 @@ tick(): boolean {
 ```
 
 </details>
+
+---
+
+<!-- parcours-recommande -->
+
+::: tip Parcours recommandé
+1. **Screencast** : [screencast 14 projet final](../screencasts/screencast-14-projet-final.md)
+2. **Lab** : [lab-14-mini-event-loop](../labs/lab-14-mini-event-loop/README)
+3. **Quiz** : [quiz 14 projet final](../quizzes/quiz-14-projet-final.html)
+:::

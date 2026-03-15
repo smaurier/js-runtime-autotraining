@@ -77,11 +77,11 @@ export default defineConfig({
           text: 'Visualisations',
           items: [
             { text: 'Toutes les visualisations', link: '/visualizations/' },
-            { text: 'Event Loop', link: '/visualizations/event-loop' },
-            { text: 'Call Stack', link: '/visualizations/call-stack' },
-            { text: 'GC Tri-color', link: '/visualizations/gc-tricolor' },
-            { text: 'Pipeline JIT', link: '/visualizations/jit-pipeline' },
-            { text: 'Hidden Classes', link: '/visualizations/hidden-classes' }
+            { text: 'Event Loop', link: '/visualizations/event-loop.html' },
+            { text: 'Call Stack', link: '/visualizations/call-stack.html' },
+            { text: 'GC Tri-color', link: '/visualizations/gc-tricolor.html' },
+            { text: 'Pipeline JIT', link: '/visualizations/jit-pipeline.html' },
+            { text: 'Hidden Classes', link: '/visualizations/hidden-classes.html' }
           ]
         }
       ]
