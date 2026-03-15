@@ -236,13 +236,13 @@ Voici le schéma que tu vas avoir en tête pendant tout le cours. C'est ta **car
 
 Tu n'as pas besoin de tout installer maintenant. Chaque module te dira exactement quels outils utiliser. Mais voici la liste complète pour que tu saches à quoi t'attendre.
 
-### Node.js 20+
+### Node.js 22 LTS
 
 On utilise Node.js pour exécuter les labs en ligne de commande. Vérifie ta version :
 
 ```bash
 node --version
-# Doit afficher v20.x.x ou supérieur
+# Doit afficher v22.x.x ou supérieur
 ```
 
 Si tu n'as pas Node.js : [https://nodejs.org](https://nodejs.org) (télécharge la version LTS).
