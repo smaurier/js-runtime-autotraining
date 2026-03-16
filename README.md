@@ -74,3 +74,13 @@ node --expose-gc labs/lab-07-gc-observation/exercise.js
 ## Niveau
 
 **Avancé / Ingénieur.** Ce cours explique le *pourquoi* des mécanismes internes, pas seulement leur utilisation.
+
+
+## Lancer le cours
+
+```bash
+npm install          # une seule fois
+npm run docs:dev     # ouvre http://localhost:5173
+```
+
+Le site s'ouvre avec une sidebar navigable. Commence par le premier module (00).
