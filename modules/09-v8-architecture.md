@@ -982,6 +982,200 @@ Pour en savoir plus sur les Hidden Classes et les Inline Caches, voir le **Modul
 
 ---
 
+## Bun, Deno et Node : les runtimes JavaScript comparés
+
+Jusqu'ici, on a étudié V8 en profondeur. Mais V8 n'est pas le seul moteur JavaScript. **Bun** utilise un moteur complètement différent — JavaScriptCore (JSC) — tandis que **Deno** utilise V8 comme Node.js mais avec une architecture radicalement différente autour.
+
+> **Analogie de la voiture** : V8 et JavaScriptCore sont deux moteurs différents. Node.js et Deno sont deux voitures qui utilisent le même moteur (V8) mais avec un chassis différent. Bun est une voiture avec un moteur complètement différent (JSC) et un chassis conçu de zéro pour la vitesse.
+
+### JavaScriptCore (JSC) vs V8 : les différences d'architecture
+
+```
+V8 (Node.js, Deno, Chrome)              JSC (Bun, Safari, WebKit)
+===========================              =========================
+
+Code JS                                  Code JS
+   ↓                                        ↓
+Scanner + Parser → AST                   Parser → AST
+   ↓                                        ↓
+Ignition (interpréteur)                  LLInt (Low-Level Interpreter)
+   ↓                                        ↓
+Sparkplug (baseline compiler)            Baseline JIT
+   ↓                                        ↓
+Maglev (mid-tier optimizer)              DFG (Data Flow Graph JIT)
+   ↓                                        ↓
+TurboFan (optimizing compiler)           FTL (Faster Than Light JIT)
+   |                                        |
+   +→ Turboshaft (backend)                  +→ Utilise LLVM (backend)
+
+Tiers de compilation : 4 niveaux         Tiers de compilation : 4 niveaux
+Garbage Collector : Orinoco              Garbage Collector : Riptide
+  (generationnel, concurrent)              (concurrent, "eden" collection)
+```
+
+**Différences clés :**
+
+| Aspect | V8 | JavaScriptCore (JSC) |
+|--------|----|--------------------|
+| Backend optimisant | TurboFan/Turboshaft (propre a V8) | FTL (basé sur LLVM/B3) |
+| Démarrage a froid | Plus lent (parsing + compilation) | Plus rapide (LLInt démarre vite) |
+| Performance pic | Excellent (TurboFan très agressif) | Excellent (LLVM très mature) |
+| Temps de warm-up | Plus long (4 tiers a traverser) | Plus court |
+| Mémoire | Plus élevée (code compilé en cache) | Plus compacte |
+| Code caching | Très avancé (V8 code cache) | Présent mais moins documenté |
+| Spéculations | Agressives (inline caches) | Plus conservatrices |
+
+### Performance : Bun vs Node.js vs Deno
+
+```
+TEMPS DE DEMARRAGE (cold start)
+=================================
+Bun     : ~5-10 ms  ████
+Deno    : ~20-30 ms ████████████
+Node.js : ~30-50 ms ████████████████████
+
+Pourquoi Bun démarre plus vite ?
+1. JSC a un interpréteur (LLInt) plus léger qu'Ignition
+2. Bun est écrit en Zig (pas de runtime C++ lourd)
+3. Bun transpile TypeScript nativement (pas de tsc)
+4. Moins de modules internes a charger au démarrage
+
+
+DEBIT HTTP (requêtes/seconde — hello world)
+=============================================
+Bun     : ~100K-120K req/s  ████████████████████████
+Deno    : ~60K-80K req/s    ████████████████
+Node.js : ~40K-60K req/s    ████████████
+
+Pourquoi Bun est plus rapide en HTTP ?
+1. Serveur HTTP intégré en code natif (Zig + system calls directs)
+2. Node.js passe par libuv → C++ → JS (plus de couches)
+3. Bun utilise io_uring (Linux) et kqueue (macOS) directement
+
+
+OPERATIONS SYSTEME (lecture fichier, 10K itérations)
+=====================================================
+Bun     : ~25 ms   ████
+Node.js : ~60 ms   ██████████
+Deno    : ~65 ms   ███████████
+
+Bun bypasse libuv et fait les syscalls directement.
+```
+
+> **Attention aux benchmarks** : les chiffres ci-dessus sont des ordres de grandeur pour des micro-benchmarks. Dans une application réelle avec de la logique métier, des appels BDD et du I/O réseau, les différences sont beaucoup plus faibles (souvent < 20%).
+
+### Deno vs Node.js : même moteur, philosophie différente
+
+Deno et Node.js utilisent tous les deux V8, mais avec des choix architecturaux opposés :
+
+```
+Node.js                                 Deno
+=======                                 ====
+
+Permissions : AUCUNE                    Permissions : TOUT BLOQUE par défaut
+  → Accès fichiers : oui               → --allow-read=/chemin
+  → Accès réseau : oui                 → --allow-net=api.example.com
+  → Variables d'env : oui              → --allow-env=DATABASE_URL
+  → Sous-processus : oui               → --allow-run=npm
+
+TypeScript : via tsc/tsx/ts-node        TypeScript : natif (compilé a la volée)
+
+Package manager : npm/yarn/pnpm         Package manager : aucun (URLs)
+  import x from 'express'                import x from 'https://deno.land/x/...'
+                                          (npm: aussi supporté depuis Deno 1.28)
+
+Fichier config : package.json           Fichier config : deno.json
+                                         (optionnel, tout peut être en CLI)
+
+Standard lib : minimale                 Standard lib : riche
+  → fs, path, http (bas niveau)          → collections, datetime, testing...
+  → npm pour le reste                     → revue par l'équipe Deno
+
+Sécurité : trust the developer          Sécurité : least privilege
+  "Le dev sait ce qu'il fait"            "Prouve que tu as besoin de cet accès"
+```
+
+### Le modèle de permissions de Deno
+
+```bash
+# Node.js — tout est permis
+node server.js
+# Le script peut lire /etc/passwd, envoyer des données a un serveur externe,
+# lancer rm -rf / ... aucune restriction.
+
+# Deno — rien n'est permis par défaut
+deno run server.ts
+# error: Denied read access to "./config.json"
+
+# Il faut explicitement autoriser chaque accès
+deno run \
+  --allow-read=./config.json,./public \
+  --allow-net=localhost:3000,api.stripe.com \
+  --allow-env=DATABASE_URL,JWT_SECRET \
+  server.ts
+
+# Deno 2.0+ : fichier deno.json avec permissions
+# {
+#   "permissions": {
+#     "read": ["./config.json", "./public"],
+#     "net": ["localhost:3000", "api.stripe.com"]
+#   }
+# }
+```
+
+> **Analogie du smartphone** : Node.js c'est comme Android qui donne toutes les permissions par défaut. Deno c'est comme iOS qui demande "Voulez-vous autoriser cette app a accéder a vos photos ?" pour chaque ressource.
+
+### Quand utiliser quel runtime ? (Framework de décision)
+
+```
++--------------------------------------------------+
+|        ARBRE DE DECISION — CHOIX DU RUNTIME       |
++--------------------------------------------------+
+
+Besoin de compatibilite npm maximale ?
+├─ OUI → Node.js (écosystème le plus mature, 2M+ de packages)
+└─ NON ↓
+
+Le temps de démarrage est critique ? (serverless, CLI tools)
+├─ OUI → Bun (cold start ~5× plus rapide)
+└─ NON ↓
+
+La sécurité est une priorité ? (code tiers, sandbox)
+├─ OUI → Deno (modèle de permissions granulaire)
+└─ NON ↓
+
+TypeScript natif sans config est important ?
+├─ OUI → Bun ou Deno (les deux supportent TS nativement)
+└─ NON ↓
+
+Application en production avec equipe large ?
+├─ OUI → Node.js (documentation, communauté, expertise disponible)
+└─ NON → Essaie Bun pour les projets greenfield
+```
+
+| Critère | Node.js | Deno | Bun |
+|---------|---------|------|-----|
+| **Maturité** | 15+ ans, ultra-stable | 6+ ans, stable | 3+ ans, en croissance |
+| **Écosystème npm** | Natif | Compatible (npm: specifier) | Compatible |
+| **TypeScript** | Via transpileur externe | Natif | Natif |
+| **Sécurité** | Aucune sandbox | Permissions granulaires | Aucune sandbox |
+| **Performance brute** | Bonne | Bonne | Excellente |
+| **Moteur JS** | V8 | V8 | JavaScriptCore |
+| **Écrit en** | C++ | Rust | Zig |
+| **Package manager** | npm/yarn/pnpm | Intégré | Intégré (compatible npm) |
+| **Serverless** | Lambda, Cloud Functions | Deno Deploy | Pas de plateforme dédiée |
+| **Adoption entreprise** | Dominante | Croissante | Émergente |
+
+### Points clés
+
+1. **V8 vs JSC** : deux approches différentes de la compilation JIT, avec des compromis différents (démarrage vs performance pic).
+2. **Bun** est le plus rapide pour les opérations I/O et le démarrage, grâce a son architecture Zig et a l'utilisation directe des syscalls.
+3. **Deno** offre le meilleur modèle de sécurité grâce a son système de permissions, idéal quand on exécute du code tiers.
+4. **Node.js** reste le choix par défaut pour les entreprises grâce a sa maturité, son écosystème et la disponibilité des développeurs.
+5. **Ne choisis pas un runtime pour ses benchmarks** — choisis-le pour ses contraintes (sécurité, écosystème, équipe, déploiement).
+
+---
+
 <!-- parcours-recommande -->
 
 ::: tip Parcours recommandé
