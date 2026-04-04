@@ -96,13 +96,53 @@ async function testCallbackHelpers() {
         return;
       }
 
-      console.log(`  callbackSeries -> ${results.length} resultats (attendu: 3)`);
+      console.log(
+        `  callbackSeries -> ${results.length} resultats (attendu: 3)`,
+      );
       resolve(undefined);
     });
   });
 
   const result = await promisifyRequest(99, 10);
   console.log(`  promisifyRequest -> id=${result.id} (attendu: 99)`);
+}
+
+// =============================================================================
+// PARTIE 0 BIS — Rappel JS : this, call/apply/bind et finally
+// =============================================================================
+
+separator("PARTIE 0 BIS — this / call / apply / bind");
+
+function formatWithContext(this: { prefix: string }, value) {
+  return `${this.prefix}:${value}`;
+}
+
+async function withFinally(promise, onFinally) {
+  return promise.finally(onFinally);
+}
+
+async function testThisAndFinally() {
+  const ctx = { prefix: "ID" };
+  const viaCall = formatWithContext.call(ctx, 42);
+  const viaApply = formatWithContext.apply(ctx, [43]);
+  const bound = formatWithContext.bind(ctx);
+  const viaBind = bound(44);
+
+  console.log(`  call  -> ${viaCall} (attendu: ID:42)`);
+  console.log(`  apply -> ${viaApply} (attendu: ID:43)`);
+  console.log(`  bind  -> ${viaBind} (attendu: ID:44)`);
+
+  let finallyCount = 0;
+  await withFinally(Promise.resolve("ok"), () => {
+    finallyCount++;
+  });
+  await withFinally(
+    Promise.reject(new Error("boom")).catch(() => "ignored"),
+    () => {
+      finallyCount++;
+    },
+  );
+  console.log(`  finally executé ${finallyCount}x (attendu: 2)`);
 }
 
 // =============================================================================
@@ -244,8 +284,8 @@ async function style4_asyncAwaitParallel() {
 separator("PARTIE 2 — Limiteur de concurrence (pLimit)");
 
 function pLimit(concurrency) {
-  let activeCount = 0;    // Tâches en cours d'exécution
-  const queue = [];        // File d'attente des tâches en attente
+  let activeCount = 0; // Tâches en cours d'exécution
+  const queue = []; // File d'attente des tâches en attente
 
   // La fonction retournée par pLimit
   function limit(fn) {
@@ -307,17 +347,23 @@ async function testPLimit() {
         concurrencyLog.push({ task: i, concurrent: current });
 
         return simulateRequest(i, 50);
-      })
+      }),
     );
   }
 
   const results = await Promise.all(promises);
   const elapsed = performance.now() - start;
 
-  console.log(`  ${results.length} tâches complétées en ${formatTime(elapsed)}`);
+  console.log(
+    `  ${results.length} tâches complétées en ${formatTime(elapsed)}`,
+  );
   console.log(`  Concurrence maximale observée : ${maxConcurrency}`);
-  console.log(`  Test concurrence <= 5 : ${maxConcurrency <= 5 ? "[OK]" : "[ERREUR]"}`);
-  console.log(`  Temps attendu : ~${Math.ceil(taskCount / 5) * 50} ms (${taskCount} tâches / 5 slots * 50 ms)`);
+  console.log(
+    `  Test concurrence <= 5 : ${maxConcurrency <= 5 ? "[OK]" : "[ERREUR]"}`,
+  );
+  console.log(
+    `  Temps attendu : ~${Math.ceil(taskCount / 5) * 50} ms (${taskCount} tâches / 5 slots * 50 ms)`,
+  );
 }
 
 // =============================================================================
@@ -350,8 +396,8 @@ function myAllSettled(promises) {
       (value) => ({ status: "fulfilled", value }),
       // Cas échec : emballer dans { status: "rejected", reason }
       // Le .catch transforme le rejet en résolution -> Promise.all ne rejette jamais
-      (reason) => ({ status: "rejected", reason })
-    )
+      (reason) => ({ status: "rejected", reason }),
+    ),
   );
 
   // Promise.all attend toutes les promesses wrappées.
@@ -382,7 +428,9 @@ async function testMyAllSettled() {
   const fulfilled = results.filter((r) => r.status === "fulfilled").length;
   const rejected = results.filter((r) => r.status === "rejected").length;
   console.log(`  Succès : ${fulfilled}, Échecs : ${rejected}`);
-  console.log(`  Test : ${fulfilled === 3 && rejected === 2 ? "[OK]" : "[ERREUR]"}`);
+  console.log(
+    `  Test : ${fulfilled === 3 && rejected === 2 ? "[OK]" : "[ERREUR]"}`,
+  );
 
   // Vérification de la conformité avec la version native
   const nativePromises = [
@@ -393,11 +441,15 @@ async function testMyAllSettled() {
     simulateRequest(5, 10),
   ];
   const nativeResults = await Promise.allSettled(nativePromises);
-  const nativeFulfilled = nativeResults.filter((r) => r.status === "fulfilled").length;
-  const nativeRejected = nativeResults.filter((r) => r.status === "rejected").length;
+  const nativeFulfilled = nativeResults.filter(
+    (r) => r.status === "fulfilled",
+  ).length;
+  const nativeRejected = nativeResults.filter(
+    (r) => r.status === "rejected",
+  ).length;
   console.log(`  Natif  : ${nativeFulfilled} succès, ${nativeRejected} échecs`);
   console.log(
-    `  Structure identique : ${fulfilled === nativeFulfilled && rejected === nativeRejected ? "[OK]" : "[ERREUR]"}`
+    `  Structure identique : ${fulfilled === nativeFulfilled && rejected === nativeRejected ? "[OK]" : "[ERREUR]"}`,
   );
 }
 
@@ -474,9 +526,7 @@ async function errorStyle_tryCatch() {
 // Inconvénient : plus verbeux, pas idiomatique en JavaScript.
 
 function goStyle(promise) {
-  return promise
-    .then((result) => [null, result])
-    .catch((err) => [err, null]);
+  return promise.then((result) => [null, result]).catch((err) => [err, null]);
 }
 
 async function errorStyle_goPattern() {
@@ -501,8 +551,12 @@ async function testErrorStyles() {
   }
 
   // Vérification : tous doivent capturer la même erreur
-  const allCaptured = results.every((r) => r.error === "Erreur critique sur #42");
-  console.log(`\n  Toutes les erreurs capturées : ${allCaptured ? "[OK]" : "[ERREUR]"}`);
+  const allCaptured = results.every(
+    (r) => r.error === "Erreur critique sur #42",
+  );
+  console.log(
+    `\n  Toutes les erreurs capturées : ${allCaptured ? "[OK]" : "[ERREUR]"}`,
+  );
 
   console.log("\n  Comparaison des styles :");
   console.log("  +-------------+-----------+--------------+--------------+");
@@ -530,6 +584,10 @@ async function main() {
   await testCallbackHelpers();
   console.log();
 
+  console.log("--- Partie 0 bis : this/call/apply/bind/finally ---\n");
+  await testThisAndFinally();
+  console.log();
+
   console.log("--- Partie 1 : 4 styles asynchrones ---\n");
 
   // Note : style2 et style3 sont séquentiels, ils prennent plus longtemps.
@@ -540,15 +598,29 @@ async function main() {
   const r4 = await style4_asyncAwaitParallel();
 
   console.log("\n  Récapitulatif des temps :");
-  console.log(`    Callbacks          : ${formatTime(r1.time).padStart(10)} (${r1.count} résultats) — parallèle`);
-  console.log(`    Promises .then()   : ${formatTime(r2.time).padStart(10)} (${r2.count} résultats) — séquentiel`);
-  console.log(`    async/await séq.   : ${formatTime(r3.time).padStart(10)} (${r3.count} résultats) — séquentiel`);
-  console.log(`    async/await par.   : ${formatTime(r4.time).padStart(10)} (${r4.count} résultats) — parallèle`);
+  console.log(
+    `    Callbacks          : ${formatTime(r1.time).padStart(10)} (${r1.count} résultats) — parallèle`,
+  );
+  console.log(
+    `    Promises .then()   : ${formatTime(r2.time).padStart(10)} (${r2.count} résultats) — séquentiel`,
+  );
+  console.log(
+    `    async/await séq.   : ${formatTime(r3.time).padStart(10)} (${r3.count} résultats) — séquentiel`,
+  );
+  console.log(
+    `    async/await par.   : ${formatTime(r4.time).padStart(10)} (${r4.count} résultats) — parallèle`,
+  );
   console.log();
   console.log("  Analyse :");
-  console.log(`    - Callbacks et async/await parallèle : ~${REQUEST_DELAY} ms`);
-  console.log(`    - Promises .then() et async/await séquentiel : ~${REQUEST_COUNT * REQUEST_DELAY} ms`);
-  console.log("    - Le style n'affecte pas la vitesse, c'est la STRATÉGIE (séq vs par) qui compte.");
+  console.log(
+    `    - Callbacks et async/await parallèle : ~${REQUEST_DELAY} ms`,
+  );
+  console.log(
+    `    - Promises .then() et async/await séquentiel : ~${REQUEST_COUNT * REQUEST_DELAY} ms`,
+  );
+  console.log(
+    "    - Le style n'affecte pas la vitesse, c'est la STRATÉGIE (séq vs par) qui compte.",
+  );
 
   console.log("\n--- Partie 2 : pLimit ---\n");
   await testPLimit();

@@ -80,13 +80,57 @@ async function testCallbackHelpers() {
         return;
       }
 
-      console.log(`  callbackSeries -> ${results.length} resultats (attendu: 3)`);
+      console.log(
+        `  callbackSeries -> ${results.length} resultats (attendu: 3)`,
+      );
       resolve(undefined);
     });
   });
 
   const result = await promisifyRequest(99, 10);
   console.log(`  promisifyRequest -> id=${result.id} (attendu: 99)`);
+}
+
+// =============================================================================
+// PARTIE 0 BIS — Rappel JS : this, call/apply/bind et finally
+// =============================================================================
+
+separator("PARTIE 0 BIS — this / call / apply / bind");
+
+function formatWithContext(this: { prefix: string }, value) {
+  // TODO : retourner "<prefix>:<value>"
+  // Exemple avec this={prefix:"ID"} et value=42 -> "ID:42"
+  return "TODO";
+}
+
+async function withFinally(promise, onFinally) {
+  // TODO : executer onFinally() dans tous les cas (succes ou erreur)
+  // en utilisant Promise.finally
+  return promise;
+}
+
+async function testThisAndFinally() {
+  const ctx = { prefix: "ID" };
+  const viaCall = formatWithContext.call(ctx, 42);
+  const viaApply = formatWithContext.apply(ctx, [43]);
+  const bound = formatWithContext.bind(ctx);
+  const viaBind = bound(44);
+
+  console.log(`  call  -> ${viaCall} (attendu: ID:42)`);
+  console.log(`  apply -> ${viaApply} (attendu: ID:43)`);
+  console.log(`  bind  -> ${viaBind} (attendu: ID:44)`);
+
+  let finallyCount = 0;
+  await withFinally(Promise.resolve("ok"), () => {
+    finallyCount++;
+  });
+  await withFinally(
+    Promise.reject(new Error("boom")).catch(() => "ignored"),
+    () => {
+      finallyCount++;
+    },
+  );
+  console.log(`  finally executé ${finallyCount}x (attendu: 2)`);
 }
 
 // =============================================================================
@@ -256,14 +300,16 @@ async function testPLimit() {
         // 💡 Indice : maxConcurrency = Math.max(maxConcurrency, limit.activeCount())
 
         return simulateRequest(i, 50);
-      })
+      }),
     );
   }
 
   const results = await Promise.all(promises);
   const elapsed = performance.now() - start;
 
-  console.log(`  ${results.length} tâches complétées en ${formatTime(elapsed)}`);
+  console.log(
+    `  ${results.length} tâches complétées en ${formatTime(elapsed)}`,
+  );
   console.log(`  Concurrence maximale observée : ${maxConcurrency}`);
   // TODO : Vérifiez que maxConcurrency ne dépasse jamais 5.
   // Temps attendu : ~200 ms (20 tâches / 5 en parallèle * 50 ms)
@@ -330,7 +376,9 @@ async function testMyAllSettled() {
   const fulfilled = results.filter((r) => r.status === "fulfilled").length;
   const rejected = results.filter((r) => r.status === "rejected").length;
   console.log(`  Succès : ${fulfilled}, Échecs : ${rejected}`);
-  console.log(`  Test : ${fulfilled === 3 && rejected === 2 ? "[OK]" : "[ERREUR]"}`);
+  console.log(
+    `  Test : ${fulfilled === 3 && rejected === 2 ? "[OK]" : "[ERREUR]"}`,
+  );
 }
 
 // =============================================================================
@@ -445,6 +493,10 @@ async function main() {
   await testCallbackHelpers();
   console.log();
 
+  console.log("--- Partie 0 bis : this/call/apply/bind/finally ---\n");
+  await testThisAndFinally();
+  console.log();
+
   console.log("\n--- Partie 1 : 4 styles asynchrones ---\n");
 
   const [r1, r2, r3, r4] = await Promise.all([
@@ -455,10 +507,18 @@ async function main() {
   ]);
 
   console.log("\n  Récapitulatif des temps :");
-  console.log(`    Callbacks          : ${formatTime(r1.time)} (${r1.count} résultats)`);
-  console.log(`    Promises .then()   : ${formatTime(r2.time)} (${r2.count} résultats)`);
-  console.log(`    async/await séq.   : ${formatTime(r3.time)} (${r3.count} résultats)`);
-  console.log(`    async/await par.   : ${formatTime(r4.time)} (${r4.count} résultats)`);
+  console.log(
+    `    Callbacks          : ${formatTime(r1.time)} (${r1.count} résultats)`,
+  );
+  console.log(
+    `    Promises .then()   : ${formatTime(r2.time)} (${r2.count} résultats)`,
+  );
+  console.log(
+    `    async/await séq.   : ${formatTime(r3.time)} (${r3.count} résultats)`,
+  );
+  console.log(
+    `    async/await par.   : ${formatTime(r4.time)} (${r4.count} résultats)`,
+  );
   console.log();
 
   console.log("--- Partie 2 : pLimit ---\n");
