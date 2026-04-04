@@ -47,6 +47,65 @@ function separator(title: string): void {
 }
 
 // =============================================================================
+// PARTIE 0 — Rappel JS : callbacks error-first et pont vers Promise
+// =============================================================================
+
+separator("PARTIE 0 — Callbacks Node.js");
+
+function callbackSeries(ids, delay, done) {
+  const results = [];
+
+  function next(index) {
+    if (index >= ids.length) {
+      done(null, results);
+      return;
+    }
+
+    simulateRequestCb(ids[index], delay, (err, result) => {
+      if (err) {
+        done(err);
+        return;
+      }
+
+      results.push(result);
+      next(index + 1);
+    });
+  }
+
+  next(0);
+}
+
+function promisifyRequest(id, delay) {
+  return new Promise((resolve, reject) => {
+    simulateRequestCb(id, delay, (err, result) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      resolve(result);
+    });
+  });
+}
+
+async function testCallbackHelpers() {
+  await new Promise((resolve, reject) => {
+    callbackSeries([1, 2, 3], 10, (err, results) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      console.log(`  callbackSeries -> ${results.length} resultats (attendu: 3)`);
+      resolve(undefined);
+    });
+  });
+
+  const result = await promisifyRequest(99, 10);
+  console.log(`  promisifyRequest -> id=${result.id} (attendu: 99)`);
+}
+
+// =============================================================================
 // PARTIE 1 — Implémenter la même tâche en 4 styles asynchrones
 // =============================================================================
 
@@ -467,6 +526,10 @@ async function testErrorStyles() {
 // =============================================================================
 
 async function main() {
+  console.log("--- Partie 0 : callbacks Node.js ---\n");
+  await testCallbackHelpers();
+  console.log();
+
   console.log("--- Partie 1 : 4 styles asynchrones ---\n");
 
   // Note : style2 et style3 sont séquentiels, ils prennent plus longtemps.

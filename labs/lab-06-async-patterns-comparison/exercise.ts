@@ -49,6 +49,47 @@ function separator(title: string): void {
 }
 
 // =============================================================================
+// PARTIE 0 — Rappel JS : callbacks error-first et pont vers Promise
+// =============================================================================
+
+separator("PARTIE 0 — Callbacks Node.js");
+
+function callbackSeries(ids, delay, done) {
+  // TODO : Executez les requetes UNE PAR UNE en style callback.
+  // Signature attendue : done(err, results)
+  // Indice : utilisez une fonction interne next(index) ou de la recursion.
+  // A chaque etape : appelez simulateRequestCb(ids[index], delay, callback)
+  // Si erreur -> done(err)
+  // Si fini -> done(null, results)
+
+  done(null, []);
+}
+
+function promisifyRequest(id, delay) {
+  // TODO : Transformez simulateRequestCb en Promise.
+  // En cas d'erreur callback -> reject(err)
+  // Sinon -> resolve(result)
+  return Promise.resolve({ id, data: `TODO-${id}`, duration: delay });
+}
+
+async function testCallbackHelpers() {
+  await new Promise((resolve, reject) => {
+    callbackSeries([1, 2, 3], 10, (err, results) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      console.log(`  callbackSeries -> ${results.length} resultats (attendu: 3)`);
+      resolve(undefined);
+    });
+  });
+
+  const result = await promisifyRequest(99, 10);
+  console.log(`  promisifyRequest -> id=${result.id} (attendu: 99)`);
+}
+
+// =============================================================================
 // PARTIE 1 — Implémenter la même tâche en 4 styles asynchrones
 // =============================================================================
 // Traitez 10 requêtes (id 1 à 10, delay 30ms chacune).
@@ -400,6 +441,10 @@ async function testErrorStyles() {
 // =============================================================================
 
 async function main() {
+  console.log("--- Partie 0 : callbacks Node.js ---\n");
+  await testCallbackHelpers();
+  console.log();
+
   console.log("\n--- Partie 1 : 4 styles asynchrones ---\n");
 
   const [r1, r2, r3, r4] = await Promise.all([
