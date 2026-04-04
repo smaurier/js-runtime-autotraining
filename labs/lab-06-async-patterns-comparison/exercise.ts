@@ -95,6 +95,8 @@ async function testCallbackHelpers() {
 // PARTIE 0 BIS — Rappel JS : this, call/apply/bind et finally
 // =============================================================================
 
+// JS-REPETITION: call_apply_bind,promise_finally,callback_error_first
+
 separator("PARTIE 0 BIS — this / call / apply / bind");
 
 function formatWithContext(this: { prefix: string }, value) {
