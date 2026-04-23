@@ -1168,6 +1168,94 @@ Le scheduling et la concurrence en JavaScript reposent en grande partie sur des 
 
 ---
 
+## Atelier complémentaire — Typologies de Workers
+
+Objectif : consolider la théorie du module avec un mini parcours pratique qui
+couvre les principales familles de workers côté navigateur et Node.js.
+
+> Format suggéré : 6 exercices courts (30 à 60 minutes chacun), avec une
+> démonstration mesurable à la fin de chaque exercice.
+
+### Exercice 1 — Dedicated Worker (navigateur)
+
+- Déporter un calcul CPU-intensif hors du thread principal.
+- Envoyer la charge utile via `postMessage`, retourner un résultat structuré.
+- Afficher un indicateur UI (spinner/compteur) pour vérifier que l'interface ne
+  freeze pas.
+
+Critères de validation :
+
+- L'UI reste fluide pendant l'exécution.
+- Le résultat est correct et reçu via `onmessage`.
+
+### Exercice 2 — Dedicated Worker + Transferable objects
+
+- Envoyer de gros buffers (`ArrayBuffer`) au worker.
+- Comparer clone structuré vs transfert (`postMessage(data, [buffer])`).
+- Mesurer latence et effet "neutered" (`byteLength === 0` après transfert).
+
+Critères de validation :
+
+- Un tableau comparatif simple clone vs transfer est produit.
+- La conclusion explique quand préférer le transfert.
+
+### Exercice 3 — Shared Worker (multi-onglets)
+
+- Créer un `SharedWorker` qui centralise un état simple (ex : compteur global).
+- Connecter deux onglets et synchroniser les updates via `MessagePort`.
+- Diffuser les événements à tous les clients connectés.
+
+Critères de validation :
+
+- Une action dans un onglet est visible dans l'autre en temps réel.
+- La gestion `connect`, `port.start()` et `port.onmessage` est maîtrisée.
+
+### Exercice 4 — Service Worker (cache et offline)
+
+- Enregistrer un service worker côté app.
+- Implémenter une stratégie minimale (cache-first ou stale-while-revalidate).
+- Vérifier le comportement hors-ligne sur une route statique.
+
+Critères de validation :
+
+- La page ciblée reste consultable sans réseau.
+- Les assets versionnés sont invalidés proprement.
+
+### Exercice 5 — Worklet (Paint ou Audio)
+
+- Choisir un type de worklet : `PaintWorklet` (visuel) ou `AudioWorklet` (audio).
+- Produire une mini démo fonctionnelle.
+- Documenter les contraintes d'exécution (runtime isolé, API disponibles).
+
+Critères de validation :
+
+- Le rendu custom (paint/audio) fonctionne.
+- Les limites de l'approche sont expliquées.
+
+### Exercice 6 — Worker Threads + SharedArrayBuffer (Node.js)
+
+- Créer un mini pool de `worker_threads` pour un calcul parallèle.
+- Tester message passing puis mémoire partagée (`SharedArrayBuffer` + `Atomics`).
+- Comparer coût de coordination vs gain CPU.
+
+Critères de validation :
+
+- Le pool exécute plusieurs jobs correctement.
+- Une mesure montre les cas où le parallélisme est rentable (ou non).
+
+### Ordre recommandé et livrable final
+
+Ordre : 1 -> 2 -> 3 -> 4 -> 5 -> 6.
+
+Livrable :
+
+- Une note de synthèse (1 page max) avec :
+  - quelle typologie utiliser selon le besoin,
+  - les pièges rencontrés,
+  - un arbre de décision simple (UI, offline, multi-onglets, CPU backend).
+
+---
+
 ---
 
 ## Pour aller plus loin
