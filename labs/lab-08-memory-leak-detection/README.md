@@ -213,7 +213,6 @@ Sortie attendue (les chiffres varient selon la machine, l'ordre de grandeur comp
   Snap C (après GC)      : 61.20 Mo   <- NE redescend PAS = fuite
     cache.size           : 50000
     listeners sur le bus : 50000
-  Snap C (après GC)      : ...
 
 === Version corrigée ===
   repos                  : 3.30 Mo
@@ -243,7 +242,7 @@ Porte le corrigé dans l'API TribuZen (`smaurier/tribuzen`).
 
 - `apps/api/src/families/lru-cache.ts` — la classe `LRUCache` réutilisable (générique `<K, V>`).
 - `apps/api/src/families/families.service.ts` — remplace le `Map` non borné par `new LRUCache(500)` ; enregistre le listener `family:updated` **une seule fois** dans le constructeur ; retire-le dans le hook NestJS `onModuleDestroy()` (équivalent de `dispose()`).
-- `apps/web/src/features/family/FamilyLive.tsx` — corrige la fuite React miroir : le `useEffect` qui s'abonne au bus temps réel **doit** retourner `() => unsubscribe()`.
+- `apps/admin/src/features/family/FamilyLive.tsx` — corrige la fuite React miroir : le `useEffect` qui s'abonne au bus temps réel **doit** retourner `() => unsubscribe()`.
 - `apps/api/src/common/observability/heap-probe.ts` — expose un déclencheur `v8.writeHeapSnapshot()` à la demande (endpoint admin protégé ou signal `SIGUSR2`), **jamais** `global.gc()` dans le code de prod. Sert à rejouer la méthode des 3 snapshots sur un run `autocannon` réel.
 
 Commit cible :

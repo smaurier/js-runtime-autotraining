@@ -498,7 +498,7 @@ tribuzen/
   apps/api/src/families/
     families.service.ts         # LRUCache borné + un listener retiré dans onModuleDestroy
     lru-cache.ts                # LRUCache réutilisable (module-level util)
-  apps/web/src/features/family/
+  apps/admin/src/features/family/
     FamilyLive.tsx              # useEffect avec return () => unsubscribe()
   apps/api/src/common/observability/
     heap-probe.ts               # writeHeapSnapshot à la demande (dev/admin), jamais global.gc en prod

@@ -31,8 +31,8 @@ async function loadFamily(id) {
   return { family, members };
 }
 
-console.log('2 — appel lancé');
 loadFamily('fam_42');
+console.log('2 — appel lancé');
 ```
 
 Un collègue jure que la ligne `5 — log différé` s'affiche **avant** `4 — membres chargés` « parce que setTimeout est appelé avant ». Tu affirmes le contraire. Qui a raison ?

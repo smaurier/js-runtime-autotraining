@@ -116,11 +116,11 @@ Reprends `scoring.js` **30 jours plus tard, en 20 minutes chrono, sans relire le
 
 Porte l'exercice dans le vrai produit :
 
-1. Dans `smaurier/tribuzen`, isole la vraie fonction de scoring de `api/src/recommendations/scoring.ts` dans un script de repro `scoring-repro.js` (hors prod, avec des données synthétiques réalistes).
+1. Dans `smaurier/tribuzen`, isole la vraie fonction de scoring de `apps/api/src/recommendations/scoring.ts` dans un script de repro `scoring-repro.js` (hors prod, avec des données synthétiques réalistes).
 2. Lance `node --trace-opt --trace-deopt scoring-repro.js` et vérifie que la fonction atteint bien TurboFan **et n'est pas déoptimisée** sous une charge représentative.
 3. Si tu vois un `deoptimizing … reason: wrong map`, c'est que les objets `member` passés à la fonction n'ont pas tous la même forme (propriétés ajoutées conditionnellement, ordre d'initialisation variable). Corrige la construction des objets pour stabiliser leur Hidden Class (préparation du module 11).
 4. Commit sur `smaurier/tribuzen` :
    ```bash
-   git add api/src/recommendations/scoring-repro.js
+   git add apps/api/src/recommendations/scoring-repro.js
    git commit -m "perf(reco): repro tiering V8 sur affinityScore + observation TurboFan"
    ```

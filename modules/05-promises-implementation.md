@@ -448,15 +448,15 @@ Sans le flag `called` dans `resolvePromise`, `promise2` pourrait tenter deux tra
 
 La couche « appels API » de TribuZen repose entièrement sur ce modèle Promise. Reconstruire `MyPromise` sert directement à raisonner sur trois situations réelles du produit.
 
-**Chaînage des appels API** (`src/api/family.ts`). Le flux « famille → membres → rendu » du cas concret est le pattern de toutes les pages de détail TribuZen. Comprendre que `then` retourne une nouvelle Promise, et que retourner `fetchMembers(...)` fait attendre la chaîne, c'est ce qui permet d'écrire ces séquences sans les casser (et de placer un seul `.catch` en fin de chaîne qui capte tous les rejets intermédiaires).
+**Chaînage des appels API** (`apps/admin/src/api/family.ts`). Le flux « famille → membres → rendu » du cas concret est le pattern de toutes les pages de détail TribuZen. Comprendre que `then` retourne une nouvelle Promise, et que retourner `fetchMembers(...)` fait attendre la chaîne, c'est ce qui permet d'écrire ces séquences sans les casser (et de placer un seul `.catch` en fin de chaîne qui capte tous les rejets intermédiaires).
 
 **Un `then` qui ne s'exécute pas quand on croit** (bug de timing). Sur le dashboard, un `setState` placé dans un `.then` s'exécute en microtask, après le rendu synchrone courant. Savoir que le callback est **toujours** différé (même sur cache résolu) évite des heures de debug sur des « états qui arrivent trop tard ». C'est le PIÈGE #1 appliqué au vrai produit.
 
-**`Promise.all` pour charger familles + membres en parallèle** (`src/pages/DashboardPage.tsx`). Au lieu de deux `await` séquentiels, TribuZen lance `Promise.all([fetchFamily(id), fetchMembers(id)])` : les deux requêtes partent simultanément, le temps de chargement chute au max des deux au lieu de leur somme. Le fail-fast d'`all` est acceptable ici (sans famille **ni** membres, la page n'a rien à afficher). Pour la liste des invitations (tolérante aux échecs partiels), TribuZen passe à `allSettled`.
+**`Promise.all` pour charger familles + membres en parallèle** (`apps/admin/src/pages/DashboardPage.tsx`). Au lieu de deux `await` séquentiels, TribuZen lance `Promise.all([fetchFamily(id), fetchMembers(id)])` : les deux requêtes partent simultanément, le temps de chargement chute au max des deux au lieu de leur somme. Le fail-fast d'`all` est acceptable ici (sans famille **ni** membres, la page n'a rien à afficher). Pour la liste des invitations (tolérante aux échecs partiels), TribuZen passe à `allSettled`.
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-tribuzen/src/
+tribuzen/apps/admin/src/
   api/
     family.ts     // fetchFamily / fetchMembers : chaînage + catch unique
     client.ts     // wrapper fetch retournant des Promises typées

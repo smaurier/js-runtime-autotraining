@@ -134,9 +134,9 @@ const yieldToLoop = () => new Promise((r) => setImmediate(r));
 export async function runChunked(items, handle, { chunkSize = 2000 } = {}) {
   for (let i = 0; i < items.length; i++) {
     handle(items[i], i);
-    // Point de yield : l'event loop reprend la main tous les chunkSize items.
+    // Point de yield : l'event loop reprend la main après chaque lot plein de chunkSize items.
     // C'est CE await qui rend l'application réactive.
-    if (i % chunkSize === 0) {
+    if (i > 0 && i % chunkSize === 0) {
       await yieldToLoop();
     }
   }
@@ -233,7 +233,7 @@ worker.once('error', (err) => { console.error(err); process.exit(1); });
 Dans le repo `smaurier/tribuzen`, ce lab se porte directement dans l'API :
 
 ```
-api/src/
+tribuzen/apps/api/src/
   lib/eventloop-probe.ts      # startProbe -> monté en dev pour surveiller le lag
   lib/run-chunked.ts          # runChunked réutilisable (export CSV, imports, migrations)
   routes/export.ts            # GET /api/export/members.csv -> runChunked (setImmediate)

@@ -158,10 +158,10 @@ Le concept est le même ; l'implémentation diffère car l'hôte diffère.
 | Fournisseur de l'event loop | Le navigateur (Blink / Gecko) | **libuv** (C) |
 | APIs asynchrones | Web APIs (`fetch`, DOM, `setTimeout`) | libuv + bindings (`fs`, `net`, `setTimeout`, `setImmediate`) |
 | Rendu (paint) | Oui (DOM à l'écran) | Non (pas de DOM) |
-| Structure de la boucle | Simple (une task queue + micro) | **6 phases** libuv (timers, poll, check…) |
+| Structure de la boucle | Simple (une task queue + micro) | **~6 phases** libuv (timers, poll, check… + idle/prepare internes) |
 | Extras | `requestAnimationFrame` | `setImmediate`, `process.nextTick` |
 
-Node ajoute une granularité : libuv organise la boucle en **phases** (timers → pending → poll → check → close). On survole ici — le détail des phases et des microtâches / macrotâches est le sujet du **module 04**. Ce qu'il faut retenir maintenant : dans les deux cas, **c'est l'hôte, pas V8, qui fait tourner la boucle et fournit l'asynchrone**.
+Node ajoute une granularité : libuv organise la boucle en **~6 phases** (timers → pending → idle/prepare _(usage interne)_ → poll → check → close). On survole ici — le détail des phases et des microtâches / macrotâches est le sujet du **module 04**. Ce qu'il faut retenir maintenant : dans les deux cas, **c'est l'hôte, pas V8, qui fait tourner la boucle et fournit l'asynchrone**.
 
 ---
 
@@ -243,7 +243,7 @@ Nuance importante. Le **travail de fond** (attendre le réseau, lire un fichier,
 
 ### PIÈGE #5 — « Navigateur et Node ont le même event loop »
 
-Approximation trompeuse. Le **principe** est identique (pile vide → prendre un callback). Mais Node utilise **libuv** avec **6 phases** et des primitives propres (`setImmediate`, `process.nextTick`), tandis que le navigateur a une boucle plus simple qui gère en plus le **rendu**. Même idée, hôtes et détails différents (approfondis au module 04).
+Approximation trompeuse. Le **principe** est identique (pile vide → prendre un callback). Mais Node utilise **libuv** avec **~6 phases** (dont `idle/prepare` internes) et des primitives propres (`setImmediate`, `process.nextTick`), tandis que le navigateur a une boucle plus simple qui gère en plus le **rendu**. Même idée, hôtes et détails différents (approfondis au module 04).
 
 ---
 
@@ -253,7 +253,7 @@ L'API TribuZen tourne sous **Node**, donc son event loop est celui de **libuv** 
 
 **Où ça compte concrètement :**
 
-1. **Le `setTimeout` du cas concret** (`src/routes/families.ts`) — l'e-mail de bienvenue planifié « à 0 ms » ne part qu'une fois le handler terminé et la pile vide. Comprendre l'event loop, c'est savoir que « différer » ≠ « immédiatement », et ne pas s'étonner de l'ordre des logs.
+1. **Le `setTimeout` du cas concret** (`apps/api/src/routes/families.ts`) — l'e-mail de bienvenue planifié « à 0 ms » ne part qu'une fois le handler terminé et la pile vide. Comprendre l'event loop, c'est savoir que « différer » ≠ « immédiatement », et ne pas s'étonner de l'ordre des logs.
 
 2. **Un handler qui bloque l'event loop gèle l'API entière.** Si un endpoint TribuZen fait un calcul synchrone lourd — par exemple agréger en mémoire les statistiques d'activité de toutes les familles dans une grosse boucle — pendant ce calcul, **aucune autre requête n'est servie** : Node est mono-thread, la pile n'est jamais vide, l'event loop est à l'arrêt. Tous les membres connectés voient l'app « ramer ». Le réflexe : déléguer (job en arrière-plan, `worker_threads`, ou découper le calcul).
 
@@ -261,7 +261,7 @@ L'API TribuZen tourne sous **Node**, donc son event loop est celui de **libuv** 
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-tribuzen/src/
+tribuzen/apps/api/src/
   routes/
     families.ts        # handler join + setTimeout e-mail
   services/
@@ -279,7 +279,7 @@ tribuzen/src/
 5. Règle d'or : l'event loop ne prend un callback **que lorsque la call stack est vide** — un callback n'interrompt jamais du synchrone en cours.
 6. `setTimeout(fn, 0)` = « plus tard, après le synchrone », pas « maintenant » ; le délai est clampé (1 ms Node, jusqu'à 4 ms navigateur) et attend la pile vide.
 7. Dans le **navigateur**, le rendu (paint) s'intercale entre les tâches — un JS bloquant gèle l'UI.
-8. **Navigateur vs Node** : même principe, hôtes différents. Node = libuv à 6 phases (`setImmediate`, `process.nextTick`) ; détail au module 04.
+8. **Navigateur vs Node** : même principe, hôtes différents. Node = libuv à ~6 phases (dont `idle/prepare` internes ; `setImmediate`, `process.nextTick`) ; détail au module 04.
 
 ---
 
@@ -293,7 +293,7 @@ L'event loop est-il dans le moteur JavaScript (V8) ?|Non. V8 ne gère que la cal
 Quelle est la règle d'or de l'event loop vis-à-vis de la call stack ?|L'event loop ne prend un callback dans la task queue QUE lorsque la call stack est complètement vide. Un callback n'interrompt jamais du code synchrone en cours.
 Que signifie réellement setTimeout(fn, 0) ?|« Mets fn dans la task queue après le délai, elle sera reprise quand la pile sera vide » — donc après tout le code synchrone en cours. Pas « immédiatement ». Le délai est en plus clampé (1 ms Node, jusqu'à 4 ms navigateur).
 Pourquoi un calcul CPU lourd dans un handler Node bloque-t-il toutes les requêtes ?|Node est mono-thread : le calcul synchrone occupe la call stack, qui n'est jamais vide, donc l'event loop ne peut reprendre aucun autre callback (autres requêtes incluses) tant que le calcul n'est pas fini.
-Quelle différence entre l'event loop du navigateur et celui de Node ?|Même principe (pile vide -> prendre un callback), mais hôtes différents : le navigateur gère aussi le rendu et a une boucle simple ; Node utilise libuv avec 6 phases et des primitives propres (setImmediate, process.nextTick).
+Quelle différence entre l'event loop du navigateur et celui de Node ?|Même principe (pile vide -> prendre un callback), mais hôtes différents : le navigateur gère aussi le rendu et a une boucle simple ; Node utilise libuv avec ~6 phases (dont idle/prepare internes) et des primitives propres (setImmediate, process.nextTick).
 ```
 
 ---

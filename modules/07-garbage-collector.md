@@ -15,8 +15,6 @@ last-reviewed: 2026-07
 > **Outcomes — tu sauras FAIRE :** expliquer pourquoi un objet est (ou non) collecté via la reachability depuis les roots, distinguer Scavenge et Mark-Compact et justifier la séparation young/old, observer une pause GC et son impact latence avec `global.gc()` et `process.memoryUsage()`.
 > **Difficulté :** :star::star::star:
 
-> **Note de vérification (2026-07) :** Context7 était indisponible (quota mensuel dépassé) au moment de la réécriture. Les faits V8 (Scavenge, Mark-Compact, Orinoco, seuils new space) proviennent de la source v0 auditée `cours/07-garbage-collector.md` et des blogs V8 cités en fin de module. À revérifier via Context7 (`v8 garbage collection scavenge orinoco`) au prochain passage.
-
 ## 1. Cas concret d'abord
 
 L'API TribuZen (Node.js/NestJS) sert les familles. En prod, tu observes que **le P99 de `GET /families/:id` monte en flèche toutes les ~30 s** — 8 ms la plupart du temps, puis un pic isolé à 40 ms. Rien dans ton code applicatif n'explique ce pic périodique. Tu soupçonnes le garbage collector.
@@ -252,7 +250,8 @@ V8 interdit de déclencher le GC depuis JS par défaut. Le flag Node `--expose-g
 ```js
 // node --expose-gc script.js
 global.gc();                  // Major GC complet, synchrone (diagnostic uniquement)
-global.gc({ type: 'minor' }); // Scavenge seulement
+// Sur Node >= 22, on peut cibler un Scavenge seul : global.gc({ type: 'minor' })
+// (signature à options récente ; sur les versions antérieures, seul global.gc() sans argument est disponible)
 ```
 
 `process.memoryUsage()` donne l'état mémoire :

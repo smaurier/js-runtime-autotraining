@@ -93,8 +93,8 @@ async function processInChunks<T>(
 ): Promise<void> {
   for (let i = 0; i < items.length; i++) {
     handle(items[i]);
-    // Tous les chunkSize éléments : on cède la main
-    if (i % chunkSize === 0) {
+    // Après chaque lot plein de chunkSize éléments : on cède la main
+    if (i > 0 && i % chunkSize === 0) {
       await yieldFn(); // <-- l'event loop respire ici
     }
   }
@@ -457,22 +457,22 @@ Règle : offloader ne vaut que si `coût_calcul >> coût_transfert`. Sinon, on p
 
 Le scheduling est la couche qui garde l'**API TribuZen réactive sous charge** et le **dashboard admin fluide**.
 
-**Export CSV réactif** (`api/src/routes/export.ts`) — l'endpoint `GET /api/export/members.csv` traite les membres par chunks de 2000 avec `await setImmediate` entre chaque lot. Résultat mesuré : `/api/health` reste sous 5 ms même pendant l'export d'une grosse famille (contre ~900 ms avant). C'est le cas concret et l'Exemple 1 du module.
+**Export CSV réactif** (`apps/api/src/routes/export.ts`) — l'endpoint `GET /api/export/members.csv` traite les membres par chunks de 2000 avec `await setImmediate` entre chaque lot. Résultat mesuré : `/api/health` reste sous 5 ms même pendant l'export d'une grosse famille (contre ~900 ms avant). C'est le cas concret et l'Exemple 1 du module.
 
-**Agrégation stats offloadée** (`api/src/services/stats-service.ts` + `api/src/workers/stats.worker.ts`) — le calcul d'engagement (des millions d'interactions) tourne dans un `worker_threads` dédié. L'API délègue via `workerData`, reçoit le résultat par message, et n'a jamais son event loop bloqué. C'est l'Exemple 2. Évolution prévue : un **pool** de workers (un par cœur) pour paralléliser les agrégations de plusieurs familles simultanément.
+**Agrégation stats offloadée** (`apps/api/src/services/stats-service.ts` + `apps/api/src/workers/stats.worker.ts`) — le calcul d'engagement (des millions d'interactions) tourne dans un `worker_threads` dédié. L'API délègue via `workerData`, reçoit le résultat par message, et n'a jamais son event loop bloqué. C'est l'Exemple 2. Évolution prévue : un **pool** de workers (un par cœur) pour paralléliser les agrégations de plusieurs familles simultanément.
 
-**Réactivité mesurée** (`api/src/lib/eventloop-probe.ts`) — une sonde de lag event loop tourne en dev pour valider qu'aucun handler ne gèle le thread. Tout ajout de traitement lourd passe ce contrôle : soit chunké, soit offloadé.
+**Réactivité mesurée** (`apps/api/src/lib/eventloop-probe.ts`) — une sonde de lag event loop tourne en dev pour valider qu'aucun handler ne gèle le thread. Tout ajout de traitement lourd passe ce contrôle : soit chunké, soit offloadé.
 
-**Côté admin React** (`admin/src/features/import/parse.worker.ts`) — le parsing d'un gros CSV importé se fait dans un **Web Worker**, pour que la saisie et le scroll de l'interface restent fluides pendant le traitement.
+**Côté admin React** (`apps/admin/src/features/import/parse.worker.ts`) — le parsing d'un gros CSV importé se fait dans un **Web Worker**, pour que la saisie et le scroll de l'interface restent fluides pendant le traitement.
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-api/src/
+tribuzen/apps/api/src/
   routes/export.ts            # export CSV chunké (setImmediate)
   services/stats-service.ts   # orchestration de l'offload
   workers/stats.worker.ts     # agrégation CPU-bound isolée
   lib/eventloop-probe.ts      # sonde de lag event loop
-admin/src/
+tribuzen/apps/admin/src/
   features/import/parse.worker.ts  # parsing CSV en Web Worker
 ```
 

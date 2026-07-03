@@ -362,7 +362,7 @@ Ce module est la brique de **diagnostic** de l'API TribuZen. Trois usages concre
 Fichiers concernés dans `smaurier/tribuzen` :
 
 ```
-tribuzen/src/
+tribuzen/apps/api/src/
   server.ts                       ← point d'entrée (base des traces)
   modules/family/
     family.controller.ts          ← getFamilyGraph

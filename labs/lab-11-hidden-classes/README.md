@@ -248,7 +248,7 @@ bench('  totalSeniority (réparé)', () => totalSeniority(fixedMembers), 200);
 Dans le repo `smaurier/tribuzen`, porte le résultat sur le vrai code :
 
 ```
-tribuzen/src/
+tribuzen/apps/api/src/
   members/
     member.entity.ts        // class Member — forme stable, ordre fixe
     member.mapper.ts         // buildMember normalisé (plus de delete, plus d'ajout conditionnel)

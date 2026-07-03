@@ -316,7 +316,7 @@ tribuzen/
   scripts/
     profile.mjs               # node --cpu-prof wrapper (charge + dump)
     heapdump.mjs              # v8.writeHeapSnapshot() sur signal SIGUSR2
-  src/
+  apps/api/src/
     observability/
       eventLoopMonitor.mjs    # monitorEventLoopDelay exposé sur /_health
       gcMonitor.mjs           # PerformanceObserver gc → logs structurés

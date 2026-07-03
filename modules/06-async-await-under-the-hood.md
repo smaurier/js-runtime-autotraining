@@ -510,9 +510,9 @@ console.log('fini'); // vrai
 
 Le chargement des vues agrégées de TribuZen est l'endroit où ces patterns comptent le plus.
 
-**`api/loadFamilyDashboard` (`src/server/api/family.ts`)** — c'est le cas concret du module. Le dashboard famille agrège famille + membres + posts. En version naïve (trois `await` en série), le handler répond en ~450 ms ; refactoré en `Promise.all`, en ~180 ms. C'est un gain visible en TTFB sur la page la plus consultée de l'admin.
+**`api/loadFamilyDashboard` (`apps/api/src/api/family.ts`)** — c'est le cas concret du module. Le dashboard famille agrège famille + membres + posts. En version naïve (trois `await` en série), le handler répond en ~450 ms ; refactoré en `Promise.all`, en ~180 ms. C'est un gain visible en TTFB sur la page la plus consultée de l'admin.
 
-**`api/membersWithLastPost` (`src/server/api/members.ts`)** — l'enrichissement « dernier post par membre » est le piège `await`-dans-la-boucle typique : 50 membres × 100 ms = 5 s en série, ~100 ms avec `map` + `Promise.all`. Sur une grande famille, c'est la différence entre un timeout et une réponse instantanée.
+**`api/membersWithLastPost` (`apps/api/src/api/members.ts`)** — l'enrichissement « dernier post par membre » est le piège `await`-dans-la-boucle typique : 50 membres × 100 ms = 5 s en série, ~100 ms avec `map` + `Promise.all`. Sur une grande famille, c'est la différence entre un timeout et une réponse instantanée.
 
 **Dégradation gracieuse** — sur le dashboard, les posts sont un widget « nice-to-have ». On passe `Promise.all` → `Promise.allSettled` pour que l'échec du service de posts n'empêche pas d'afficher la famille et ses membres.
 
@@ -520,7 +520,7 @@ Le chargement des vues agrégées de TribuZen est l'endroit où ces patterns com
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-tribuzen/src/server/
+tribuzen/apps/api/src/
   api/
     family.ts      ← loadFamilyDashboard : Promise.all / allSettled
     members.ts     ← membersWithLastPost : map + Promise.all

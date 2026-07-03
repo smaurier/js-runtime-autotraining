@@ -20,7 +20,7 @@ last-reviewed: 2026-07
 Tu débugges un handler de l'API TribuZen. Un membre poste un message ; on veut logger l'événement AVANT de renvoyer la réponse HTTP. Le code semble correct :
 
 ```ts
-// tribuzen/src/api/postMessage.ts — AVANT correction
+// tribuzen/apps/api/src/api/postMessage.ts — AVANT correction
 async function postMessage(req: Request, res: Response) {
   const message = await saveMessage(req.body); // await → reprise en microtask
 
@@ -307,15 +307,15 @@ console.log('après');
 
 Dans l'API TribuZen (backend Node), l'ordonnancement des files n'est pas une curiosité académique — il décide de la cohérence des données.
 
-**Handler `postMessage` (`tribuzen/src/api/postMessage.ts`)** — le cas concret du module. Règle appliquée : tout ce qui doit être garanti avant la réponse (audit log, invalidation de cache critique) est **`await`é** ; seul le vraiment optionnel (métriques best-effort) part en `.then` fire-and-forget. On ne compte jamais sur une microtask non attendue pour finir avant `res.json`.
+**Handler `postMessage` (`tribuzen/apps/api/src/api/postMessage.ts`)** — le cas concret du module. Règle appliquée : tout ce qui doit être garanti avant la réponse (audit log, invalidation de cache critique) est **`await`é** ; seul le vraiment optionnel (métriques best-effort) part en `.then` fire-and-forget. On ne compte jamais sur une microtask non attendue pour finir avant `res.json`.
 
-**Middleware de logs (`tribuzen/src/middleware/auditLog.ts`)** — on utilise `queueMicrotask` (et non `process.nextTick`) pour différer l'écriture des logs non bloquants : sémantique explicite, et pas de risque d'affamer les microtasks Promise du reste de la requête, ce que ferait un `nextTick` récursif.
+**Middleware de logs (`tribuzen/apps/api/src/middleware/auditLog.ts`)** — on utilise `queueMicrotask` (et non `process.nextTick`) pour différer l'écriture des logs non bloquants : sémantique explicite, et pas de risque d'affamer les microtasks Promise du reste de la requête, ce que ferait un `nextTick` récursif.
 
-**Worker de purge de cache (`tribuzen/src/jobs/invalidate.ts`)** — les invalidations de cache passent par `setImmediate` (phase check) plutôt que par une microtask, pour **céder la main** à l'event loop entre deux lots. Objectif : ne pas geler les I/O réseau des autres requêtes. C'est la parade directe à la starvation vue en 2.7 — on planifie du travail en macrotask pour laisser respirer les phases poll/timers.
+**Worker de purge de cache (`tribuzen/apps/api/src/jobs/invalidate.ts`)** — les invalidations de cache passent par `setImmediate` (phase check) plutôt que par une microtask, pour **céder la main** à l'event loop entre deux lots. Objectif : ne pas geler les I/O réseau des autres requêtes. C'est la parade directe à la starvation vue en 2.7 — on planifie du travail en macrotask pour laisser respirer les phases poll/timers.
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-tribuzen/src/
+tribuzen/apps/api/src/
   api/postMessage.ts          # await des microtasks critiques avant res.json
   middleware/auditLog.ts      # queueMicrotask pour logs différés non bloquants
   jobs/invalidate.ts          # setImmediate pour céder l'event loop (anti-starvation)

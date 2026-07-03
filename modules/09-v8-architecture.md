@@ -345,7 +345,7 @@ Le passage de monomorphe → polymorphe → mégamorphe n'est pas linéaire. Un 
 
 Le pipeline V8 n'est pas de la théorie décorative pour TribuZen : c'est ce qui fait qu'un endpoint tient la charge.
 
-**`affinityScore`** (`api/src/recommendations/scoring.ts`) — la fonction du cas concret. Appelée `membres × activités` fois par requête `/recommendations`, elle est la définition d'une **fonction chaude**. Sur un service qui tourne en continu, V8 la promeut jusqu'à TurboFan et elle s'exécute alors en code machine spécialisé. Notre travail côté code : lui garantir un **feedback stable** — toujours les mêmes formes d'objets `member` et `activity` — pour qu'elle *reste* en TurboFan sans déoptimiser.
+**`affinityScore`** (`apps/api/src/recommendations/scoring.ts`) — la fonction du cas concret. Appelée `membres × activités` fois par requête `/recommendations`, elle est la définition d'une **fonction chaude**. Sur un service qui tourne en continu, V8 la promeut jusqu'à TurboFan et elle s'exécute alors en code machine spécialisé. Notre travail côté code : lui garantir un **feedback stable** — toujours les mêmes formes d'objets `member` et `activity` — pour qu'elle *reste* en TurboFan sans déoptimiser.
 
 **Le warmup en production** — au démarrage du service Node, les premières requêtes sont plus lentes (Ignition/Sparkplug) : c'est le temps que les fonctions chaudes montent en tier. C'est pourquoi on ne mesure jamais la latence sur les toutes premières requêtes après un déploiement, et pourquoi certains services font un *warmup* synthétique avant d'accepter du trafic.
 
@@ -360,7 +360,7 @@ node --trace-opt --trace-deopt scoring-repro.js
 Fichiers cibles dans `smaurier/tribuzen` :
 
 ```
-tribuzen/api/src/
+tribuzen/apps/api/src/
   recommendations/
     scoring.ts          # affinityScore — fonction chaude
     scoring-repro.js    # repro isolé pour observer le tiering (hors prod)

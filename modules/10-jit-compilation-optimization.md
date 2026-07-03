@@ -393,7 +393,7 @@ Le bug réel : les valeurs `base`/`bonus` viennent de sources hétérogènes (BD
 Fichiers cibles dans `smaurier/tribuzen` :
 
 ```
-tribuzen/api/src/
+tribuzen/apps/api/src/
   families/
     ranking.controller.ts   # normalise les types (Number) en périphérie
     scoring.ts              # computeScore : hot function, types stables garantis

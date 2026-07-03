@@ -418,15 +418,15 @@ function risky() {
 
 Le cas concret et les corrigés de ce module vivent dans l'admin TribuZen :
 
-**`FamilyDashboard`** (`src/features/admin/FamilyDashboard.tsx`) — le composant du §1. Son `setInterval` non nettoyé + capture de `families` est la fuite type de l'admin. Corrigé en Worked example 1 : cleanup de l'`useEffect` + extraction de la donnée capturée. C'est le pont direct vers le **module 08** (détection au heap snapshot).
+**`FamilyDashboard`** (`apps/admin/src/features/admin/FamilyDashboard.tsx`) — le composant du §1. Son `setInterval` non nettoyé + capture de `families` est la fuite type de l'admin. Corrigé en Worked example 1 : cleanup de l'`useEffect` + extraction de la donnée capturée. C'est le pont direct vers le **module 08** (détection au heap snapshot).
 
-**`familyCache`** (`src/lib/familyCache.ts`) — un cache mémoire des familles chargées, écrit en **module pattern** (IIFE + closure, §2.8). `store` est privé (impossible de le corrompre depuis un composant), et il expose `get` / `set` / `clear` / `stats`. Le `clear()` permet de **relâcher** la rétention à la déconnexion admin — exactement ce qu'une closure anonyme perdue dans un `setInterval` ne permet pas.
+**`familyCache`** (`apps/admin/src/lib/familyCache.ts`) — un cache mémoire des familles chargées, écrit en **module pattern** (IIFE + closure, §2.8). `store` est privé (impossible de le corrompre depuis un composant), et il expose `get` / `set` / `clear` / `stats`. Le `clear()` permet de **relâcher** la rétention à la déconnexion admin — exactement ce qu'une closure anonyme perdue dans un `setInterval` ne permet pas.
 
 **Handlers de la liste admin** — chaque bouton d'action (« archiver famille », « exporter ») crée une closure. La règle appliquée partout : un handler ne capture **que** l'`id` de la ligne, jamais l'objet famille complet ni la liste entière.
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-tribuzen/src/
+tribuzen/apps/admin/src/
   features/admin/
     FamilyDashboard.tsx     # cas concret + corrigé
   lib/

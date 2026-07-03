@@ -139,9 +139,10 @@ forceGC();
 console.log('après fuite     :', heapMB(), 'MB'); // grimpe (~40 Mo retenus)
 
 const stop = startFixed();
-stop();
+stop();                   // tue la closure de startFixed -> son families devient collectable
+clearInterval(leakTimer); // on coupe AUSSI la fuite de startLeaky, sinon ses ~40 Mo faussent la mesure
 forceGC();
-console.log('après corrigé   :', heapMB(), 'MB'); // families collecté
+console.log('après corrigé   :', heapMB(), 'MB'); // families de startFixed collecté -> ~baseline
 
 const cache = buildCache();
 for (let i = 0; i < 50_000; i++) cache.set(`k${i}`, { blob: 'x'.repeat(800) });
@@ -151,13 +152,11 @@ console.log('store privé ?   :', cache.store === undefined); // true
 cache.clear();
 forceGC();
 console.log('cache vidé      :', heapMB(), 'MB'); // redescend
-
-clearInterval(leakTimer); // nettoyage de fin de lab
 ```
 
 **Ce que les mesures prouvent :**
 - `après fuite` reste haut : la closure du `setInterval` de `startLeaky` maintient `families` vivant malgré le `forceGC()`.
-- `après corrigé` retombe : `stop()` a tué la seule closure qui retenait `families`, le GC l'a collecté.
+- `après corrigé` retombe près de la baseline : `stop()` a tué la seule closure qui retenait le `families` de `startFixed`, donc le GC l'a collecté (on a coupé le timer de fuite juste avant pour ne mesurer que cet effet).
 - `cache vidé` redescend : `clear()` vide la `Map` privée sans détruire le module — la rétention est **circonscrite et pilotable**, contrairement à la fuite anonyme.
 
 Au heap snapshot (étape 2), tu dois voir, dans les **Retainers** du gros `Array`, une chaîne du type `Array → context → (closure) → Timeout`. C'est la preuve visuelle que « une closure vivante garde tout son scope vivant ».

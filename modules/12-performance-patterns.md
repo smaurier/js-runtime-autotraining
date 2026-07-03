@@ -368,7 +368,7 @@ L'astuce « un seul objet réutilisé dans la boucle » (§2.6) est fausse si tu
 
 Le hot path de ce module vit dans l'API TribuZen (NestJS), côté agrégation de données famille.
 
-**`families.service.ts` → `computeFamilyStats()`** (`src/families/families.service.ts`) — l'endpoint `GET /families/:id/stats`. C'est le cas concret : profilé avec `--cpu-prof`, on découvre que le coût est l'allocation d'objets/chaînes éphémères et le churn GC, pas la boucle. Correction : `Map` pour l'agrégat à clés dynamiques (`memberId`), suppression des `label`/`split`, sortie pré-allouée PACKED.
+**`families.service.ts` → `computeFamilyStats()`** (`apps/api/src/families/families.service.ts`) — l'endpoint `GET /families/:id/stats`. C'est le cas concret : profilé avec `--cpu-prof`, on découvre que le coût est l'allocation d'objets/chaînes éphémères et le churn GC, pas la boucle. Correction : `Map` pour l'agrégat à clés dynamiques (`memberId`), suppression des `label`/`split`, sortie pré-allouée PACKED.
 
 **`members` numériques** — la timeline de scores de bien-être (des milliers de points `{ ts, value }` par famille) part en `Float64Array` (`[ts0, value0, ts1, value1, …]`) pour les calculs de moyenne glissante : mémoire contiguë, zéro allocation par point, pas de pression GC.
 
@@ -378,7 +378,7 @@ Méthode imposée sur le projet : **tout PR de perf joint un avant/après profil
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-tribuzen/src/
+tribuzen/apps/api/src/
   families/
     families.service.ts       # computeFamilyStats — hot path profilé
     families.controller.ts     # GET /families/:id/stats

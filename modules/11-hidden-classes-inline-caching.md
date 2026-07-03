@@ -388,9 +388,9 @@ p.ratio = 0.5;          // -> Double : forme dépréciée + migration
 
 L'API TribuZen (NestJS) sérialise en permanence des objets `Member` et `Family` sur les chemins chauds : listes de membres, agrégats de familles, tri, calculs de séniorité. Ces objets sont construits à partir de lignes SQL / documents, souvent par des mappers écrits au fil de l'eau — terrain idéal pour les formes instables.
 
-**Objets `Member`** (`src/members/member.entity.ts` + mapper) — la source du cas concret. Propriétés conditionnelles (`email`, `avatar`, `isAdmin`), ordre variable selon la source legacy, `delete` de nettoyage. Normalisés en une classe `Member` à forme unique, toutes propriétés initialisées, ordre fixe.
+**Objets `Member`** (`apps/api/src/members/member.entity.ts` + mapper) — la source du cas concret. Propriétés conditionnelles (`email`, `avatar`, `isAdmin`), ordre variable selon la source legacy, `delete` de nettoyage. Normalisés en une classe `Member` à forme unique, toutes propriétés initialisées, ordre fixe.
 
-**Objets `Family`** (`src/families/family.mapper.ts`) — même traitement : `members`, `tags`, `settings` toujours présents (tableau ou objet vide plutôt qu'absent), pas d'ajout conditionnel de `premiumUntil` (initialisé à `null`).
+**Objets `Family`** (`apps/api/src/families/family.mapper.ts`) — même traitement : `members`, `tags`, `settings` toujours présents (tableau ou objet vide plutôt qu'absent), pas d'ajout conditionnel de `premiumUntil` (initialisé à `null`).
 
 **Chemins chauds concernés :**
 - `MembersService.totalSeniority()` — boucle qui lit `m.joinedAt` sur chaque membre.
@@ -401,7 +401,7 @@ L'API TribuZen (NestJS) sérialise en permanence des objets `Member` et `Family`
 
 Fichiers cibles dans `smaurier/tribuzen` :
 ```
-tribuzen/src/
+tribuzen/apps/api/src/
   members/
     member.entity.ts       // classe Member, forme stable
     member.mapper.ts        // buildMember normalisé

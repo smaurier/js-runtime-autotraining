@@ -156,8 +156,8 @@ Refais le lab **de mémoire, en 20 minutes**, avec deux contraintes ajoutées :
 
 Porte la correction dans le vrai produit, `smaurier/tribuzen` :
 
-- `tribuzen/api/src/families/scoring.ts` — `computeScore` reste une hot function pure, typée `(base: number, bonus: number) => number`. Aucune coercition dedans.
-- `tribuzen/api/src/families/ranking.controller.ts` — normalise les types **une fois**, en périphérie : `Number(row.base)` / `Number(row.bonus)` (ou un DTO validé par `class-validator` / `zod`) avant d'atteindre le scoring.
-- Ajoute un micro-bench dans `tribuzen/api/bench/scoring.bench.ts` qui mesure 200 000 scorings et échoue si le ratio instable/stable dépasse un seuil — filet anti-régression.
+- `tribuzen/apps/api/src/families/scoring.ts` — `computeScore` reste une hot function pure, typée `(base: number, bonus: number) => number`. Aucune coercition dedans.
+- `tribuzen/apps/api/src/families/ranking.controller.ts` — normalise les types **une fois**, en périphérie : `Number(row.base)` / `Number(row.bonus)` (ou un DTO validé par `class-validator` / `zod`) avant d'atteindre le scoring.
+- Ajoute un micro-bench dans `tribuzen/apps/api/bench/scoring.bench.ts` qui mesure 200 000 scorings et échoue si le ratio instable/stable dépasse un seuil — filet anti-régression.
 
 Commit type : `perf(scoring): stabilise les types de computeScore pour éviter la déopt JIT` sur `smaurier/tribuzen`.

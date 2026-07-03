@@ -81,7 +81,6 @@ function makeReadings(n) {
 
 function computeFamilyStats(readings) {
   // Map : clés dynamiques (memberId) sans hidden-class thrashing ni site megamorphic.
-  // Réutilisée à chaque appel via .clear() pour ne pas réallouer la structure.
   const summary = new Map();
 
   // Une seule passe. Aucun objet "point" éphémère, aucune chaîne, aucun split :
@@ -137,7 +136,7 @@ Reprends l'exercice **sans relire le corrigé**, avec deux contraintes ajoutées
 ## Application TribuZen
 
 Porte la correction dans `smaurier/tribuzen` :
-- Profile réellement `GET /families/:id/stats` (`src/families/families.service.ts`) sous charge avec `node --cpu-prof dist/main.js` puis un tir de charge (`autocannon`/`k6`), et ouvre le `.cpuprofile` dans DevTools.
+- Profile réellement `GET /families/:id/stats` (`apps/api/src/families/families.service.ts`) sous charge avec `node --cpu-prof dist/main.js` puis un tir de charge (`autocannon`/`k6`), et ouvre le `.cpuprofile` dans DevTools.
 - Applique le pattern `Map` + suppression des chaînes intermédiaires + sortie PACKED dans `computeFamilyStats()`.
-- Ajoute `src/members/scores.timeseries.ts` : la timeline de scores d'un membre en `Float64Array` pour la moyenne glissante.
+- Ajoute `apps/api/src/members/scores.timeseries.ts` : la timeline de scores d'un membre en `Float64Array` pour la moyenne glissante.
 - Commit sur `smaurier/tribuzen` avec, dans le message, l'avant/après chiffré (p95 et part GC). Règle du repo : **aucun PR de perf sans profil joint**.
