@@ -1,791 +1,570 @@
-# Module 06 — Async/Await sous le capot
+---
+titre: Async/await sous le capot
+cours: 01-js-runtime
+notions: [async retourne toujours une Promise, await comme sucre syntaxique sur then, suspension de coroutine et state machine, lien avec les générateurs, await cède le contrôle à l'event loop en microtask, séquentiel vs Promise.all parallèle, await dans une boucle, try/catch async et rejets non attrapés]
+outcomes: [expliquer la state machine générée derrière une fonction async, situer le point de suspension et de reprise d'un await, refactorer un await séquentiel en Promise.all parallèle et mesurer le gain, sécuriser les erreurs async avec try/catch et return await]
+prerequis: [05-promises-implementation]
+next: 07-garbage-collector
+libs: []
+tribuzen: chargement du dashboard famille TribuZen — refactor séquentiel vers Promise.all et mesure du gain
+last-reviewed: 2026-07
+---
 
-> **Objectif** : Comprendre comment V8 implémente réellement `async`/`await` au niveau du bytecode, maîtriser les mécanismes de suspension et de reprise, exploiter les async iterators et generators, appliquer les patterns de cancellation avec `AbortController`, et diagnostiquer les pièges subtils (`return await`, rejets non gérés, optimisations de ticks).
+# Async/await sous le capot
 
-> **Difficulté** : ⭐⭐⭐ (Avancé)
+> **Outcomes — tu sauras FAIRE :** expliquer la state machine générée derrière une fonction async, situer le point de cession d'un `await` à l'event loop, refactorer un `await` séquentiel en `Promise.all` parallèle en mesurant le gain, sécuriser les erreurs async avec `try/catch` + `return await`.
+> **Difficulté :** :star::star::star:
 
-> **Pas de panique !** Ce module explore les mécanismes internes d'`async`/`await`, mais tu utilises probablement déjà ces mots-clés tous les jours. L'objectif ici n'est pas de tout mémoriser, mais de comprendre *pourquoi* `await` se comporte comme il le fait. Les sections sur les structures internes V8 sont là pour les curieux — si elles te semblent abstraites, saute aux démonstrations et reviens plus tard.
+## 1. Cas concret d'abord
+
+Tu ouvres le dashboard d'une famille dans l'admin TribuZen. Le backend charge trois choses : la famille, ses membres, puis les derniers posts. Un collègue a écrit ça :
+
+```js
+// api/loadFamilyDashboard.js — AVANT
+async function loadFamilyDashboard(familyId) {
+  const family  = await fetchFamily(familyId);       // ~120 ms
+  const members = await fetchMembers(familyId);      // ~150 ms
+  const posts   = await fetchLatestPosts(familyId);  // ~180 ms
+  return { family, members, posts };
+}
+```
+
+En prod, ce handler met **~450 ms** à répondre. Le dashboard rame. Pourtant les trois requêtes sont indépendantes : `fetchMembers` n'a pas besoin du résultat de `fetchFamily`.
+
+**Ce qui se passe réellement :** chaque `await` **suspend** la fonction et rend la main à l'event loop *avant* de lancer la ligne suivante. Les trois `fetch` s'exécutent donc en file indienne — 120 + 150 + 180 ≈ 450 ms — alors qu'ils pourraient tourner en parallèle et finir en ~180 ms (le plus lent des trois).
+
+Pour corriger ça sans casser la gestion d'erreurs, il faut comprendre ce qu'`async`/`await` fait *sous le capot* : ce que retourne une fonction `async`, ce qu'`await` suspend exactement, et à quel moment le contrôle repart vers l'event loop. C'est l'objet de ce module.
 
 ---
 
-## Prérequis
+## 2. Théorie complète, concise
 
-- Module 04 — Microtâches vs Macrotâches (ordre d'exécution, vidage des files)
-- Module 05 — Promises : Implémentation Interne (PromiseReaction, thenable unwrapping, PromiseResolveThenableJob)
-- Connaissance de base des générateurs (`function*`, `yield`)
-- Familiarité avec l'Event Loop et ses phases (Modules 01-03)
+### 2.1 Une fonction `async` retourne toujours une Promise
 
----
-
-## Théorie
-
-> 🎯 **Analogie** : async/await, c'est comme mettre un marque-page dans un livre. Quand tu arrives à un passage qui demandé d'attendre (await), tu poses ton marque-page (suspension), tu fais autre chose, et quand le résultat arrive, tu reprends ta lecture exactement ou tu l'avais laissée.
-
-### 1. Une fonction `async` retourne toujours une Promise
-
-Toute fonction déclarée `async` encapsule sa valeur de retour dans une Promise. Si elle lance une exception, la Promise est rejetée. Si la valeur retournée est déjà une Promise, `async` crée une **nouvelle** Promise (contrairement à `Promise.resolve(p)` qui retourne `p` directement).
+Déclarer `async` sur une fonction change son type de retour : **elle renvoie systématiquement une Promise**, quel que soit ce que tu écris dans `return`.
 
 ```js
-async function getValueAsync() { return 42; }
-function getValuePromise() { return Promise.resolve(42); }
+async function f() { return 42; }
+f() instanceof Promise; // true — 42 a été enveloppé dans une Promise
 
-console.log(getValueAsync() instanceof Promise);  // true
-console.log(getValuePromise() instanceof Promise); // true
-
-const original = Promise.resolve(1);
-const result = (async () => original)();
-console.log(result === original); // false — nouvelle Promise
+async function g() { throw new Error('boom'); }
+g() instanceof Promise; // true — la Promise est rejetée, pas d'exception synchrone
 ```
 
-### 2. `await` : le sucre syntaxique déconstruit
-
-`await` n'est **pas** un alias pour `.then()`. C'est un point de suspension de l'exécution. Voici le desugaring conceptuel :
-
-```
-┌───────────────────────────────────────────────────┐
-│  async function example() {                       │
-│    console.log('A');                              │
-│    const val = await fetchData();                 │
-│    console.log('B', val);                         │
-│    return val + 1;                                │
-│  }                                                │
-└───────────────────────────────────────────────────┘
-                     ▼ V8 transforme en :
-┌───────────────────────────────────────────────────┐
-│  function example() {                             │
-│    return new Promise((resolve, reject) => {      │
-│      console.log('A');    // SYNCHRONE            │
-│      fetchData().then(                            │
-│        (val) => {         // reprise async        │
-│          console.log('B', val);                   │
-│          resolve(val + 1);                        │
-│        },                                         │
-│        (err) => reject(err)                       │
-│      );                                           │
-│    });                                            │
-│  }                                                │
-└───────────────────────────────────────────────────┘
-```
-
-**Règle fondamentale** : tout le code **avant** le premier `await` est synchrone. La suspension commence au moment du `await`.
-
-> **Pourquoi cette section ?** Comprendre la mécanique interne n'est pas nécessaire pour écrire du bon code async. Mais ça t'aide à comprendre *pourquoi* `await` coûte un tick, pourquoi les variables locales survivent au `await`, et pourquoi les stack traces fonctionnent. Si c'est trop abstrait pour l'instant, **saute à la section 5** — elle est beaucoup plus pratique.
-
-### 3. Comment V8 suspend et reprend une fonction async au niveau bytecode
-
-C'est le coeur du sujet « sous le capot ». Quand V8 rencontre une fonction `async`, il crée un objet interne `JSAsyncFunctionObject` :
-
-```
-┌────────────────────────────────────────────────────────┐
-│  JSAsyncFunctionObject                                 │
-├────────────────────────────────────────────────────────┤
-│  promise              : JSPromise (retournée à l'app.) │
-│  register_file        : FixedArray (registres sauvés)  │
-│  bytecode_offset      : int (où reprendre)             │
-│  context              : Context (scope chain)          │
-│  parameters_and_registers : FixedArray (variables loc.)│
-└────────────────────────────────────────────────────────┘
-```
-
-Le cycle suspension / reprise au moment d'un `await` :
-
-```
-  Phase 1 — SUSPENSION (au moment du await)
-  ==========================================
-  1. V8 exécute le bytecode normalement jusqu'au await
-  2. Sauvegarde de l'état dans JSAsyncFunctionObject :
-     - register_file : toutes les variables locales
-     - bytecode_offset : instruction APRÈS le await
-     - context : chaîne de scopes active
-  3. Appel du builtin %AsyncFunctionAwait :
-     - Si l'opérande est une Promise NATIVE :
-       → PerformPromiseThen directement (1 tick)
-     - Sinon (thenable non natif) :
-       → PromiseResolveThenableJob (2-3 ticks)
-  4. La fonction est retirée de la call stack
-
-  Phase 2 — REPRISE (quand la Promise se résout)
-  ================================================
-  1. La PromiseReaction interne est déclenchée (microtâche)
-  2. Restauration depuis JSAsyncFunctionObject :
-     - register_file → variables locales disponibles
-     - bytecode_offset → reprend après le await
-     - context → scopes restaurés
-  3. L'accumulator reçoit la valeur résolue
-  4. L'exécution du bytecode reprend normalement
-```
-
-Avant V8 7.2, `async`/`await` passait par des générateurs internes (`async function` → `function*`), ce qui coûtait un objet `GeneratorObject` + wrapper, 3 microticks par `await` et des stack traces incomplètes. L'implémentation native élimine ces surcoûts.
-
-### 4. L'optimisation `await` de V8 7.2+ : de 3 ticks à 1 tick
-
-> **En résumé** : les versions récentes de V8 (depuis 2019) rendent `await` beaucoup plus rapide. Avant, chaque `await` coûtait 3 micro-pauses. Maintenant, c'est 1 seule. Tu n'as rien à faire pour en profiter — c'est automatique.
-
-Avant V8 7.2, chaque `await` créait un `PromiseResolveThenableJob` même pour une Promise native. L'optimisation détecte ce cas et court-circuite le mécanisme :
-
-```
-  AVANT V8 7.2 :                  APRÈS V8 7.2 :
-  await nativePromise              await nativePromise
-      │                                │
-      ├── tick 1: créer Promise        ├── tick 1: PromiseReaction
-      │   wrapping                     │   directement attachée
-      ├── tick 2: PromiseResolve-      │   sur nativePromise
-      │   ThenableJob                  │
-      └── tick 3: résultat             └── résultat, reprise
-
-  Total : 3 ticks                  Total : 1 tick
-```
-
-**Condition** : l'optimisation ne s'applique qu'aux Promises natives V8. Un thenable custom (`{ then: cb => cb(42) }`) ou une Promise Bluebird retombe sur le chemin complet.
-
-### 5. `return await` vs `return` dans `try/catch`
-
-C'est l'un des gotchas les plus célèbres. Dans un bloc `try/catch`, `return` et `return await` se comportent différemment :
+Trois conséquences directes :
+1. `return valeur` ⇒ Promise **résolue** avec `valeur`.
+2. `throw err` ⇒ Promise **rejetée** avec `err` (jamais d'exception synchrone qui remonte la call stack).
+3. `return unePromise` ⇒ la Promise externe **adopte** l'état de la Promise interne (elle attend qu'elle se règle). C'est du thenable unwrapping — vu au module 05, ça coûte un tick de plus.
 
 ```js
-// BUG : le catch ne capture PAS le rejet
-async function withoutAwait() {
-  try {
-    return riskyOperation(); // retourne la Promise directement
-  } catch (err) {
-    return fallback(); // JAMAIS ATTEINT si riskyOperation rejette
-  }
+// Preuve que c'est une NOUVELLE Promise, pas celle qu'on retourne :
+const interne = Promise.resolve(1);
+const externe = (async () => interne)();
+externe === interne; // false
+```
+
+> À retenir : une fonction `async`, vue de l'extérieur, **c'est une fabrique de Promise**. Le mot-clé `await`, lui, n'existe qu'à *l'intérieur*.
+
+### 2.2 `await` n'est pas `.then()` — c'est un point de suspension
+
+On lit souvent « `await x` équivaut à `x.then(...)` ». C'est faux au sens strict. `.then()` **enregistre un callback et continue** l'exécution ligne suivante. `await` fait l'inverse : il **suspend la fonction entière** et ne reprend qu'à la résolution.
+
+Desugaring conceptuel :
+
+```js
+// Code source
+async function example() {
+  console.log('A');                 // synchrone
+  const val = await fetchData();     // ← point de suspension
+  console.log('B', val);            // reprise (dans une microtask)
+  return val + 1;
 }
 
-// CORRECT : le catch capture le rejet
-async function withAwait() {
-  try {
-    return await riskyOperation(); // attend la résolution
-  } catch (err) {
-    return fallback(); // atteint si riskyOperation rejette
-  }
+// Ce que le moteur produit (approximation)
+function example() {
+  return new Promise((resolve, reject) => {
+    console.log('A');               // exécuté SYNCHRONEMENT à l'appel
+    fetchData().then(
+      (val) => {                    // reprise = callback de résolution
+        console.log('B', val);
+        resolve(val + 1);
+      },
+      (err) => reject(err)          // un await sur un rejet ⇒ throw au point d'await
+    );
+  });
 }
 ```
 
-```
-  return riskyOperation() :              return await riskyOperation() :
-  1. riskyOperation() → Promise          1. riskyOperation() → Promise
-  2. return propage la Promise            2. await SUSPEND la fonction
-  3. try/catch est terminé               3. Si rejet → erreur LEVÉE
-  4. Si rejet plus tard → non capturé       dans le try → catch la capture
-```
+**Règle fondamentale :** tout le code **avant le premier `await`** s'exécute de façon synchrone, sur la call stack, au moment de l'appel. À partir du premier `await`, la fonction est démontée de la stack et le reste devient asynchrone.
 
-**Règle** : dans un `try/catch`, utilisez toujours `return await`. En dehors, `return await` est redondant (ESLint `no-return-await`).
+### 2.3 La state machine : comment le moteur suspend et reprend
 
-### 6. Rejets non gérés : `async` vs callbacks classiques
+Une fonction avec plusieurs `await` ne peut pas être un simple `.then()` linéaire : il faut pouvoir s'arrêter à *n'importe quel* `await`, sauvegarder l'état, puis reprendre pile au bon endroit. Le moteur transforme donc la fonction en **machine à états** (state machine).
 
-```
-  ┌──────────────────────────────────┬────────────────────┐
-  │  Contexte de l'erreur            │ Événement émis     │
-  ├──────────────────────────────────┼────────────────────┤
-  │  throw dans async function       │ unhandledRejection │
-  │  await d'une Promise rejetée     │ unhandledRejection │
-  │  TypeError avant le 1er await    │ unhandledRejection │
-  │  throw dans .then() callback     │ unhandledRejection │
-  │  throw dans setTimeout callback  │ uncaughtException  │
-  │  throw dans EventEmitter handler │ uncaughtException  │
-  └──────────────────────────────────┴────────────────────┘
-```
-
-V8 enveloppe le corps entier d'une `async function` dans un `try` implicite. Toute erreur synchrone ou asynchrone est convertie en rejet de Promise. Mais un `throw` dans un callback planifié par `setTimeout` échappe à cette enveloppe car il s'exécute dans un tour d'event loop différent.
+Imagine cette fonction :
 
 ```js
-async function dangerous() {
-  setTimeout(() => {
-    throw new Error('Hors du contrôle de async');
-    // → uncaughtException (PAS unhandledRejection)
-  }, 0);
-}
-dangerous(); // la Promise se résout normalement (undefined)
-```
-
-### 7. `for await...of` et les itérateurs asynchrones
-
-Un async iterable implémente `[Symbol.asyncIterator]()` retournant un objet avec `next()` qui renvoie une Promise de `{ value, done }`.
-
-```js
-const asyncIterable = {
-  [Symbol.asyncIterator]() {
-    let i = 0;
-    return {
-      next() {
-        if (i >= 3) return Promise.resolve({ done: true });
-        return new Promise(resolve =>
-          setTimeout(() => resolve({ value: i++, done: false }), 100)
-        );
-      }
-    };
-  }
-};
-
-async function consume() {
-  for await (const value of asyncIterable) {
-    console.log(value); // 0, 1, 2 (chaque 100ms)
-  }
+async function example() {
+  const a = await stepA();  // état 0 → 1
+  const b = await stepB(a); // état 1 → 2
+  return a + b;             // état 2 → fin
 }
 ```
 
-Comment l'event loop traite chaque itération :
+Le moteur la réécrit (conceptuellement) en un automate piloté par un numéro d'état, où chaque `await` est une **transition** :
 
-```
-  for await (const value of iterable) { body }
-  ═══════════════════════════════════════════
+```js
+function example() {
+  let state = 0;
+  let a, b;
+  const promise = /* Promise retournée à l'appelant */;
 
-  Desugaring :
-  const iter = iterable[Symbol.asyncIterator]();
-  while (true) {
-    const { value, done } = await iter.next(); // SUSPEND
-    if (done) break;
-    body;  // exécute le corps, puis boucle → nouveau await
+  function resume(input) {           // rappelée à chaque reprise
+    switch (state) {
+      case 0:
+        state = 1;
+        return stepA().then(resume); // suspend : rend la main à l'event loop
+      case 1:
+        a = input;                   // input = valeur résolue de stepA
+        state = 2;
+        return stepB(a).then(resume);
+      case 2:
+        b = input;                   // input = valeur résolue de stepB
+        resolvePromise(a + b);       // fin : on résout la Promise retournée
+    }
   }
-
-  Entre chaque await, le thread est libre pour d'autres tâches.
+  resume();                          // démarre l'état 0 (synchrone)
+  return promise;
+}
 ```
 
-Usage courant : lecture de streams Node.js (`fs.createReadStream`, `http.IncomingMessage`).
+Ce que le moteur sauvegarde à chaque suspension :
+- **le numéro d'état** (`bytecode_offset` dans V8) — où reprendre ;
+- **les variables locales** (`a`, `b`, registres) — pour qu'elles survivent au `await` ;
+- **la scope chain** — pour retrouver les variables des closures parentes.
 
-### Rappel rapide : les générateurs
+C'est pour ça que tes variables locales sont intactes après un `await` : elles ne vivent pas sur la call stack (qui a été dépilée), mais dans l'objet d'état de la coroutine (V8 : `JSAsyncFunctionObject`).
 
-Si tu n'as jamais utilisé les générateurs, voici l'essentiel en 30 secondes :
+### 2.4 Lien avec les générateurs : `async/await ≈ générateur + runner`
+
+Cette state machine, JavaScript savait déjà la faire **avant** `async/await` : ce sont les **générateurs**. Un générateur `function*` peut se suspendre à chaque `yield` et reprendre à `gen.next()`, en conservant ses variables locales — exactement le mécanisme décrit ci-dessus.
 
 ```js
 function* compteur() {
-  yield 1;     // pause ici, retourne 1
-  yield 2;     // pause ici, retourne 2
-  return 3;    // termine, retourne 3
+  const a = yield 1;   // suspend, rend 1 ; reprend avec la valeur passée à next()
+  const b = yield 2;
+  return a + b;
 }
-
-const gen = compteur();
-console.log(gen.next()); // { value: 1, done: false }
-console.log(gen.next()); // { value: 2, done: false }
-console.log(gen.next()); // { value: 3, done: true }
+const g = compteur();
+g.next();     // { value: 1, done: false }  — jusqu'au 1er yield
+g.next(10);   // { value: 2, done: false }  — a = 10, jusqu'au 2e yield
+g.next(20);   // { value: 30, done: true }  — b = 20, return
 ```
 
-Un générateur est une fonction qui peut **se mettre en pause** (`yield`) et **reprendre** là où elle s'était arrêtée (`gen.next()`). C'est exactement le même mécanisme qu'`async/await` : `await` est un `yield` déguisé, et le moteur reprend la fonction quand la Promise est résolue.
-
-> **Rappel** : tu n'as pas besoin de maîtriser les générateurs pour comprendre async/await. Retiens juste l'idée de pause/reprise.
-
-### 8. Async generators : combiner `yield` et `await`
-
-Un async generator produit des valeurs de manière asynchrone. Il a **deux** raisons de se suspendre :
-
-```
-  async function* gen() {
-    const data = await fetchSomething();  // suspension AWAIT
-    yield data.processed;                 // suspension YIELD
-  }
-
-  ┌─────────────────────┬─────────────────────────────┐
-  │  await (interne)     │ Attend une donnée async.    │
-  │                      │ Reprise automatique quand   │
-  │                      │ la Promise se résout.       │
-  ├─────────────────────┼─────────────────────────────┤
-  │  yield (externe)     │ Produit une valeur.         │
-  │                      │ Reprise quand le            │
-  │                      │ consommateur appelle next() │
-  └─────────────────────┴─────────────────────────────┘
-```
-
-V8 utilise un `JSAsyncGeneratorObject` (héritant de `JSAsyncFunctionObject`) avec une file de requêtes `.next()` en attente.
+`await` est un `yield` déguisé, et il manque juste une pièce : le **runner**, une petite boucle qui, à chaque `yield`, attend que la Promise se règle puis rappelle `next()` avec la valeur résolue.
 
 ```js
-async function* fetchPages(baseUrl, maxPages) {
-  for (let page = 1; page <= maxPages; page++) {
-    const res = await fetch(`${baseUrl}?page=${page}`);
-    const data = await res.json();
-    if (data.items.length === 0) return;
-    yield data.items; // suspendu jusqu'au prochain .next()
-  }
+// Un runner qui transforme un générateur en fonction "async"
+function runAsync(genFn) {
+  return function (...args) {
+    const gen = genFn(...args);
+    return new Promise((resolve, reject) => {
+      function step(method, input) {
+        let result;
+        try { result = gen[method](input); }  // next() ou throw()
+        catch (err) { return reject(err); }
+        const { value, done } = result;
+        if (done) return resolve(value);
+        // value est la Promise "yieldée" : on attend, puis on reprend
+        Promise.resolve(value).then(
+          (v) => step('next', v),             // reprise normale
+          (e) => step('throw', e),            // await sur un rejet ⇒ throw dans le gen
+        );
+      }
+      step('next');
+    });
+  };
 }
 
-// Consommation
-async function getAllItems() {
-  const all = [];
-  for await (const items of fetchPages('/api/data', 10)) {
-    all.push(...items);
-  }
-  return all;
-}
-```
-
-### 9. Cancellation avec `AbortController` et `AbortSignal`
-
-`AbortController` est le mécanisme standard pour annuler des opérations asynchrones.
-
-```js
-// Pattern de base : timeout
-async function fetchWithTimeout(url, ms) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), ms);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    return await res.json();
-  } catch (err) {
-    if (err.name === 'AbortError') throw new Error(`Timeout ${ms}ms`);
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// Raccourci moderne (Node.js 18+)
-await fetch(url, { signal: AbortSignal.timeout(5000) });
-```
-
-Rendre une fonction async annulable :
-
-```js
-async function processItems(items, signal) {
-  const results = [];
-  for (const item of items) {
-    signal?.throwIfAborted(); // lève DOMException si aborted
-    results.push(await processOne(item));
-  }
-  return results;
-}
-
-// Annuler via un seul abort()
-const controller = new AbortController();
-setTimeout(() => controller.abort(), 1000);
-try {
-  await processItems(largeList, controller.signal);
-} catch (err) {
-  if (err.name === 'AbortError') console.log('Annulé proprement');
-}
-```
-
-### 10. Stack traces asynchrones zero-cost (V8 7.3+)
-
-La pile est vide entre chaque `await` (la fonction a été dépilée). V8 résout ce problème en stockant la stack trace dans le `JSAsyncFunctionObject` à chaque suspension. La reconstruction ne se fait que si une erreur est effectivement levée (coût zéro en production).
-
-```js
-async function inner()  { throw new Error('Boom'); }
-async function middle() { await inner(); }
-async function outer()  { await middle(); }
-
-outer().catch(console.error);
-// Error: Boom
-//     at inner (file.js:1:37)
-//     at async middle (file.js:2:27)  ← "async" = reconstruction
-//     at async outer (file.js:3:27)
-```
-
-### 11. `await` dans une boucle : séquentiel vs parallèle
-
-```js
-// SÉQUENTIEL — Temps ≈ somme des temps
-async function fetchSeq(urls) {
-  const results = [];
-  for (const url of urls) {
-    results.push(await fetch(url).then(r => r.json()));
-  }
-  return results;
-}
-
-// PARALLÈLE — Temps ≈ max des temps
-async function fetchPar(urls) {
-  return Promise.all(urls.map(u => fetch(u).then(r => r.json())));
-}
-```
-
-```
-Séquentiel (3 x 200ms) :   Parallèle (3 x 200ms) :
-├── req1 ──────┤            ├── req1 ──────┤
-               ├── req2 ──────┤   ├── req2 ──────┤
-                              ├── req3 ──────┤   ├── req3 ──────┤
-Total: ~600ms                Total: ~200ms
-```
-
-### 12. Top-Level Await (ESM uniquement)
-
-Depuis ES2022, `await` est utilisable au niveau module (`.mjs` ou `"type": "module"`). Le module courant est bloqué jusqu'à résolution, mais les modules frères ne sont pas affectés.
-
-```js
-// config.mjs
-export const config = await fetch('/api/config').then(r => r.json());
-
-// app.mjs — attend que config.mjs soit prêt
-import { config } from './config.mjs';
-```
-
-### 13. Gestion d'erreurs : trois approches
-
-```js
-// 1. try/catch (recommandé)
-async function approach1() {
-  try {
-    const data = await riskyOp();
-    return await anotherOp(data);
-  } catch (err) { console.error(err); }
-}
-
-// 2. .catch() granulaire
-async function approach2() {
-  const data = await riskyOp().catch(() => defaultValue);
-  return await anotherOp(data);
-}
-
-// 3. Pattern Go-style
-async function to(p) {
-  try { return [null, await p]; }
-  catch (e) { return [e, null]; }
-}
-const [err, data] = await to(riskyOp());
-```
-
----
-
-## Démonstration
-
-### Demo 1 : La partie synchrone d'une fonction async
-
-```js
-// demo-01-sync-part.mjs
-console.log('1 - Avant appel');
-async function asyncFunc() {
-  console.log('2 - Début (SYNCHRONE)');
-  const x = await Promise.resolve('résolu');
-  console.log('4 - Après await :', x);
-  return x;
-}
-const p = asyncFunc();
-console.log('3 - Après appel (asyncFunc suspendue)');
-p.then(v => console.log('5 - Résolue :', v));
-
-// Sortie : 1, 2, 3, 4, 5
-```
-
-### Demo 2 : `return await` vs `return` dans try/catch
-
-```js
-// demo-02-return-await.mjs
-async function failing() {
-  return Promise.reject(new Error('Échec réseau'));
-}
-
-async function withoutAwait() {
-  try { return failing(); }
-  catch (err) { console.log('[sans await] Capturé :', err.message); return 'fb1'; }
-}
-
-async function withAwait() {
-  try { return await failing(); }
-  catch (err) { console.log('[avec await] Capturé :', err.message); return 'fb2'; }
-}
-
-(async () => {
-  try { await withoutAwait(); }
-  catch (e) { console.log('Non capturé en interne :', e.message); }
-
-  const r = await withAwait();
-  console.log('Résultat :', r);
-})();
-
-// Sortie :
-// Non capturé en interne : Échec réseau
-// [avec await] Capturé : Échec réseau
-// Résultat : fb2
-```
-
-### Demo 3 : Async generator avec for await...of
-
-```js
-// demo-03-async-generator.mjs
-async function* countdown(n, delayMs) {
-  for (let i = n; i > 0; i--) {
-    await new Promise(r => setTimeout(r, delayMs));
-    yield i;
-  }
-}
-
-(async () => {
-  const parts = [];
-  for await (const n of countdown(5, 150)) {
-    parts.push(n);
-  }
-  console.log('Countdown :', parts); // [5, 4, 3, 2, 1]
-
-  // Preuve que le thread est libre entre les yields
-  let ticks = 0;
-  const interval = setInterval(() => ticks++, 50);
-  for await (const n of countdown(3, 200)) { /* consume */ }
-  clearInterval(interval);
-  console.log('Ticks pendant le for-await :', ticks); // ~12
-})();
-```
-
-### Demo 4 : AbortController pour annuler des opérations
-
-```js
-// demo-04-abort-controller.mjs
-function delay(ms, value, signal) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve(value), ms);
-    signal?.addEventListener('abort', () => {
-      clearTimeout(timer);
-      reject(new DOMException('Annulé', 'AbortError'));
-    }, { once: true });
-  });
-}
-
-async function longTask(signal) {
-  const results = [];
-  for (let i = 1; i <= 10; i++) {
-    signal?.throwIfAborted();
-    console.log(`  Étape ${i}/10...`);
-    results.push(await delay(200, `r-${i}`, signal));
-  }
-  return results;
-}
-
-(async () => {
-  console.log('--- Avec annulation après 500ms ---');
-  const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), 500);
-  try { await longTask(ctrl.signal); }
-  catch (e) { console.log('  Résultat :', e.message); }
-})();
-
-// Sortie : Étape 1..2..3.. puis "Annulé"
-```
-
-### Demo 5 : Optimisation V8 — comptage de ticks
-
-```js
-// demo-05-tick-counting.mjs
-async function awaitNativePromise() {
-  return await Promise.resolve(42);
-}
-
-async function awaitThenable() {
-  return await { then: cb => cb(42) };
-}
-
-async function awaitNestedPromise() {
-  return await new Promise(r => r(Promise.resolve(42)));
-}
-
-(async () => {
-  console.log('--- Comptage de ticks par type ---\n');
-
-  // Chaîne de référence
-  const ticks = [];
-  const ref = Promise.resolve()
-    .then(() => ticks.push('t1'))
-    .then(() => ticks.push('t2'))
-    .then(() => ticks.push('t3'))
-    .then(() => ticks.push('t4'));
-
-  awaitNativePromise().then(() => ticks.push('native'));
-  awaitThenable().then(() => ticks.push('thenable'));
-  awaitNestedPromise().then(() => ticks.push('nested'));
-
-  await ref;
-  await new Promise(r => setTimeout(r, 50)); // laisser tout se résoudre
-
-  console.log('Ordre observé :', ticks.join(', '));
-  // Typique V8 moderne : t1, native, t2, t3, thenable, nested, t4
-  // → native résolu après 1 tick, thenable/nested après 2-3 ticks
-})();
-```
-
----
-
-### V8 vs SpiderMonkey (Firefox)
-
-> 📋 **Rappel** : `async`/`await` est défini par la spécification ECMA-262 (section 27.7). Le comportement observable est identique dans tous les moteurs conformes. Les différences ci-dessous concernent l'implémentation interne.
-
-**`async`/`await` est entièrement spécifié** — le mécanisme de suspension, de reprise et de résolution est identique dans V8, SpiderMonkey et JavaScriptCore. Le même code `async`/`await` produit le même résultat dans Chrome, Firefox et Safari.
-
-**Représentation interne de la suspension** :
-
-| Aspect | V8 (Chrome/Node.js) | SpiderMonkey (Firefox) |
-|--------|---------------------|------------------------|
-| Objet interne | `JSAsyncFunctionObject` | Représentation interne basée sur les générateurs (similaire conceptuellement) |
-| Sauvegarde d'état | `register_file`, `bytecode_offset`, `context` | Frame sauvegardée avec les variables locales et le point de reprise |
-| Optimisation native | Depuis V8 7.2 : implémentation native (plus de wrapper générateur) | SpiderMonkey utilise sa propre implémentation native optimisée |
-
-**Stack traces asynchrones** :
-
-- **V8** (depuis V8 7.3, Chrome 73+) : « zero-cost async stack traces ». La stack trace est reconstruite uniquement quand une erreur est levée, en remontant la chaîne de `JSAsyncFunctionObject`. Aucun coût en production tant qu'il n'y a pas d'erreur.
-- **SpiderMonkey** (Firefox) : implémente également des async stack traces, mais avec une approche différente. Firefox affiche les frames `async` dans les DevTools avec un indicateur visuel distinct. L'implémentation interne diffère mais le résultat pour le développeur est similaire.
-- Les deux moteurs affichent les mots `async` dans la stack trace pour distinguer les frames reconstruites des frames réelles.
-
-**Top-Level Await** :
-
-Le top-level `await` (ES2022) fonctionne de manière identique dans tous les moteurs qui supportent les ESM (ECMAScript Modules). Le module contenant le `await` est bloqué jusqu'à résolution, mais les modules frères dans le graphe de dépendances ne sont pas affectés. Ce comportement est identique dans Chrome, Firefox, Safari, Node.js et Deno.
-
-**Optimisation du nombre de ticks** :
-
-- **V8 7.2+** : `await` sur une Promise native ne coûte qu'un tick (raccourci `PerformPromiseThen`).
-- **SpiderMonkey** : peut avoir un nombre de ticks différent pour certains cas edge, mais le résultat final est toujours conforme à la spec. En pratique, les cas où le nombre de ticks diffère entre moteurs sont extrêmement rares et ne concernent que des micro-benchmarks, pas du code applicatif.
-
-**Conclusion** : écris ton code `async`/`await` sans te soucier du moteur. La syntaxe, la sémantique et le comportement d'erreur sont standardisés. Les seules différences portent sur les performances internes (nombre exact de ticks dans les cas limites) et la présentation des stack traces dans les DevTools.
-
----
-
-## Points clés
-
-1. **Une fonction `async` s'exécute de manière synchrone jusqu'au premier `await`** — tout le code avant le premier `await` est sur la call stack comme du code normal.
-
-2. **V8 sauvegarde l'état complet dans un `JSAsyncFunctionObject`** (registres, offset bytecode, variables locales, scope chain) au moment du `await`, puis libère la call stack.
-
-3. **Depuis V8 7.2, `await` sur une Promise native ne coûte qu'un tick** — V8 attache directement une `PromiseReaction` interne, sans `PromiseResolveThenableJob`. Pour les thenables non natifs, le coût reste de 2-3 ticks.
-
-4. **`return await` est obligatoire dans un `try/catch`** — sans `await`, le `catch` ne peut pas intercepter le rejet car la pile est déjà dépilée.
-
-5. **Les erreurs dans une `async function` produisent `unhandledRejection`**, jamais `uncaughtException` — sauf dans un callback planifié par `setTimeout` ou un `EventEmitter`.
-
-6. **`for await...of` suspend la fonction à chaque itération** — le thread est libre entre les éléments, idéal pour les streams et données paginées.
-
-7. **Un async generator combine `await` (attente interne) et `yield` (production externe)** — V8 maintient une file de requêtes `.next()` via `JSAsyncGeneratorObject`.
-
-8. **`AbortController`/`AbortSignal` est le pattern standard de cancellation** — un seul `abort()` annule toutes les opérations partageant le même signal.
-
-9. **Les async stack traces V8 sont « zero-cost »** — reconstituées uniquement en cas d'erreur en remontant la chaîne de `JSAsyncFunctionObject`.
-
-10. **Le Top-Level Await bloque le module courant** mais pas ses modules frères dans le graphe de dépendances.
-
----
-
----
-
-## Si tu es perdu
-
-Si ce module t'a semblé dense, retiens l'analogie du **marque-page** et ces 5 points essentiels :
-
-1. **`async` transforme ta fonction en « fonction à marque-page »** — elle retourne toujours une Promise, et elle peut se mettre en pause. Quand tu appelles une fonction `async`, tout le code avant le premier `await` s'exécute immédiatement (de façon synchrone).
-2. **`await` = poser le marque-page** — la fonction est suspendue, le moteur sauvegarde toutes les variables locales (comme si tu notais le numéro de page), et le thread est libre pour faire autre chose. Quand la Promise se résout, le moteur reprend exactement là où il s'était arrêté.
-3. **`return await` est obligatoire dans un `try/catch`** — sans le `await`, le `catch` ne peut pas intercepter une erreur asynchrone. C'est le piège le plus fréquent.
-4. **`await` dans une boucle = séquentiel** — si tu veux du parallèle, utilise `Promise.all()`. C'est la différence entre lire 10 livres un par un et les distribuer à 10 personnes.
-5. **Tu n'as pas besoin de connaître `JSAsyncFunctionObject`** — les structures internes V8 sont là pour expliquer le *pourquoi*. Ce qui compte au quotidien, c'est de savoir que `await` suspend, reprend, et coûte au minimum 1 micro-pause (tick).
-
-Reviens relire les sections techniques après avoir fait le lab — manipuler le code rend les concepts beaucoup plus concrets.
-
----
-
-## Pour aller plus loin
-
-- [V8 Blog — Faster async functions and promises](https://v8.dev/blog/fast-async) — l'article de référence de Maya Lekova et Benedikt Meurer
-- [V8 Blog — V8 release v7.2](https://v8.dev/blog/v8-release-72) — async stack traces et optimisation de `await`
-- [ECMA-262 — Async Function Definitions](https://tc39.es/ecma262/#sec-async-function-definitions)
-- [ECMA-262 — AsyncGeneratorFunction Objects](https://tc39.es/ecma262/#sec-asyncgeneratorfunction-objects)
-- [ECMA-262 — for-in/for-of (await variant)](https://tc39.es/ecma262/#sec-for-in-and-for-of-statements)
-- [MDN — AbortController](https://developer.mozilla.org/fr/docs/Web/API/AbortController)
-- [MDN — for await...of](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of)
-- [V8 Source — js-generator.h (JSAsyncFunctionObject)](https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/js-generator.h)
-- [Jake Archibald — "In The Loop" (JSConf.Asia)](https://www.youtube.com/watch?v=cCOL7MC4Pl0)
-
----
-
-## Défi
-
-### Défi 06 — Le timing fantôme
-
-Prédisez l'ordre exact de sortie (Node.js v18+, V8 optimisé) :
-
-```js
-async function alpha() {
-  console.log('A');
-  const val = await beta();
-  console.log('B', val);
-}
-
-async function beta() {
-  console.log('C');
-  return await gamma();
-}
-
-async function gamma() {
-  console.log('D');
-  return 42;
-}
-
-console.log('E');
-alpha();
-
-const p = new Promise(resolve => {
-  console.log('F');
-  resolve(Promise.resolve('G'));
+// Ce générateur + runner se comporte EXACTEMENT comme une fonction async
+const load = runAsync(function* (id) {
+  const family = yield fetchFamily(id);   // ≈ await fetchFamily(id)
+  const posts  = yield fetchPosts(id);    // ≈ await fetchPosts(id)
+  return { family, posts };
 });
-
-p.then(v => console.log(v));
-
-Promise.resolve()
-  .then(() => console.log('H'))
-  .then(() => console.log('I'))
-  .then(() => console.log('J'))
-  .then(() => console.log('K'));
-
-console.log('L');
 ```
 
-**Questions** :
-1. Quel est l'ordre exact des 12 lignes de sortie ?
-2. Pourquoi `G` n'apparaît-il pas au même tick que `H`, malgré le `resolve()` synchrone dans le constructeur ?
-3. Combien de ticks séparent `D` et `B` ? Pourquoi ?
-4. Si on remplace `return await gamma()` par `return gamma()` dans `beta`, est-ce que l'ordre change ?
+Historiquement, les transpileurs (Babel `regenerator`) implémentaient littéralement `async/await` de cette façon. Depuis V8 7.2, le moteur a une implémentation native (pas de vrai objet générateur intermédiaire), mais **le modèle mental reste exact** : `async function` = un générateur dont chaque `await` est un `yield`, piloté par un runner intégré au moteur.
 
-<details>
-<summary>Réponse</summary>
+### 2.5 Chaque `await` cède le contrôle à l'event loop (microtask)
 
-**Sortie : `E, A, C, D, F, L, H, B 42, I, G, J, K`**
+Point crucial pour le timing : quand la fonction se suspend sur un `await`, la reprise n'est **pas** synchrone même si la Promise est déjà résolue. La reprise est planifiée comme une **microtask** — elle passe par la file de microtâches vue aux modules 03-04.
 
-**Raisonnement pas à pas :**
+```js
+console.log('1');
+(async () => {
+  console.log('2');                 // synchrone (avant 1er await)
+  await Promise.resolve();          // cède le contrôle ICI
+  console.log('4');                 // microtask — après le code synchrone
+})();
+console.log('3');
+// Ordre : 1, 2, 3, 4
+```
 
-**Code synchrone** (call stack) :
-- `E` : premier console.log
-- `A` : dans `alpha()`, avant le `await beta()`
-- `C` : dans `beta()`, appelé par `alpha` avant suspension
-- `D` : dans `gamma()`, appelé par `beta` avant suspension
-- `F` : constructeur `new Promise(fn)` est synchrone
-- `L` : dernier console.log synchrone
+`3` s'affiche avant `4` **bien que la Promise soit déjà résolue** : l'`await` a rendu la main à l'event loop, qui finit d'abord le code synchrone (`3`), puis vide la file de microtâches (`4`). Autrement dit, `await` est un **point de cession** garanti : au minimum un tick, même sur une valeur immédiate.
 
-**État des files après le code synchrone :**
-- `gamma()` a retourné une Promise fulfilled(42). `beta` fait `await` dessus : crée une PromiseReaction pour reprendre `beta`.
-- `resolve(Promise.resolve('G'))` passe un thenable : crée un **PromiseResolveThenableJob**. La Promise `p` reste pending.
-- `Promise.resolve().then(->H)` : premier handler prêt.
+> Depuis V8 7.2, `await` sur une **Promise native** coûte 1 tick (avant : 3 ticks, à cause d'un wrapping thenable inutile). Sur un thenable non natif (`{ then() {} }`, une Promise Bluebird…), on reste à 2-3 ticks. Rien à faire pour en profiter : c'est automatique sur Node 12+ / navigateurs récents.
 
-File de microtâches : `[reprise-gamma->beta, PromiseResolveThenableJob(p), H]`
+### 2.6 Séquentiel vs parallèle : le piège de performance
 
-**Déroulement :**
+Comme chaque `await` suspend jusqu'à la résolution *avant* d'exécuter la ligne suivante, enchaîner des `await` sur des tâches **indépendantes** les sérialise inutilement.
 
-1. **reprise-gamma->beta** : `beta` reçoit 42 via `await`. `return await` a déjà unwrappé la valeur, donc `beta` se résout avec 42 (valeur primitive, pas de thenable unwrapping). Ajoute `reprise-beta->alpha` en file.
+```js
+// SÉQUENTIEL — temps ≈ SOMME des durées
+const a = await taskA();  // on attend A en entier...
+const b = await taskB();  // ...avant même de LANCER B
+const c = await taskC();
 
-2. **PromiseResolveThenableJob** : exécute `Promise.resolve('G').then(resolveP)`. Ajoute `resolveP('G')` en file.
+// PARALLÈLE — temps ≈ MAX des durées
+const [a, b, c] = await Promise.all([taskA(), taskB(), taskC()]);
+// Les 3 fetch sont LANCÉS immédiatement (appel synchrone),
+// on await UNE fois sur l'agrégat.
+```
 
-3. **H** : affiche `H`. Ajoute `I` en file.
+Le point clé : `taskA()` **démarre** dès qu'on l'appelle (l'appel synchrone lance la requête). Dans `Promise.all`, on appelle les trois *puis* on `await` l'ensemble — les trois horloges tournent en même temps. Dans la version séquentielle, on n'appelle `taskB` qu'après la résolution complète de `taskA`.
 
-4. **reprise-beta->alpha** : `alpha` reçoit val=42. Affiche **`B 42`**.
+Règle de décision :
+- Tâches **indépendantes** ⇒ `Promise.all` (ou `allSettled` si on tolère des échecs partiels).
+- Tâche **dépendante** du résultat de la précédente ⇒ `await` séquentiel (obligatoire, pas le choix).
 
-5. **resolveP('G')** : `p` est fulfilled('G'). Ajoute `afficher-G` en file.
+### 2.7 `await` dans une boucle : quand c'est un bug de perf
 
-6. **I** : affiche `I`. Ajoute `J`.
+Le cas le plus fréquent en revue de code : un `await` dans un `for`/`for...of` sur des éléments indépendants.
 
-7. **G** : affiche `G`.
+```js
+// LENT — N requêtes en série, temps ≈ N × durée_unitaire
+async function loadAll(ids) {
+  const results = [];
+  for (const id of ids) {
+    results.push(await fetchOne(id)); // await bloque chaque tour de boucle
+  }
+  return results;
+}
 
-8. **J** : affiche `J`. Ajoute `K`.
+// RAPIDE — N requêtes en parallèle, temps ≈ durée_unitaire
+async function loadAll(ids) {
+  return Promise.all(ids.map((id) => fetchOne(id)));
+}
+```
 
-9. **K** : affiche `K`.
+`ids.map(id => fetchOne(id))` lance les N requêtes **d'un coup** (map est synchrone), produit un tableau de N Promises, et `Promise.all` attend qu'elles finissent toutes. Pour 50 membres à 100 ms, on passe de ~5 s à ~100 ms.
 
-**Réponses aux questions :**
+**Nuance — quand `await` dans une boucle est légitime :**
+- séquençage **voulu** (chaque itération dépend de la précédente) ;
+- **backpressure** : ne pas ouvrir 10 000 connexions d'un coup (là on veut un parallélisme *borné*, ex. par lots de 10 avec un pool).
 
-1. `E, A, C, D, F, L, H, B 42, I, G, J, K`
+### 2.8 `try/catch` async et le piège `return await`
 
-2. `resolve(Promise.resolve('G'))` passe un thenable au resolve. Cela crée un `PromiseResolveThenableJob` (1 tick) qui appelle `.then(resolveP)` sur le thenable interne (1 tick supplémentaire). Deux ticks de retard total, c'est pourquoi `G` apparaît après `I`.
+Comme un `await` sur une Promise rejetée **relance l'erreur au point d'`await`**, `try/catch` fonctionne naturellement sur le code async :
 
-3. **2 ticks** séparent `D` et `B 42`. Tick 1 : reprise de `beta` après `await gamma()` — `beta` obtient 42 et se résout. Tick 2 : reprise d'`alpha` après `await beta()`. Le `return await` dans `beta` ajoute exactement un niveau de suspension-reprise.
+```js
+async function safe() {
+  try {
+    const data = await risky();   // si risky() rejette, throw ICI
+    return transform(data);
+  } catch (err) {
+    return fallback();            // attrapé, comme une erreur synchrone
+  }
+}
+```
 
-4. **Oui, l'ordre change.** Sans `await`, `beta` retourne directement la Promise de `gamma`. La Promise de `beta` est alors résolue avec un thenable (la Promise de gamma), ce qui déclenche un `PromiseResolveThenableJob` supplémentaire. Le nombre de ticks entre `D` et `B` augmente. Paradoxalement, `return await` est **plus rapide** ici car il unwrappe la valeur (42, primitif) avant de la retourner, évitant le coût du thenable unwrapping.
+**Le piège classique — `return` sans `await` dans un `try` :**
 
-</details>
+```js
+// BUG : le catch ne verra JAMAIS le rejet de risky()
+async function withoutAwait() {
+  try {
+    return risky();       // on retourne la Promise SANS l'attendre
+  } catch (err) {
+    return fallback();    // jamais atteint : le try est déjà terminé au rejet
+  }
+}
+
+// CORRECT
+async function withAwait() {
+  try {
+    return await risky(); // on attend : un rejet devient un throw dans le try
+  } catch (err) {
+    return fallback();    // atteint
+  }
+}
+```
+
+Sans `await`, la fonction retourne la Promise et **sort du `try`** immédiatement ; la pile est déjà dépilée quand le rejet survient — le `catch` ne peut plus l'intercepter. Règle : **`return await` obligatoire à l'intérieur d'un `try/catch`** ; en dehors d'un `try`, `return await` est redondant (règle ESLint `no-return-await`, assouplie récemment mais le principe tient).
+
+### 2.9 Erreurs non attrapées : ça devient un rejet de Promise
+
+Le moteur enveloppe le corps entier d'une `async function` dans un `try` implicite : toute erreur (synchrone avant le 1er `await`, ou rejet d'un `await`) devient un **rejet de la Promise retournée**. Si personne ne l'attrape ⇒ `unhandledRejection`.
+
+```js
+async function boom() {
+  throw new Error('x');   // ne remonte PAS la call stack : rejette la Promise
+}
+boom();                   // Promise rejetée sans .catch ⇒ unhandledRejection
+
+// Node 15+ : un unhandledRejection non géré TERMINE le process (comme uncaughtException)
+process.on('unhandledRejection', (reason) => {
+  console.error('rejet non géré :', reason);
+});
+```
+
+Exception importante : un `throw` dans un callback planifié par `setTimeout` **échappe** à l'enveloppe async (il s'exécute dans un autre tour d'event loop) et devient un `uncaughtException`, pas un `unhandledRejection`.
 
 ---
 
-<!-- parcours-recommande -->
+## 3. Worked examples
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 06 async await](../screencasts/screencast-06-async-await.md)
-2. **Lab** : [lab-06-async-patterns-comparison](../labs/lab-06-async-patterns-comparison/README)
-3. **Quiz** : [quiz 06 async await](../quizzes/quiz-06-async-await.html)
-:::
+### Exemple 1 — Refactorer le dashboard TribuZen (séquentiel → parallèle)
+
+Reprise du cas concret. On veut passer de ~450 ms à ~180 ms **sans** perdre la gestion d'erreurs.
+
+```js
+// ─── AVANT : ~450 ms (somme des 3 durées) ───────────────────────
+async function loadFamilyDashboard(familyId) {
+  const family  = await fetchFamily(familyId);      // ~120 ms
+  const members = await fetchMembers(familyId);     // ~150 ms — attend family pour rien
+  const posts   = await fetchLatestPosts(familyId); // ~180 ms — attend members pour rien
+  return { family, members, posts };
+}
+
+// ─── APRÈS : ~180 ms (max des 3 durées) ─────────────────────────
+async function loadFamilyDashboard(familyId) {
+  // Les 3 appels sont LANCÉS ici, synchroniquement, l'un après l'autre
+  // (mais sans await entre eux) → leurs horloges tournent en parallèle.
+  const [family, members, posts] = await Promise.all([
+    fetchFamily(familyId),
+    fetchMembers(familyId),
+    fetchLatestPosts(familyId),
+  ]);
+  return { family, members, posts };
+}
+```
+
+**Pourquoi c'est correct :**
+- Les trois `fetch...` sont **indépendants** (aucun n'a besoin du résultat d'un autre) ⇒ `Promise.all` est légitime.
+- On n'`await` qu'**une seule fois**, sur l'agrégat : un seul point de suspension au lieu de trois.
+- Le temps total tombe au max (~180 ms) au lieu de la somme (~450 ms).
+
+**Attention au comportement d'échec :** `Promise.all` **rejette dès le premier échec** (fail-fast). Si un widget peut manquer sans casser la page (ex. les posts), utilise `Promise.allSettled` :
+
+```js
+async function loadFamilyDashboard(familyId) {
+  const [family, members, posts] = await Promise.allSettled([
+    fetchFamily(familyId),
+    fetchMembers(familyId),
+    fetchLatestPosts(familyId),
+  ]);
+  return {
+    family:  family.status  === 'fulfilled' ? family.value  : null,
+    members: members.status === 'fulfilled' ? members.value : [],
+    posts:   posts.status   === 'fulfilled' ? posts.value   : [], // dégrade au lieu de casser
+  };
+}
+```
+
+### Exemple 2 — Un `await` dans une boucle qui tue la perf, et sa correction
+
+Endpoint TribuZen : pour chaque membre d'une famille, on récupère son dernier post.
+
+```js
+// ─── LENT : await dans la boucle ⇒ requêtes en série ────────────
+async function membersWithLastPost(familyId) {
+  const members = await fetchMembers(familyId); // 50 membres
+  const enriched = [];
+  for (const m of members) {
+    // Chaque tour SUSPEND jusqu'à la résolution avant de lancer le suivant.
+    // 50 × ~100 ms ≈ 5 000 ms.
+    const lastPost = await fetchLastPost(m.id);
+    enriched.push({ ...m, lastPost });
+  }
+  return enriched;
+}
+
+// ─── RAPIDE : map synchrone + Promise.all ⇒ requêtes parallèles ─
+async function membersWithLastPost(familyId) {
+  const members = await fetchMembers(familyId);
+  // map est SYNCHRONE : les 50 fetchLastPost partent d'un coup.
+  const enriched = await Promise.all(
+    members.map(async (m) => {
+      const lastPost = await fetchLastPost(m.id);
+      return { ...m, lastPost };
+    }),
+  );
+  return enriched;      // ~100 ms au lieu de ~5 000 ms
+}
+```
+
+**Le mécanisme, étape par étape :**
+1. `members.map(async m => ...)` **appelle** la callback async pour chaque membre. Chaque appel lance `fetchLastPost(m.id)` *immédiatement* et renvoie une Promise. `map` ne fait que collecter ces 50 Promises — il ne les attend pas.
+2. À la fin du `map`, les 50 requêtes sont déjà en vol.
+3. `await Promise.all([...])` suspend une seule fois jusqu'à ce que les 50 soient résolues.
+
+**Variante bornée** (si 50 connexions simultanées surchargent la base) — traiter par lots de 10 :
+
+```js
+async function inBatches(items, size, fn) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) {
+    const batch = items.slice(i, i + size);
+    out.push(...(await Promise.all(batch.map(fn)))); // 10 en //, puis lot suivant
+  }
+  return out;
+}
+```
+
+---
+
+## 4. Pièges & misconceptions
+
+### PIÈGE #1 — « `await x` équivaut à `x.then()` »
+
+```js
+// FAUX modèle mental
+console.log('1');
+await Promise.resolve();
+console.log('2'); // "comme un then, ça continue tout de suite" → NON
+```
+
+`.then()` **enregistre un callback et poursuit** la ligne suivante synchroniquement. `await` **suspend la fonction** et planifie la reprise en microtask. Le code après `await` ne s'exécute jamais dans le même tick — il y a toujours au moins un point de cession à l'event loop. Bon modèle : `await` = « je pose un marque-page, je rends la main, on me réveille au prochain tick ».
+
+### PIÈGE #2 — `await` séquentiel sur des tâches indépendantes
+
+```js
+// ❌ Sérialise sans raison — temps = somme
+const user  = await getUser(id);
+const stats = await getStats(id);   // n'a pas besoin de user !
+
+// ✅ Parallèle — temps = max
+const [user, stats] = await Promise.all([getUser(id), getStats(id)]);
+```
+
+**Discrimination :** garde le `await` séquentiel **uniquement** si la ligne 2 utilise le résultat de la ligne 1 (`getStats(user.teamId)`). Sinon, `Promise.all`.
+
+### PIÈGE #3 — `await` dans une boucle sur des éléments indépendants
+
+```js
+// ❌ N requêtes en série
+for (const id of ids) results.push(await fetchOne(id));
+
+// ✅ N requêtes en parallèle
+const results = await Promise.all(ids.map((id) => fetchOne(id)));
+```
+
+Le `for...of` + `await` est correct *syntaxiquement* mais désastreux en perf quand les itérations sont indépendantes. Réserve-le au séquençage voulu ou au parallélisme borné.
+
+### PIÈGE #4 — `return risky()` au lieu de `return await risky()` dans un `try`
+
+```js
+// ❌ le catch ne verra pas le rejet
+try { return risky(); }
+catch (e) { return fallback(); }   // jamais atteint
+
+// ✅
+try { return await risky(); }
+catch (e) { return fallback(); }
+```
+
+Sans `await`, la fonction rend la Promise et quitte le `try` avant que le rejet ne survienne : la pile est dépilée, le `catch` est hors jeu. **Dans un `try/catch`, toujours `return await`.**
+
+### PIÈGE #5 — croire qu'un `throw` async devient une exception synchrone
+
+```js
+async function f() { throw new Error('x'); }
+
+// ❌ ne marche PAS : f() ne "throw" pas, elle retourne une Promise rejetée
+try { f(); } catch (e) { /* jamais atteint */ }
+
+// ✅ il faut await (ou .catch)
+try { await f(); } catch (e) { /* attrapé */ }
+```
+
+Une `async function` ne lance **jamais** d'exception synchrone : elle rejette sa Promise. Sans `await`/`.catch`, c'est un `unhandledRejection` (et sous Node 15+, un crash du process).
+
+### PIÈGE #6 — `forEach` avec une callback async
+
+```js
+// ❌ forEach IGNORE les Promises retournées : rien n'est attendu
+ids.forEach(async (id) => { await save(id); });
+console.log('fini'); // ment : les save() ne sont pas terminés
+
+// ✅ for...of (séquentiel) ou map + Promise.all (parallèle)
+await Promise.all(ids.map((id) => save(id)));
+console.log('fini'); // vrai
+```
+
+`Array.prototype.forEach` n'attend pas les Promises que sa callback renvoie — il les jette. C'est un cas particulier du piège « async dans une boucle », mais silencieux.
+
+---
+
+## 5. Ancrage TribuZen
+
+Le chargement des vues agrégées de TribuZen est l'endroit où ces patterns comptent le plus.
+
+**`api/loadFamilyDashboard` (`src/server/api/family.ts`)** — c'est le cas concret du module. Le dashboard famille agrège famille + membres + posts. En version naïve (trois `await` en série), le handler répond en ~450 ms ; refactoré en `Promise.all`, en ~180 ms. C'est un gain visible en TTFB sur la page la plus consultée de l'admin.
+
+**`api/membersWithLastPost` (`src/server/api/members.ts`)** — l'enrichissement « dernier post par membre » est le piège `await`-dans-la-boucle typique : 50 membres × 100 ms = 5 s en série, ~100 ms avec `map` + `Promise.all`. Sur une grande famille, c'est la différence entre un timeout et une réponse instantanée.
+
+**Dégradation gracieuse** — sur le dashboard, les posts sont un widget « nice-to-have ». On passe `Promise.all` → `Promise.allSettled` pour que l'échec du service de posts n'empêche pas d'afficher la famille et ses membres.
+
+**Backpressure** — l'import massif de membres (CSV famille) ne doit pas ouvrir 5 000 requêtes d'un coup vers la base. On borne le parallélisme par lots de 10 (`inBatches`), sinon on sature le pool de connexions Postgres.
+
+Fichiers cibles dans `smaurier/tribuzen` :
+```
+tribuzen/src/server/
+  api/
+    family.ts      ← loadFamilyDashboard : Promise.all / allSettled
+    members.ts     ← membersWithLastPost : map + Promise.all
+  lib/
+    concurrency.ts ← inBatches : parallélisme borné
+```
+
+**Commit cible :**
+```
+perf(api): loadFamilyDashboard en Promise.all — 450ms vers 180ms
+perf(api): membersWithLastPost en parallèle borné (batch 10)
+```
+
+---
+
+## 6. Points clés
+
+1. Une fonction `async` retourne **toujours** une Promise : `return v` la résout, `throw e` la rejette (jamais d'exception synchrone).
+2. `await` n'est pas `.then()` : il **suspend** la fonction et la retire de la call stack ; le code avant le 1er `await` est synchrone, le reste asynchrone.
+3. Le moteur transforme la fonction en **state machine** : à chaque `await`, il sauvegarde le numéro d'état, les variables locales et la scope chain, puis reprend pile au bon endroit.
+4. `async/await` ≈ **générateur + runner** : `await` est un `yield` déguisé, et le moteur intègre le runner qui rappelle `next()` à la résolution de chaque Promise.
+5. Chaque `await` **cède le contrôle à l'event loop** : la reprise passe par une microtask (≥ 1 tick), même si la Promise est déjà résolue.
+6. `await` séquentiel sur des tâches **indépendantes** = temps somme ; `Promise.all` = temps max. Ne sérialiser que ce qui est vraiment dépendant.
+7. Un `await` dans une boucle sérialise les itérations : préférer `map` + `Promise.all` (ou un parallélisme borné pour la backpressure).
+8. Dans un `try/catch`, **`return await`** est obligatoire ; sinon le `catch` ne voit pas le rejet. `forEach` async ignore les Promises — ne jamais l'utiliser pour de l'async.
+
+---
+
+## 7. Seeds Anki
+
+```
+Que retourne toujours une fonction async, quoi qu'on y écrive ?|Une Promise. return v => Promise résolue avec v ; throw e => Promise rejetée avec e. Jamais d'exception synchrone.
+Pourquoi await n'est-il pas équivalent à .then() ?|.then() enregistre un callback et continue la ligne suivante ; await SUSPEND la fonction entière (la retire de la call stack) et planifie la reprise en microtask. Le code après await ne s'exécute jamais dans le même tick.
+Qu'est-ce que la state machine générée derrière une fonction async ?|Une réécriture de la fonction en automate piloté par un numéro d'état, où chaque await est une transition. À chaque suspension le moteur sauvegarde : numéro d'état (où reprendre), variables locales, scope chain — d'où la survie des locales après un await.
+En quoi async/await se ramène-t-il aux générateurs ?|async function ≈ générateur (function*) où chaque await est un yield, plus un runner intégré au moteur qui attend la résolution de la Promise yieldée puis rappelle next() avec la valeur (ou throw() sur rejet).
+Que se passe-t-il pour l'event loop à chaque await ?|await cède le contrôle : la reprise est planifiée comme une microtask (au minimum 1 tick), même si la Promise est déjà résolue. C'est un point de cession garanti à l'event loop.
+Différence de temps entre 3 await séquentiels et Promise.all sur 3 tâches indépendantes ?|Séquentiel = SOMME des durées (chaque await attend la fin avant de lancer le suivant). Promise.all = MAX des durées (les 3 sont lancées d'un coup, on await une seule fois l'agrégat).
+Pourquoi un await dans une boucle for...of peut-il tuer la perf ?|Chaque tour suspend jusqu'à la résolution avant de lancer le suivant => N requêtes en série (N × durée). Correction : items.map(fn) (appels synchrones parallèles) + Promise.all => ~1 × durée.
+Pourquoi return await est-il obligatoire dans un try/catch ?|Sans await, la fonction retourne la Promise et sort du try avant le rejet : la pile est dépilée, le catch ne peut plus l'intercepter. return await transforme le rejet en throw au point d'await, dans le try.
+Que devient un throw dans une async function, et un throw dans un setTimeout à l'intérieur ?|Le throw dans le corps async => rejet de la Promise retournée (unhandledRejection si non géré ; crash sous Node 15+). Le throw dans un callback setTimeout échappe à l'enveloppe async => uncaughtException.
+```
+
+---
+
+## Pont vers le lab
+
+> Lab associé : `01-js-runtime/labs/lab-06-async-patterns-comparison/README.md`. Mesurer avec `performance.now()` l'écart réel entre chargement séquentiel et `Promise.all`, reproduire le piège `await`-dans-la-boucle, puis borner le parallélisme.

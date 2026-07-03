@@ -1,1375 +1,514 @@
-# Module 13 — Scheduling & Concurrence
+---
+titre: Scheduling et concurrence — céder l'event loop, paralléliser pour de vrai
+cours: 01-js-runtime
+notions: [ceder l'event loop, chunking d'un gros travail, setTimeout setImmediate queueMicrotask, scheduler.postTask et MessageChannel, coopératif vs préemptif, concurrence vs parallélisme, Web Workers et worker_threads, SharedArrayBuffer et Atomics survol, quand offloader du CPU-bound, backpressure]
+outcomes: [découper un gros traitement en chunks qui cèdent l'event loop, choisir le bon mécanisme de yield selon le runtime, distinguer concurrence et parallélisme, offloader un travail CPU-bound vers un worker et mesurer que l'API reste réactive]
+prerequis: [12-performance-patterns]
+next: 14-projet-final
+libs: []
+tribuzen: l'export CSV et l'agrégation stats de l'API TribuZen ne doivent plus geler l'event loop — découpage coopératif ou offload worker_threads, réactivité mesurée
+last-reviewed: 2026-07
+---
 
-> **Objectif** : Comprendre et maîtriser les mécanismes de planification de tâches et de concurrence en JavaScript, depuis le modèle mono-thread avec I/O asynchrone jusqu'au vrai parallélisme avec Workers, SharedArrayBuffer et les API de scheduling modernes.
+# Scheduling et concurrence — céder l'event loop, paralléliser pour de vrai
 
-> **Difficulté** : ⭐⭐⭐ (Avancé)
+> **Outcomes — tu sauras FAIRE :** découper un gros traitement en chunks qui cèdent l'event loop, choisir le bon mécanisme de yield selon le runtime, distinguer concurrence et parallélisme, offloader un travail CPU-bound vers un worker et mesurer que l'API reste réactive.
+> **Difficulté :** :star::star::star:
+
+## 1. Cas concret d'abord
+
+L'API TribuZen (Node.js/Express) expose une route d'export : `GET /api/export/members.csv`. Une famille avec beaucoup de membres déclenche ce handler :
+
+```ts
+// routes/export.ts — AVANT (bloque l'event loop)
+app.get('/api/export/members.csv', async (req, res) => {
+  const members = await db.members.findAll(); // 80 000 lignes
+  let csv = 'id,name,email,role,joinedAt\n';
+
+  // Boucle CPU-bound de 80 000 itérations, synchrone, d'un seul tenant
+  for (const m of members) {
+    csv += `${m.id},${escapeCsv(m.name)},${m.email},${m.role},${formatDate(m.joinedAt)}\n`;
+  }
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.send(csv);
+});
+```
+
+**Le symptôme observé en prod :** pendant que ce handler tourne, **toutes les autres requêtes de l'API attendent**. Un `GET /api/health` qui répond normalement en 2 ms met soudain 900 ms. L'event loop est monopolisé par la boucle de concaténation : aucun autre callback (I/O terminé, timer, nouvelle requête) ne peut être traité tant que la boucle n'est pas finie.
+
+**Trois problèmes immédiats :**
+1. La boucle de 80 000 itérations est **une seule macrotâche** : elle ne rend jamais la main à l'event loop avant la fin.
+2. `csv += ...` est un anti-pattern perf (vu au module 12) — mais même corrigé, le vrai problème reste : **le travail est monolithique**.
+3. Le calcul est **CPU-bound** : `await db.members.findAll()` cède bien la main (c'est de l'I/O), mais la boucle qui suit, non. `async` ne rend pas magiquement une boucle synchrone non-bloquante.
+
+Ce module te donne les deux leviers pour régler ça : **céder l'event loop en découpant le travail** (concurrence coopérative), et **offloader le CPU vers un autre thread** (parallélisme réel). Et surtout : savoir lequel choisir.
 
 ---
 
-## Prérequis
+## 2. Théorie complète, concise
 
-- Module 07 — Event Loop (boucle d'événements, macrotâches, microtâches, phases Node.js)
-- Module 08 — Async Internals (Promises, async/await, files d'attente)
-- Module 12 — Performance Patterns (profiling, anti-patterns)
-- Aucune connaissance préalable des threads nécessaire (introduit dans ce module)
+### 2.1 Concurrence n'est pas parallélisme
+
+C'est la distinction fondatrice du module. Elle est source de confusion permanente.
+
+| | Concurrence | Parallélisme |
+|---|---|---|
+| Définition | Plusieurs tâches **en cours** entrelacées | Plusieurs tâches qui **s'exécutent littéralement en même temps** |
+| Nombre de threads | 1 (event loop) | N (workers/threads, N cœurs CPU) |
+| Mécanisme JS | event loop + yield coopératif | Web Workers, `worker_threads` |
+| Ce que ça règle | garder l'app **réactive** pendant du travail entrelacé | accélérer un calcul **CPU-bound** |
+| Ne règle PAS | un calcul CPU pur reste aussi long au total | rien pour de l'I/O (déjà async) |
+
+> Rob Pike : *« Concurrency is about dealing with lots of things at once. Parallelism is about doing lots of things at once. »* La concurrence est une manière de **structurer** le code ; le parallélisme est une manière de l'**exécuter**.
+
+Conséquence pratique : découper en chunks (2.3) rend l'API **réactive** mais ne réduit **pas** le temps total du calcul — au contraire, il l'allonge un peu (coût des yields). Offloader vers un worker (2.6) libère l'event loop **et** peut réduire le temps total si on répartit sur plusieurs cœurs. Ce sont deux outils pour deux problèmes différents.
+
+### 2.2 Coopératif vs préemptif
+
+```
+Préemptif (OS, threads) : l'ordonnanceur INTERROMPT une tâche
+  |-- tâche A --|          |-- tâche A (suite) --|
+                |-- B --|                         |-- B --|
+  (le scheduler force le switch, la tâche ne décide rien)
+
+Coopératif (event loop JS) : la tâche CÈDE volontairement
+  |-- tâche A complète, jusqu'au bout --||-- tâche B complète --|
+  (rien ne peut interrompre A ; A doit finir ou yield elle-même)
+```
+
+L'event loop JavaScript est **coopératif et non préemptif**. Une fonction synchrone qui tourne garde le thread jusqu'à ce qu'elle `return` ou qu'elle `await`/yield. **Personne ne peut l'interrompre.** C'est pourquoi une boucle CPU longue gèle tout : elle ne coopère jamais. La solution coopérative consiste à **insérer des points de yield** dans le travail.
+
+### 2.3 Chunking : découper un gros travail
+
+L'idée : traiter le travail par lots (chunks), et **rendre la main à l'event loop entre chaque lot** pour qu'il puisse traiter les callbacks en attente (autres requêtes, I/O).
+
+```ts
+// Yield vers l'event loop, puis reprise
+async function processInChunks<T>(
+  items: T[],
+  handle: (item: T) => void,
+  yieldFn: () => Promise<void>,
+  chunkSize = 500,
+): Promise<void> {
+  for (let i = 0; i < items.length; i++) {
+    handle(items[i]);
+    // Tous les chunkSize éléments : on cède la main
+    if (i % chunkSize === 0) {
+      await yieldFn(); // <-- l'event loop respire ici
+    }
+  }
+}
+```
+
+Le point clé est `await yieldFn()` : entre deux chunks, l'event loop reprend le contrôle, vide sa file de callbacks (répond au `/health`, traite l'I/O prêt), puis revient au chunk suivant. Reste à choisir **quel** `yieldFn`.
+
+### 2.4 Les mécanismes de yield (Node)
+
+En Node.js, pas de `requestAnimationFrame` ni `requestIdleCallback` (ce sont des API navigateur). On dispose de :
+
+```ts
+// setImmediate : yield PROPRE, exécuté en phase "check" de l'event loop.
+// C'est LE bon choix pour céder entre deux chunks de travail en Node.
+const yieldImmediate = () => new Promise<void>((r) => setImmediate(r));
+
+// setTimeout(0) : yield en phase "timers". Fonctionne, mais le timer
+// impose un délai plancher (souvent ~1 ms) — léger overhead cumulé.
+const yieldTimeout = () => new Promise<void>((r) => setTimeout(r, 0));
+
+// queueMicrotask : ATTENTION — ce N'EST PAS un yield à l'event loop.
+// La microtâche s'exécute avant que l'event loop reprenne les I/O.
+// Une boucle qui ne fait que queueMicrotask bloque toujours tout.
+queueMicrotask(() => doSomething());
+
+// process.nextTick : encore plus prioritaire que queueMicrotask.
+// NE cède PAS non plus à l'event loop. Piège classique.
+process.nextTick(() => doSomething());
+```
+
+**Règle Node :** pour découper du travail CPU-bound et rester réactif, on cède avec `setImmediate`. Les microtâches (`queueMicrotask`, `process.nextTick`, `Promise.resolve().then`) **ne cèdent pas** : elles sont drainées entièrement avant que l'event loop ne traite la moindre I/O. Les utiliser pour chunker ne débloque rien.
+
+### 2.5 Les mécanismes de yield (navigateur)
+
+Dans le navigateur, l'enjeu est de ne pas geler l'UI (une tâche > 50 ms est une *Long Task* qui bloque clic, scroll, saisie).
+
+```ts
+// setTimeout(0) : cède, mais clampé à ~4 ms après imbrication et sans priorité.
+const yieldTimeout = () => new Promise<void>((r) => setTimeout(r, 0));
+
+// MessageChannel : yield macrotâche SANS le clamp de setTimeout —
+// technique historique de React (scheduler) pour céder vite et souvent.
+function yieldViaChannel(): Promise<void> {
+  return new Promise((resolve) => {
+    const { port1, port2 } = new MessageChannel();
+    port1.onmessage = () => resolve();
+    port2.postMessage(null);
+  });
+}
+
+// scheduler.postTask (API Scheduler, Chrome/Edge) : yield AVEC priorité explicite.
+// 'user-blocking' > 'user-visible' > 'background'.
+scheduler.postTask(() => renderChunk(), { priority: 'user-visible' });
+
+// scheduler.yield() (Chrome récent) : cède ET reprend en priorité —
+// la continuation passe devant les nouvelles tâches de même priorité.
+for (let i = 0; i < items.length; i++) {
+  handle(items[i]);
+  if (i % 500 === 0) await scheduler.yield();
+}
+```
+
+Ordre de préférence navigateur moderne : `scheduler.yield()` si dispo → `scheduler.postTask` pour la priorité → `MessageChannel` en fallback universel → `setTimeout(0)` en dernier recours. `queueMicrotask` ne cède pas non plus côté navigateur (même raison qu'en Node).
+
+### 2.6 Parallélisme réel : Web Workers / worker_threads
+
+Le chunking garde l'app réactive mais **n'accélère pas** un calcul lourd. Pour ça, il faut un **autre thread** : chaque worker a son propre event loop, sa propre heap, son propre isolate V8.
+
+```ts
+// ─── Node — worker_threads ──────────────────────────────
+// main.ts
+import { Worker } from 'node:worker_threads';
+
+function runInWorker<T>(file: URL, data: unknown): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(file, { workerData: data });
+    worker.once('message', (msg) => { resolve(msg); worker.terminate(); });
+    worker.once('error', reject);
+  });
+}
+
+// export-worker.ts
+import { parentPort, workerData } from 'node:worker_threads';
+const csv = buildCsv(workerData.members); // CPU-bound, sur CE thread
+parentPort!.postMessage(csv);
+```
+
+```ts
+// ─── Navigateur — Web Worker ────────────────────────────
+// main.ts
+const worker = new Worker(new URL('./stats.worker.ts', import.meta.url), { type: 'module' });
+worker.postMessage({ rows });
+worker.onmessage = (e) => renderStats(e.data);
+
+// stats.worker.ts
+self.onmessage = (e) => {
+  const result = aggregate(e.data.rows); // le thread principal reste libre
+  self.postMessage(result);
+};
+```
+
+Points communs : **isolation mémoire** (chaque worker a sa heap), **communication par messages** (`postMessage` / `onmessage`), **structured clone** des données à la frontière (copie profonde par défaut). L'API diffère (`worker_threads` en Node, `Worker` global au navigateur) mais le modèle mental est identique.
+
+### 2.7 Coût de la frontière et objets transférables
+
+`postMessage` fait par défaut un **structured clone** : copie profonde O(n) des données. Pour de gros buffers, ce coût peut annuler le gain du parallélisme.
+
+```ts
+// Transfert au lieu de copie : O(1), le buffer change de propriétaire
+const buf = new ArrayBuffer(50 * 1024 * 1024); // 50 Mo
+worker.postMessage({ data: buf }, [buf]); // 2e arg = liste des transférables
+// buf.byteLength === 0 ici : le buffer est "neutered", plus utilisable côté émetteur
+```
+
+Transférables : `ArrayBuffer`, `MessagePort`, `ReadableStream`… Règle : offloader vaut le coup quand **le calcul >> le coût de transfert des données**. Envoyer 50 Mo pour un calcul de 3 ms est une perte nette.
+
+### 2.8 SharedArrayBuffer et Atomics (survol)
+
+Pour partager la mémoire **sans copie ni transfert**, `SharedArrayBuffer` expose la même zone à plusieurs threads. Mais qui dit mémoire partagée dit **race conditions** : deux threads qui écrivent au même endroit sans coordination corrompent la donnée. `Atomics` fournit les opérations indivisibles (`Atomics.add`, `Atomics.load`, `Atomics.store`, `Atomics.wait`/`notify`).
+
+```ts
+const sab = new SharedArrayBuffer(4);
+const counter = new Int32Array(sab);
+Atomics.add(counter, 0, 1); // incrément thread-safe
+```
+
+C'est un outil **avancé et rare**. Dans 99 % des cas, le message passing (copie/transfert) suffit et est plus sûr. Contrainte navigateur : `SharedArrayBuffer` exige les en-têtes d'isolation cross-origin (`COOP`/`COEP`) depuis Spectre. À connaître, pas à dégainer par défaut.
+
+### 2.9 Quand offloader du CPU-bound
+
+Arbre de décision :
+
+```
+Le travail est-il de l'I/O (réseau, disque, DB) ?
+  OUI -> déjà non-bloquant via async/await. Ne rien offloader.
+  NON (CPU-bound) :
+    Le travail bloque-t-il > ~50-100  ms ?
+      NON -> laisser sur le thread principal, inutile de complexifier.
+      OUI :
+        A-t-on juste besoin de rester RÉACTIF (temps total ok) ?
+          OUI -> chunking + yield (setImmediate / scheduler.yield). Simple.
+        Faut-il aussi RÉDUIRE le temps total (data lourde, plusieurs cœurs) ?
+          OUI -> offload worker (worker_threads / Web Worker), voire pool.
+```
+
+Ne pas offloader un `await fetch()` : c'est déjà libre. Ne pas monter un worker pour 5 ms de calcul : la frontière coûte plus cher que le gain.
+
+### 2.10 Backpressure
+
+Quand un producteur va plus vite que le consommateur (worker, flux, socket), la file d'attente enfle → mémoire qui explose. La **backpressure** est le signal « ralentis ». Les streams Node l'implémentent : `writable.write()` retourne `false` quand le buffer est plein ; on attend l'événement `'drain'` avant de reprendre.
+
+```ts
+// Respecter la backpressure d'un stream (ex: écrire le CSV en flux)
+async function writeRows(res: Writable, rows: string[]) {
+  for (const row of rows) {
+    if (!res.write(row)) {
+      // Buffer plein : attendre le drain avant de continuer
+      await new Promise((r) => res.once('drain', r));
+    }
+  }
+  res.end();
+}
+```
+
+Avec un pool de workers, la backpressure = **borner la file** de jobs en attente : si tous les workers sont occupés et que la file dépasse un seuil, on refuse/temporise les nouveaux jobs plutôt que d'accumuler.
 
 ---
 
-## Théorie
+## 3. Worked examples
 
-> **Analogie pour débuter** : Le scheduling, c'est comme un chef d'orchestre. Il ne joue d'aucun instrument lui-même (single-threaded), mais il coordonne tous les musiciens (tâches) pour que la symphonie sonne bien.
+### Exemple 1 — Débloquer l'export CSV par chunking (TribuZen, Node)
 
-### 1. Le modèle de concurrence JavaScript
+Reprise du cas concret. On garde le calcul sur le thread principal mais on **cède l'event loop** entre les chunks pour que l'API reste réactive.
 
-JavaScript utilise un modèle **mono-thread avec I/O asynchrone non-bloquant**.
-Cela signifie qu'un seul contexte d'exécution JS tourne à la fois, mais les
-opérations d'I/O (réseau, disque, timers) sont déléguées au système d'exploitation
-et ne bloquent pas le thread principal.
+```ts
+// routes/export.ts — APRÈS (chunking coopératif)
+import type { Response } from 'express';
 
-```
-  Modèle de concurrence JS
-  =========================
+// Yield propre en Node : phase "check" de l'event loop
+const yieldToLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-  Thread principal JS
-  +--------------------------------------------------+
-  |  Call Stack    |  Microtask Queue  | Macrotask Q  |
-  |  +---------+   |  [p1] [p2] [p3]   | [t1] [t2]   |
-  |  | func()  |   |                   |              |
-  |  +---------+   |                   |              |
-  |  | main()  |   |                   |              |
-  |  +---------+   |                   |              |
-  +--------------------------------------------------+
-          |
-          | délègue I/O
-          v
-  +--------------------------------------------------+
-  |  Libuv / OS threads (pool de threads)            |
-  |  [DNS] [File I/O] [Crypto] [Compression]         |
-  +--------------------------------------------------+
-          |
-          | callbacks
-          v
-  Retour dans la Macrotask Queue
-```
+async function buildCsvChunked(members: Member[]): Promise<string> {
+  const lines: string[] = ['id,name,email,role,joinedAt']; // pas de += : Array.join (module 12)
+  const CHUNK = 2000;
 
-**Conséquence fondamentale** : toute opération CPU-intensive exécutée sur le
-thread principal bloque l'ensemble de l'application (UI freeze dans le
-navigateur, latence des requêtes dans Node.js).
+  for (let i = 0; i < members.length; i++) {
+    const m = members[i];
+    lines.push(`${m.id},${escapeCsv(m.name)},${m.email},${m.role},${formatDate(m.joinedAt)}`);
 
-### Rappel : qu'est-ce qu'un thread ?
-
-Si tu n'as jamais travaillé avec des threads, voici l'essentiel :
-
-> **Analogie** : imagine un restaurant avec **un seul cuisinier** (= 1 thread). Il doit tout faire en séquence : couper les légumes, faire cuire la viande, préparer la sauce. C'est JavaScript : mono-thread.
->
-> Ajouter des **cuisiniers supplémentaires** (= threads) permet de cuisiner en parallèle. Mais il faut se coordonner : deux cuisiniers ne peuvent pas utiliser le **même couteau** en même temps. Si l'un lit un ingrédient pendant que l'autre le modifie, on obtient un résultat incohérent — c'est une **race condition**.
-
-**Vocabulaire clé :**
-
-| Terme | Définition simple |
-|-------|------------------|
-| **Thread** | Un fil d'exécution indépendant. Chaque thread exécute du code en parallèle des autres. |
-| **Race condition** | Quand deux threads accèdent à la même donnée en même temps et que le résultat dépend de l'ordre d'exécution (imprévisible). |
-| **Mutex / Lock** | Un mécanisme pour empêcher deux threads d'accéder à la même ressource en même temps (comme un verrou sur la porte de la cuisine). |
-| **Mémoire partagée** | Une zone mémoire accessible par plusieurs threads. C'est ce que `SharedArrayBuffer` permet en JavaScript. |
-
-JavaScript contourne ces problèmes en étant **mono-thread par défaut**. Les Web Workers et Worker Threads ajoutent du parallélisme, mais chaque Worker a **sa propre mémoire isolée** — sauf si tu utilises explicitement `SharedArrayBuffer`.
-
-> **Pas de panique** : dans 99% des cas en JavaScript, tu n'auras jamais de race condition parce que le modèle par défaut (message passing via `postMessage`) est sûr. `SharedArrayBuffer` + `Atomics` sont des outils avancés pour les cas rares ou la copie de données est trop coûteuse.
-
-### 2. Web Workers / Worker Threads : vrai parallélisme
-
-Les Workers fournissent du **vrai parallélisme** en créant des threads séparés,
-chacun avec son propre contexte JavaScript (heap, call stack, event loop).
-
-```
-  Architecture multi-workers
-  ===========================
-
-  +-------------------+     +-------------------+
-  |  Thread principal |     |  Worker Thread 1  |
-  |  +--------------+ |     |  +--------------+ |
-  |  | Event Loop   | |     |  | Event Loop   | |
-  |  | Call Stack   | |     |  | Call Stack   | |
-  |  | Heap         | |     |  | Heap         | |
-  |  +--------------+ |     |  +--------------+ |
-  +--------+----------+     +--------+----------+
-           |                          |
-           |    postMessage(data)     |
-           +------------------------->|
-           |                          |
-           |<-------------------------+
-           |    postMessage(result)   |
-           |                          |
-  +--------+----------+     +--------+----------+
-  |  Worker Thread 2  |     |  Worker Thread 3  |
-  |  +--------------+ |     |  +--------------+ |
-  |  | Event Loop   | |     |  | Event Loop   | |
-  |  | Call Stack   | |     |  | Call Stack   | |
-  |  | Heap         | |     |  | Heap         | |
-  |  +--------------+ |     |  +--------------+ |
-  +-------------------+     +-------------------+
-```
-
-**Navigateur — Web Workers :**
-
-```typescript
-// main.js
-const worker = new Worker('worker.js');
-
-worker.postMessage({ task: 'fibonacci', n: 45 });
-
-worker.onmessage = (e) => {
-  console.log('Résultat:', e.data.result);
-  console.log('Durée:', e.data.duration, 'ms');
-};
-
-worker.onerror = (e) => {
-  console.error('Erreur Worker:', e.message);
-};
-```
-
-```typescript
-// worker.js
-function fibonacci(n: number): number {
-  if (n <= 1) return n;
-  return fibonacci(n - 1) + fibonacci(n - 2);
+    // Toutes les 2000 lignes : rendre la main à l'event loop.
+    // Pendant ce yield, /health et les autres requêtes sont servies.
+    if (i % CHUNK === 0) {
+      await yieldToLoop();
+    }
+  }
+  return lines.join('\n');
 }
 
-self.onmessage = (e: MessageEvent) => {
-  const start = performance.now();
-  const result = fibonacci(e.data.n);
-  const duration = performance.now() - start;
-  self.postMessage({ result, duration });
-};
-```
-
-**Node.js — Worker Threads :**
-
-```typescript
-// main.mjs
-import { Worker } from 'node:worker_threads';
-
-const worker = new Worker(new URL('./worker.mjs', import.meta.url));
-
-worker.postMessage({ task: 'fibonacci', n: 45 });
-
-worker.on('message', (msg) => {
-  console.log('Résultat:', msg.result);
-  console.log('Durée:', msg.duration, 'ms');
-});
-
-worker.on('error', (err) => {
-  console.error('Erreur Worker:', err);
+app.get('/api/export/members.csv', async (req, res: Response) => {
+  const members = await db.members.findAll(); // I/O : déjà non-bloquant
+  const csv = await buildCsvChunked(members); // CPU : découpé, cède la main
+  res.setHeader('Content-Type', 'text/csv');
+  res.send(csv);
 });
 ```
 
-```typescript
-// worker.mjs
-import { parentPort } from 'node:worker_threads';
+**Ce que ça change, mesuré :**
+- Avant : `/health` répond en ~900 ms pendant l'export (event loop gelé).
+- Après : `/health` répond en ~3 ms même pendant l'export (l'event loop respire tous les 2000 items).
+- Temps total de l'export : **légèrement plus long** (~+5 % à cause des yields) — c'est le prix de la réactivité. La concurrence n'accélère pas, elle entrelace.
 
-function fibonacci(n: number): number {
-  if (n <= 1) return n;
-  return fibonacci(n - 1) + fibonacci(n - 2);
-}
+**Comment vérifier la réactivité** (principe, à faire tourner en session) :
 
-parentPort!.on('message', (msg: { n: number }) => {
-  const start = performance.now();
-  const result = fibonacci(msg.n);
-  const duration = performance.now() - start;
-  parentPort!.postMessage({ result, duration });
-});
+```ts
+// Sonde de latence event loop : un timer 50 ms; l'écart réel mesure le blocage
+let last = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  const lag = now - last - 50; // > quelques ms = event loop bloqué
+  console.log(`event loop lag: ${lag.toFixed(1)} ms`);
+  last = now;
+}, 50);
 ```
 
-### 3. SharedArrayBuffer et Atomics
+Sur la version bloquante, le lag grimpe à plusieurs centaines de ms. Sur la version chunkée, il reste bas.
 
-Par défaut, `postMessage` effectue un **structured clone** des données (copie
-profonde). Pour les gros volumes de données, cette copie est coûteuse.
+### Exemple 2 — Offloader l'agrégation stats vers un worker (TribuZen, Node)
 
-`SharedArrayBuffer` permet de partager de la mémoire entre threads.
+Le dashboard admin calcule des stats d'engagement sur tout l'historique d'une famille : agrégation lourde, purement CPU, qu'on veut **sortir** de l'event loop de l'API (et potentiellement accélérer). Ici le chunking ne suffit pas : on veut que l'API n'en porte *rien*. On offloade.
 
-> **Pré-requis navigateur** : depuis janvier 2018 (attaques Spectre/Meltdown),
-> `SharedArrayBuffer` n'est disponible dans les navigateurs que si la page est
-> servie avec les en-têtes d'**isolation cross-origin** :
-> ```
-> Cross-Origin-Opener-Policy: same-origin
-> Cross-Origin-Embedder-Policy: require-corp
-> ```
-> Sans ces en-têtes, `new SharedArrayBuffer(...)` lève une `TypeError`.
-> En Node.js, `SharedArrayBuffer` est toujours disponible sans restriction.
-
-```
-  Mémoire partagée
-  =================
-
-  Thread principal          SharedArrayBuffer          Worker Thread
-  +----------------+    +---------------------+    +----------------+
-  |                |    | Byte 0  | Byte 1    |    |                |
-  | const sab =    |--->| Byte 2  | Byte 3    |<---| const sab =    |
-  | new SAB(1024)  |    | ...     | ...       |    | workerData.sab |
-  |                |    | Byte 1022| Byte 1023|    |                |
-  +----------------+    +---------------------+    +----------------+
-         |                       ^                        |
-         |    Atomics.store()    |    Atomics.load()      |
-         +-------> écriture -----+------- lecture --------+
-                                 |
-                    Atomics.wait() / Atomics.notify()
-                    (synchronisation entre threads)
-```
-
-```typescript
-// main.mjs — Partage mémoire avec un Worker
-import { Worker } from 'node:worker_threads';
-
-// Créer un buffer partagé de 1024 entiers 32-bit
-const sharedBuffer = new SharedArrayBuffer(1024 * 4);
-const sharedArray = new Int32Array(sharedBuffer);
-
-// Initialiser les données
-for (let i = 0; i < 1024; i++) {
-  sharedArray[i] = i;
-}
-
-const worker = new Worker(new URL('./atomic-worker.mjs', import.meta.url), {
-  workerData: { sharedBuffer },
-});
-
-// Attendre que le Worker ait fini (via Atomics)
-worker.on('message', () => {
-  // Lire les résultats directement depuis la mémoire partagée
-  console.log('Somme calculée par le worker:', sharedArray[0]);
-});
-```
-
-```typescript
-// atomic-worker.mjs
+```ts
+// ─── stats.worker.ts (tourne sur SON thread) ───────────────────
 import { parentPort, workerData } from 'node:worker_threads';
 
-const sharedArray = new Int32Array(workerData.sharedBuffer);
+interface Interaction { memberId: string; type: string; weight: number; }
 
-// Calculer la somme dans le Worker
-let sum = 0;
-for (let i = 0; i < 1024; i++) {
-  sum += Atomics.load(sharedArray, i); // lecture atomique
-}
-
-// Écrire le résultat de manière atomique
-Atomics.store(sharedArray, 0, sum);
-
-parentPort.postMessage('done');
-```
-
-#### Les opérations Atomics
-
-```
-  Opérations Atomics
-  ===================
-
-  Atomics.load(arr, idx)        Lecture atomique
-  Atomics.store(arr, idx, val)  Écriture atomique
-  Atomics.add(arr, idx, val)    Addition atomique (retourne l'ancienne valeur)
-  Atomics.sub(arr, idx, val)    Soustraction atomique
-  Atomics.and(arr, idx, val)    ET binaire atomique
-  Atomics.or(arr, idx, val)     OU binaire atomique
-  Atomics.xor(arr, idx, val)    XOR binaire atomique
-  Atomics.exchange(arr, idx, v) Échange atomique
-  Atomics.compareExchange(...)  Compare-and-swap (CAS)
-
-  Synchronisation :
-  Atomics.wait(arr, idx, val)   Bloque jusqu'à notification
-  Atomics.notify(arr, idx, n)   Réveille n threads en attente
-  Atomics.waitAsync(arr, idx, v) Version non-bloquante (Promise)
-```
-
-> **Attention** : `Atomics.wait()` est **interdit sur le thread principal**
-> du navigateur car il est bloquant (il gèlerait l'UI). L'appeler depuis le
-> main thread lève une `TypeError`. Utilisez `Atomics.waitAsync()` à la place,
-> qui retourne une Promise et ne bloque pas. En Node.js, `Atomics.wait()` peut
-> être appelé depuis n'importe quel thread (principal ou Worker).
-
-### 4. Structured cloning et objets transférables
-
-```
-  postMessage — Clone vs Transfert
-  ==================================
-
-  Clone (défaut) :
-  Thread A               Thread B
-  +--------+             +--------+
-  | data   |---copie---->| data'  |   Deux copies en mémoire
-  | (1 Mo) |             | (1 Mo) |   Coût: O(n) copie
-  +--------+             +--------+
-
-  Transfert :
-  Thread A               Thread B
-  +--------+             +--------+
-  | data   |--transfert->| data   |   Une seule copie déplacée
-  | (vide) |             | (1 Mo) |   Coût: O(1), quasi-instantané
-  +--------+             +--------+
-  (data n'est plus
-   utilisable ici)
-```
-
-```typescript
-// Transfert d'un ArrayBuffer (coût O(1))
-const buffer = new ArrayBuffer(1024 * 1024); // 1 Mo
-
-// Le buffer est TRANSFÉRÉ, pas copié
-worker.postMessage({ data: buffer }, [buffer]);
-// buffer.byteLength === 0 après le transfert (neutered)
-
-// Types transférables :
-// - ArrayBuffer
-// - MessagePort
-// - ReadableStream
-// - WritableStream
-// - TransformStream
-// - OffscreenCanvas (navigateur)
-// - ImageBitmap (navigateur)
-```
-
-### 5. `requestAnimationFrame` — Synchronisé avec le rafraîchissement
-
-`requestAnimationFrame` (rAF) est appelé par le navigateur juste avant le
-repaint, synchronisé avec le taux de rafraîchissement de l'écran (60 Hz
-typiquement = 16.67 ms par frame).
-
-```
-  Cycle de rendu navigateur
-  ==========================
-
-  |-- Frame (16.67ms @60Hz) --|-- Frame --|-- Frame --|
-  |                            |            |            |
-  | [Input] [rAF] [Layout]    | [Input]    | ...        |
-  |         [Paint] [Compos.]  | [rAF]     |            |
-  |                            | [Paint]   |            |
-  |                            |            |            |
-
-  rAF s'insère ICI dans le cycle :
-  1. Traiter les événements d'entrée (click, scroll, etc.)
-  2. Exécuter les callbacks requestAnimationFrame
-  3. Calculer le layout (si DOM modifié)
-  4. Peindre (Paint)
-  5. Composite (GPU)
-```
-
-```typescript
-// Animation fluide avec rAF
-let lastTime: number = 0;
-const speed = 200; // pixels par seconde
-
-function animate(currentTime: number): void {
-  const dt = (currentTime - lastTime) / 1000; // delta en secondes
-  lastTime = currentTime;
-
-  // Mise à jour basée sur le temps écoulé (frame-rate independent)
-  element.style.transform = `translateX(${position}px)`;
-  position += speed * dt;
-
-  if (position < maxPosition) {
-    requestAnimationFrame(animate);
+function aggregate(rows: Interaction[]) {
+  const byMember = new Map<string, number>();
+  // Boucle CPU-bound : ~2 M interactions. Bloque CE thread, pas l'API.
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    byMember.set(r.memberId, (byMember.get(r.memberId) ?? 0) + r.weight);
   }
+  return [...byMember.entries()].map(([memberId, score]) => ({ memberId, score }));
 }
 
-requestAnimationFrame(animate);
+const result = aggregate(workerData.rows as Interaction[]);
+parentPort!.postMessage(result); // renvoie au thread principal
 ```
 
-### 6. `requestIdleCallback` — Tâches pendant le temps mort
-
-`requestIdleCallback` exécute du code quand le navigateur n'a rien d'autre
-à faire, c'est-à-dire pendant les périodes d'inactivité entre les frames.
-
-```
-  Temps d'inactivité (idle time)
-  ===============================
-
-  Frame 16.67ms                Frame 16.67ms
-  |-- travail --|-- idle --|    |-- travail --|-- idle --|
-  |  10ms       |  6.67ms  |    |  12ms       |  4.67ms  |
-  |             | ^^^^^^^^^|    |             | ^^^^^^^^ |
-  |             | idle     |    |             | idle     |
-  |             | callback |    |             | callback |
-
-  Si le travail prend toute la frame => pas d'idle callback cette frame-ci
-  |-- travail 16ms --|  (pas d'idle time)
-```
-
-```typescript
-// Traiter une file de tâches non-urgentes pendant le temps mort
-const taskQueue: (() => void)[] = [];
-
-function scheduleIdleWork(): void {
-  requestIdleCallback((deadline: IdleDeadline) => {
-    // deadline.timeRemaining() : ms restantes dans la période idle
-    while (taskQueue.length > 0 && deadline.timeRemaining() > 1) {
-      const task = taskQueue.shift();
-      task(); // exécuter une tâche
-    }
-
-    // S'il reste des tâches, replanifier
-    if (taskQueue.length > 0) {
-      scheduleIdleWork();
-    }
-  }, { timeout: 2000 }); // timeout max : garantit l'exécution sous 2s
-}
-
-// Ajouter des tâches non-urgentes
-function addIdleTask(task: () => void): void {
-  taskQueue.push(task);
-  if (taskQueue.length === 1) {
-    scheduleIdleWork();
-  }
-}
-
-// Exemple : indexation en arrière-plan
-addIdleTask(() => buildSearchIndex(documents.slice(0, 100)));
-addIdleTask(() => buildSearchIndex(documents.slice(100, 200)));
-addIdleTask(() => prefetchImages(nextPageImages));
-```
-
-### 7. Scheduler API (`scheduler.postTask`)
-
-L'API Scheduler (actuellement supportée dans Chrome/Edge) permet de planifier
-des tâches avec des **niveaux de priorité** explicites.
-
-```
-  Niveaux de priorité
-  ====================
-
-  Priorité          | Cas d'usage                    | Délai typique
-  ------------------|--------------------------------|---------------
-  "user-blocking"   | Réponse à un clic, saisie      | < 1 frame
-  "user-visible"    | Rendu, mise à jour visible      | < 100ms
-  "background"      | Analytics, prefetch, logs       | Quand possible
-
-  File d'exécution :
-  +--[ user-blocking ]--+--[ user-visible ]--+--[ background ]--+
-  | Exécuté en premier  | Après user-blocking| Quand rien d'autre|
-  +---------------------+--------------------+-------------------+
-```
-
-```typescript
-// Planifier avec priorités
-async function handleUserClick(): Promise<void> {
-  // Haute priorité : mise à jour visuelle immédiate
-  await scheduler.postTask(() => {
-    updateButtonState('loading');
-  }, { priority: 'user-blocking' });
-
-  // Priorité normale : charger les données
-  const data = await scheduler.postTask(async () => {
-    return await fetch('/api/data').then(r => r.json());
-  }, { priority: 'user-visible' });
-
-  // Basse priorité : analytics
-  scheduler.postTask(() => {
-    sendAnalytics('button_clicked', data.id);
-  }, { priority: 'background' });
-}
-
-// Annulation avec AbortController
-const controller = new AbortController();
-
-scheduler.postTask(() => {
-  expensiveComputation();
-}, {
-  priority: 'background',
-  signal: controller.signal,
-});
-
-// Plus tard, si la tâche n'est plus nécessaire :
-controller.abort();
-```
-
-### 8. Time slicing : découper les longues tâches
-
-Une tâche qui prend plus de 50ms est considérée comme une **Long Task** par le
-navigateur, et bloque l'interactivité.
-
-```
-  Avant : une longue tâche bloquante
-  ====================================
-  |--- Tâche longue (300ms) --------------------------------|
-  |  Input bloqué  |  Rendu bloqué  |  Tout gelé            |
-  |-----------------------------------------------------------
-
-  Après : time slicing
-  =====================
-  |-- Chunk 1 --|  yield  |-- Chunk 2 --|  yield  |-- Chunk 3 --|
-  |   (50ms)    |  (rAF)  |   (50ms)    |  (rAF)  |   (50ms)    |
-  |             |  rendu  |             |  rendu  |             |
-  |             |  input  |             |  input  |             |
-```
-
-```typescript
-// Pattern : time slicing avec setTimeout
-async function processLargeArray<T>(items: T[], processFn: (item: T, index: number) => void, chunkSize: number = 100): Promise<void> {
-  let index = 0;
-
-  return new Promise((resolve) => {
-    function processChunk(): void {
-      const end = Math.min(index + chunkSize, items.length);
-
-      for (; index < end; index++) {
-        processFn(items[index], index);
-      }
-
-      if (index < items.length) {
-        // Yield au navigateur : setTimeout(fn, 0) cède la main
-        setTimeout(processChunk, 0);
-      } else {
-        resolve();
-      }
-    }
-
-    processChunk();
-  });
-}
-
-// Utilisation
-await processLargeArray(millionItems, (item) => {
-  transformAndStore(item);
-});
-```
-
-```typescript
-// Pattern moderne : scheduler.yield() (Chrome 129+)
-async function processWithYield<T>(items: T[], processFn: (item: T, index: number) => void): Promise<void> {
-  for (let i = 0; i < items.length; i++) {
-    processFn(items[i], i);
-
-    // Yield périodiquement pour ne pas bloquer
-    if (i % 100 === 0) {
-      await scheduler.yield();
-    }
-  }
-}
-```
-
-### 9. Node.js Worker Threads en profondeur
-
-```typescript
-// main.mjs — Pool de workers pour paralléliser du travail
+```ts
+// ─── stats-service.ts (thread principal de l'API) ──────────────
 import { Worker } from 'node:worker_threads';
-import { cpus } from 'node:os';
 
-const NUM_WORKERS = cpus().length;
-
-class WorkerPool {
-  private workers: Worker[];
-  private queue: { data: unknown; resolve: (value: unknown) => void; reject: (reason: unknown) => void }[];
-  private freeWorkers: (Worker & { _currentTask?: { resolve: (value: unknown) => void; reject: (reason: unknown) => void } | null })[];
-
-  constructor(workerPath: URL, size: number) {
-    this.workers = [];
-    this.queue = [];
-    this.freeWorkers = [];
-
-    for (let i = 0; i < size; i++) {
-      const worker = new Worker(workerPath);
-      worker.on('message', (result) => {
-        const { resolve } = worker._currentTask;
-        resolve(result);
-        worker._currentTask = null;
-        this.freeWorkers.push(worker);
-        this._processQueue();
-      });
-      worker.on('error', (err) => {
-        const { reject } = worker._currentTask;
-        reject(err);
-        worker._currentTask = null;
-        this.freeWorkers.push(worker);
-        this._processQueue();
-      });
-      this.workers.push(worker);
-      this.freeWorkers.push(worker);
-    }
-  }
-
-  exec(data: unknown): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ data, resolve, reject });
-      this._processQueue();
+export function computeEngagement(rows: Interaction[]): Promise<Stat[]> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./stats.worker.ts', import.meta.url), {
+      workerData: { rows }, // structured clone à la frontière
     });
-  }
-
-  _processQueue(): void {
-    while (this.queue.length > 0 && this.freeWorkers.length > 0) {
-      const worker = this.freeWorkers.pop();
-      const task = this.queue.shift();
-      worker._currentTask = task;
-      worker.postMessage(task.data);
-    }
-  }
-
-  async destroy(): Promise<void> {
-    for (const worker of this.workers) {
-      await worker.terminate();
-    }
-  }
+    worker.once('message', (stats: Stat[]) => {
+      resolve(stats);
+      worker.terminate(); // libérer le thread
+    });
+    worker.once('error', reject);
+    worker.once('exit', (code) => {
+      if (code !== 0) reject(new Error(`worker exit ${code}`));
+    });
+  });
 }
 
-// Utilisation
-const pool = new WorkerPool(new URL('./compute-worker.mjs', import.meta.url), NUM_WORKERS);
-
-const results = await Promise.all([
-  pool.exec({ task: 'hash', data: buffer1 }),
-  pool.exec({ task: 'hash', data: buffer2 }),
-  pool.exec({ task: 'hash', data: buffer3 }),
-  pool.exec({ task: 'hash', data: buffer4 }),
-]);
-
-await pool.destroy();
+// Handler : l'API reste 100 % réactive, le calcul vit ailleurs
+app.get('/api/families/:id/engagement', async (req, res) => {
+  const rows = await db.interactions.byFamily(req.params.id); // I/O
+  const stats = await computeEngagement(rows);               // offload CPU
+  res.json(stats);
+});
 ```
 
-### 10. Scheduling coopératif et yield vers l'event loop
-
-En Node.js, il n'y a pas de `requestAnimationFrame` ni de `requestIdleCallback`.
-Le pattern de yield utilise `setImmediate` ou `setTimeout(fn, 0)`.
-
-```
-  Node.js — Yield vers l'event loop
-  ====================================
-
-  setImmediate(fn)     : exécuté dans la phase "check" de l'event loop
-                         (après I/O, avant les timers du prochain cycle)
-
-  setTimeout(fn, 0)    : exécuté dans la phase "timers" du prochain cycle
-                         (léger overhead du timer)
-
-  process.nextTick(fn) : exécuté IMMÉDIATEMENT après l'opération courante
-                         ATTENTION : ne yield PAS vraiment à l'event loop !
-
-  Ordre dans un cycle event loop Node.js :
-  +---------------------------------------------------+
-  | timers -> pending -> idle -> poll -> check -> close|
-  |  ^                                    ^            |
-  |  setTimeout(fn,0)              setImmediate(fn)    |
-  +---------------------------------------------------+
-  | process.nextTick : entre CHAQUE phase (prioritaire)|
-  +---------------------------------------------------+
-```
-
-```typescript
-// Yield coopératif en Node.js
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
-}
-
-async function processLargeDataset<T>(dataset: T[]): Promise<unknown[]> {
-  const results = [];
-  for (let i = 0; i < dataset.length; i++) {
-    results.push(heavyTransform(dataset[i]));
-
-    // Toutes les 1000 itérations, yield pour laisser
-    // l'event loop traiter les I/O en attente
-    if (i % 1000 === 0) {
-      await yieldToEventLoop();
-    }
-  }
-  return results;
-}
-```
-
-### 11. Pattern : implémentation d'un scheduler à priorités
-
-```typescript
-type Priority = 'high' | 'normal' | 'low';
-
-interface ScheduledTask {
-  fn: () => void | Promise<void>;
-  priority: Priority;
-  cancelled: boolean;
-  cancel(): void;
-}
-
-class PriorityScheduler {
-  private queues: Record<Priority, ScheduledTask[]>;
-  private running: boolean;
-
-  constructor() {
-    // 3 files de priorité
-    this.queues = {
-      high: [],    // user-blocking
-      normal: [],  // user-visible
-      low: [],     // background
-    };
-    this.running = false;
-  }
-
-  schedule(fn: () => void | Promise<void>, priority: Priority = 'normal'): ScheduledTask {
-    const task = {
-      fn,
-      priority,
-      cancelled: false,
-      cancel() { this.cancelled = true; },
-    };
-    this.queues[priority].push(task);
-    if (!this.running) this._run();
-    return task;
-  }
-
-  _nextTask(): ScheduledTask | null {
-    // Priorité stricte : high > normal > low
-    for (const level of ['high', 'normal', 'low'] as Priority[]) {
-      while (this.queues[level].length > 0) {
-        const task = this.queues[level].shift()!;
-        if (!task.cancelled) return task;
-      }
-    }
-    return null;
-  }
-
-  async _run(): Promise<void> {
-    this.running = true;
-    let task: ScheduledTask | null;
-
-    while ((task = this._nextTask()) !== null) {
-      const start = performance.now();
-
-      try {
-        await task.fn();
-      } catch (e) {
-        console.error('Task error:', e);
-      }
-
-      const elapsed = performance.now() - start;
-
-      // Si on a dépassé 5ms, yield pour ne pas bloquer
-      if (elapsed > 5) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-    }
-
-    this.running = false;
-  }
-}
-```
+**Pourquoi offloader ici plutôt que chunker :**
+- Le calcul est assez lourd pour qu'on veuille **zéro** impact sur l'event loop de l'API, pas seulement un impact « lissé ».
+- On peut le paralléliser (un worker par cœur, via un pool) pour **réduire le temps total** — ce que le chunking ne fait jamais.
+- **Contre-mesure honnête** : `workerData` fait un structured clone des `rows`. Si `rows` pèse 200 Mo, la copie coûte cher. Deux parades : passer un `ArrayBuffer` transférable, ou faire lire la DB **directement dans le worker** (lui passer l'id de famille, pas les lignes).
 
 ---
 
-## Démonstration
+## 4. Pièges & misconceptions
 
-### Démo 1 — Worker vs main thread : calcul de Fibonacci
+### PIÈGE #1 — Croire que `async` rend une boucle non-bloquante
 
-```typescript
-// demo-worker-vs-main.mjs
-// Montre la différence entre bloquer le thread principal et utiliser un Worker
-import { Worker, isMainThread, parentPort } from 'node:worker_threads';
-import { performance } from 'node:perf_hooks';
-
-function fibonacci(n: number): number {
-  if (n <= 1) return n;
-  return fibonacci(n - 1) + fibonacci(n - 2);
-}
-
-if (isMainThread) {
-  const N = 42;
-
-  // --- Test 1 : sur le thread principal ---
-  console.log('=== Fibonacci sur le thread principal ===');
-  const t1 = performance.now();
-  const r1 = fibonacci(N);
-  const t2 = performance.now();
-  console.log(`  Résultat: ${r1}, Durée: ${(t2 - t1).toFixed(0)} ms`);
-
-  // Simuler une requête I/O concurrente
-  console.log('\n=== Test de réactivité pendant le calcul ===');
-
-  let ioCompleted = false;
-  const ioStart = performance.now();
-
-  setTimeout(() => {
-    ioCompleted = true;
-    const ioDelay = performance.now() - ioStart;
-    console.log(`  [Main thread] I/O callback — délai: ${ioDelay.toFixed(0)} ms`);
-  }, 10);
-
-  // Calcul sur main thread : bloque le callback I/O
-  console.log('  Calcul en cours sur main thread...');
-  const r2 = fibonacci(N);
-  const t3 = performance.now();
-  console.log(`  Calcul terminé: ${(t3 - t2).toFixed(0)} ms`);
-
-  // --- Test 2 : sur un Worker ---
-  setTimeout(() => {
-    console.log('\n=== Fibonacci sur un Worker ===');
-    const workerStart = performance.now();
-
-    const worker = new Worker(new URL(import.meta.url));
-    worker.postMessage(N);
-
-    // Le callback I/O sera traité normalement cette fois
-    const ioStart2 = performance.now();
-    setTimeout(() => {
-      const ioDelay2 = performance.now() - ioStart2;
-      console.log(`  [Worker test] I/O callback — délai: ${ioDelay2.toFixed(0)} ms`);
-    }, 10);
-
-    worker.on('message', (result) => {
-      const workerDuration = performance.now() - workerStart;
-      console.log(`  Worker résultat: ${result}, Durée: ${workerDuration.toFixed(0)} ms`);
-      worker.terminate();
-    });
-  }, 2000);
-
-} else {
-  // Code Worker
-  parentPort!.on('message', (n: number) => {
-    parentPort!.postMessage(fibonacci(n));
-  });
-}
-```
-
-### Démo 2 — SharedArrayBuffer : compteur atomique multi-thread
-
-```typescript
-// demo-shared-counter.mjs
-import { Worker, isMainThread, workerData, parentPort } from 'node:worker_threads';
-
-const NUM_WORKERS = 4;
-const INCREMENTS_PER_WORKER = 1_000_000;
-
-if (isMainThread) {
-  // Buffer partagé : 2 compteurs (atomique et non-atomique)
-  const sharedBuffer = new SharedArrayBuffer(8); // 2 x Int32
-  const counters = new Int32Array(sharedBuffer);
-  // counters[0] = compteur atomique
-  // counters[1] = compteur non-atomique (race condition)
-
-  const workers = [];
-  let completed = 0;
-
-  for (let i = 0; i < NUM_WORKERS; i++) {
-    const w = new Worker(new URL(import.meta.url), { workerData: { sharedBuffer } });
-    w.on('message', () => {
-      completed++;
-      if (completed === NUM_WORKERS) {
-        const expected = NUM_WORKERS * INCREMENTS_PER_WORKER;
-        console.log(`Valeur attendue          : ${expected.toLocaleString()}`);
-        console.log(`Compteur atomique        : ${counters[0].toLocaleString()}`);
-        console.log(`Compteur non-atomique    : ${counters[1].toLocaleString()}`);
-        console.log(`Erreur atomique          : ${Math.abs(expected - counters[0])}`);
-        console.log(`Erreur non-atomique      : ${Math.abs(expected - counters[1]).toLocaleString()}`);
-        console.log(`Race condition détectée  : ${counters[1] !== expected ? 'OUI' : 'NON'}`);
-      }
-    });
-    workers.push(w);
+```ts
+// ❌ async ne cède RIEN ici : la boucle est synchrone du début à la fin
+async function process(items: Item[]) {
+  for (const it of items) {
+    heavyCompute(it); // CPU-bound, aucun await à l'intérieur
   }
-
-} else {
-  const counters = new Int32Array(workerData.sharedBuffer);
-
-  for (let i = 0; i < INCREMENTS_PER_WORKER; i++) {
-    // Incrément atomique (thread-safe)
-    Atomics.add(counters, 0, 1);
-
-    // Incrément non-atomique (race condition)
-    counters[1]++;  // READ-MODIFY-WRITE non atomique !
-  }
-
-  parentPort.postMessage('done');
-}
-```
-
-### Démo 3 — Time slicing avec mesure d'interactivité
-
-```typescript
-// demo-time-slicing.mjs
-// Simule le time slicing en Node.js et mesure la réactivité de l'event loop
-import { performance } from 'node:perf_hooks';
-
-const TOTAL_ITEMS = 1_000_000;
-
-// Simule un traitement coûteux
-function heavyWork(item: number): number {
-  let x = item;
-  for (let i = 0; i < 100; i++) {
-    x = Math.sin(x) * Math.cos(x);
-  }
-  return x;
+  // L'event loop est gelé pendant TOUTE la boucle, malgré le mot-clé async.
 }
 
-// --- Version bloquante ---
-async function processBlocking(items: number[]): Promise<{ results: Float64Array; duration: number }> {
-  const results = new Float64Array(items.length);
-  const start = performance.now();
+// ✅ Il faut un point de yield RÉEL dans la boucle
+async function process(items: Item[]) {
   for (let i = 0; i < items.length; i++) {
-    results[i] = heavyWork(items[i]);
+    heavyCompute(items[i]);
+    if (i % 500 === 0) await new Promise((r) => setImmediate(r)); // cède
   }
-  return { results, duration: performance.now() - start };
 }
-
-// --- Version avec time slicing ---
-async function processWithTimeSlicing(items: number[], chunkSize: number = 5000): Promise<{ results: Float64Array; duration: number }> {
-  const results = new Float64Array(items.length);
-  const start = performance.now();
-  let index = 0;
-
-  while (index < items.length) {
-    const end = Math.min(index + chunkSize, items.length);
-    for (let i = index; i < end; i++) {
-      results[i] = heavyWork(items[i]);
-    }
-    index = end;
-
-    // Yield à l'event loop
-    await new Promise((r) => setImmediate(r));
-  }
-
-  return { results, duration: performance.now() - start };
-}
-
-// Mesurer la réactivité de l'event loop
-function measureEventLoopLatency(durationMs: number): Promise<number[]> {
-  return new Promise((resolve) => {
-    const latencies: number[] = [];
-    const start = performance.now();
-
-    function check(): void {
-      const now = performance.now();
-      const expected = 10; // setInterval de 10ms
-      const last = latencies.length > 0
-        ? start + latencies.length * expected
-        : start;
-      latencies.push(now - last - expected);
-
-      if (now - start < durationMs) {
-        setTimeout(check, expected);
-      } else {
-        resolve(latencies);
-      }
-    }
-    setTimeout(check, 10);
-  });
-}
-
-// Exécution
-const items = Array.from({ length: TOTAL_ITEMS }, (_, i) => i * 0.001);
-
-console.log('=== Test 1 : traitement bloquant ===');
-const latencyPromise1 = measureEventLoopLatency(5000);
-const blocking = await processBlocking(items);
-const latencies1 = await latencyPromise1;
-console.log(`  Durée traitement : ${blocking.duration.toFixed(0)} ms`);
-console.log(`  Latence event loop max : ${Math.max(...latencies1).toFixed(0)} ms`);
-console.log(`  Latence event loop moyenne : ${(latencies1.reduce((a,b)=>a+b,0)/latencies1.length).toFixed(1)} ms`);
-
-console.log('\n=== Test 2 : traitement avec time slicing ===');
-const latencyPromise2 = measureEventLoopLatency(5000);
-const sliced = await processWithTimeSlicing(items, 5000);
-const latencies2 = await latencyPromise2;
-console.log(`  Durée traitement : ${sliced.duration.toFixed(0)} ms`);
-console.log(`  Latence event loop max : ${Math.max(...latencies2).toFixed(0)} ms`);
-console.log(`  Latence event loop moyenne : ${(latencies2.reduce((a,b)=>a+b,0)/latencies2.length).toFixed(1)} ms`);
 ```
 
-### Démo 4 — Scheduler à priorités en action
+`async`/`await` ne cède la main **que sur un `await` d'une opération réellement asynchrone**. Un `await` sur une valeur déjà résolue ne rend qu'une microtâche — insuffisant (voir piège #2).
 
-```typescript
-// demo-priority-scheduler.mjs
-import { performance } from 'node:perf_hooks';
+### PIÈGE #2 — Utiliser `queueMicrotask` / `Promise.resolve()` pour « céder »
 
-class PriorityScheduler {
-  constructor() {
-    this.queues = { high: [], normal: [], low: [] };
-    this.running = false;
-    this.log = [];
-  }
-
-  schedule(name, fn, priority = 'normal') {
-    const task = { name, fn, priority, cancelled: false };
-    task.cancel = () => { task.cancelled = true; };
-    this.queues[priority].push(task);
-    if (!this.running) this._run();
-    return task;
-  }
-
-  _nextTask() {
-    for (const level of ['high', 'normal', 'low']) {
-      while (this.queues[level].length > 0) {
-        const task = this.queues[level].shift();
-        if (!task.cancelled) return task;
-      }
-    }
-    return null;
-  }
-
-  async _run() {
-    this.running = true;
-    let task;
-    while ((task = this._nextTask()) !== null) {
-      const start = performance.now();
-      try {
-        await task.fn();
-      } catch (e) {
-        console.error(`Erreur dans ${task.name}:`, e.message);
-      }
-      const duration = performance.now() - start;
-      this.log.push({ name: task.name, priority: task.priority, duration });
-      // Yield entre les tâches
-      await new Promise((r) => setTimeout(r, 0));
-    }
-    this.running = false;
+```ts
+// ❌ Les microtâches sont drainées AVANT que l'event loop touche l'I/O.
+//    Cette boucle bloque toujours tout : /health n'est jamais servi.
+async function process(items: Item[]) {
+  for (let i = 0; i < items.length; i++) {
+    heavyCompute(items[i]);
+    await Promise.resolve(); // microtâche : ne cède PAS à l'event loop
   }
 }
 
-// Utilisation
-const scheduler = new PriorityScheduler();
-
-// Simuler des tâches de différentes priorités
-scheduler.schedule('analytics', () => {
-  // Simule un envoi de données analytics
-  let x = 0;
-  for (let i = 0; i < 1_000_000; i++) x += Math.random();
-  console.log('  [low] Analytics envoyés');
-}, 'low');
-
-scheduler.schedule('render-list', () => {
-  // Simule un rendu de liste
-  const items = Array.from({ length: 10000 }, (_, i) => `Item ${i}`);
-  console.log(`  [normal] Liste rendue: ${items.length} éléments`);
-}, 'normal');
-
-scheduler.schedule('user-input', () => {
-  // Simule la réponse à un input utilisateur
-  console.log('  [high] Input utilisateur traité');
-}, 'high');
-
-scheduler.schedule('prefetch', () => {
-  console.log('  [low] Prefetch terminé');
-}, 'low');
-
-scheduler.schedule('update-ui', () => {
-  console.log('  [normal] UI mise à jour');
-}, 'normal');
-
-scheduler.schedule('critical-click', () => {
-  console.log('  [high] Click critique traité');
-}, 'high');
-
-// Annulation
-const analyticsTask2 = scheduler.schedule('analytics-2', () => {
-  console.log('  [low] Analytics 2 (ne devrait pas apparaître)');
-}, 'low');
-analyticsTask2.cancel();
-
-// Attendre la fin
-setTimeout(() => {
-  console.log('\n=== Ordre d\'exécution ===');
-  for (const entry of scheduler.log) {
-    console.log(`  [${entry.priority.padEnd(6)}] ${entry.name} (${entry.duration.toFixed(1)}ms)`);
-  }
-}, 3000);
+// ✅ Une macrotâche cède réellement à l'event loop
+await new Promise((r) => setImmediate(r)); // Node
+// ou MessageChannel / setTimeout / scheduler.yield côté navigateur
 ```
 
-### Démo 5 — Transferable objects : performance postMessage
+Rappel des modules 03-04 : microtâches (`Promise.then`, `queueMicrotask`, `process.nextTick`) sont vidées **intégralement** entre deux macrotâches. Pour laisser respirer l'I/O, il faut une **macrotâche**.
 
-```typescript
-// demo-transferable.mjs
-import { Worker, isMainThread, parentPort } from 'node:worker_threads';
-import { performance } from 'node:perf_hooks';
+### PIÈGE #3 — Offloader de l'I/O vers un worker
 
-if (isMainThread) {
-  const SIZES = [1_024, 10_240, 102_400, 1_024_000, 10_240_000];
+```ts
+// ❌ Mettre un fetch/une requête DB dans un worker "pour ne pas bloquer"
+// stats.worker.ts
+const data = await fetch('https://api...'); // l'I/O était DÉJÀ non-bloquant !
+```
 
-  const worker = new Worker(new URL(import.meta.url));
+Un worker sert à sortir du **CPU-bound**. L'I/O (`fetch`, lecture disque, requête DB) ne bloque déjà pas l'event loop. Offloader de l'I/O n'apporte rien et ajoute le coût d'un thread + la frontière de messages. **Offload = CPU, jamais I/O.**
 
-  let testIndex = 0;
+### PIÈGE #4 — Confondre « réactif » et « plus rapide »
 
-  function runTest() {
-    if (testIndex >= SIZES.length) {
-      worker.terminate();
-      return;
-    }
+Le chunking rend l'app réactive mais **rallonge** légèrement le temps total (coût des yields). Un worker unique déplace le calcul sans forcément l'accélérer (même durée, autre thread) — le gain de vitesse vient du **parallélisme sur plusieurs cœurs** (pool). Attendre une accélération d'un simple chunking, c'est se tromper d'outil : concurrence ≠ parallélisme (2.1).
 
-    const size = SIZES[testIndex];
-    const label = `${(size / 1024).toFixed(0)} Ko`;
+### PIÈGE #5 — Ignorer le coût de la frontière worker
 
-    // --- Test Clone ---
-    const bufClone = new ArrayBuffer(size);
-    new Uint8Array(bufClone).fill(42);
+```ts
+// ❌ Offloader un calcul de 3 ms en envoyant 100 Mo par structured clone
+worker.postMessage({ rows: hugeArray }); // la copie coûte plus que le calcul
 
-    const t1 = performance.now();
-    worker.postMessage({ mode: 'echo', data: bufClone }); // clone
-    const clonePostTime = performance.now() - t1;
+// ✅ Soit transférer un buffer, soit faire lire la donnée dans le worker
+worker.postMessage({ buffer }, [buffer]); // transfert O(1)
+// ou : passer un id, le worker charge lui-même depuis la DB
+```
 
-    worker.once('message', () => {
-      // --- Test Transfer ---
-      const bufTransfer = new ArrayBuffer(size);
-      new Uint8Array(bufTransfer).fill(42);
+Règle : offloader ne vaut que si `coût_calcul >> coût_transfert`. Sinon, on paie un thread et une copie pour rien.
 
-      const t2 = performance.now();
-      worker.postMessage({ mode: 'echo', data: bufTransfer }, [bufTransfer]); // transfer
-      const transferPostTime = performance.now() - t2;
+---
 
-      console.log(`${label.padStart(10)} | clone: ${clonePostTime.toFixed(3)}ms | transfer: ${transferPostTime.toFixed(3)}ms | neutered: ${bufTransfer.byteLength === 0}`);
+## 5. Ancrage TribuZen
 
-      worker.once('message', () => {
-        testIndex++;
-        runTest();
-      });
-    });
-  }
+Le scheduling est la couche qui garde l'**API TribuZen réactive sous charge** et le **dashboard admin fluide**.
 
-  console.log('    Taille | Clone (postMessage) | Transfer     | Neutered');
-  console.log('    -------|---------------------|--------------|--------');
-  runTest();
+**Export CSV réactif** (`api/src/routes/export.ts`) — l'endpoint `GET /api/export/members.csv` traite les membres par chunks de 2000 avec `await setImmediate` entre chaque lot. Résultat mesuré : `/api/health` reste sous 5 ms même pendant l'export d'une grosse famille (contre ~900 ms avant). C'est le cas concret et l'Exemple 1 du module.
 
-} else {
-  parentPort.on('message', (msg) => {
-    parentPort.postMessage('ack');
-  });
-}
+**Agrégation stats offloadée** (`api/src/services/stats-service.ts` + `api/src/workers/stats.worker.ts`) — le calcul d'engagement (des millions d'interactions) tourne dans un `worker_threads` dédié. L'API délègue via `workerData`, reçoit le résultat par message, et n'a jamais son event loop bloqué. C'est l'Exemple 2. Évolution prévue : un **pool** de workers (un par cœur) pour paralléliser les agrégations de plusieurs familles simultanément.
+
+**Réactivité mesurée** (`api/src/lib/eventloop-probe.ts`) — une sonde de lag event loop tourne en dev pour valider qu'aucun handler ne gèle le thread. Tout ajout de traitement lourd passe ce contrôle : soit chunké, soit offloadé.
+
+**Côté admin React** (`admin/src/features/import/parse.worker.ts`) — le parsing d'un gros CSV importé se fait dans un **Web Worker**, pour que la saisie et le scroll de l'interface restent fluides pendant le traitement.
+
+Fichiers cibles dans `smaurier/tribuzen` :
+```
+api/src/
+  routes/export.ts            # export CSV chunké (setImmediate)
+  services/stats-service.ts   # orchestration de l'offload
+  workers/stats.worker.ts     # agrégation CPU-bound isolée
+  lib/eventloop-probe.ts      # sonde de lag event loop
+admin/src/
+  features/import/parse.worker.ts  # parsing CSV en Web Worker
 ```
 
 ---
 
-### V8 vs SpiderMonkey (Firefox)
+## 6. Points clés
 
-Le scheduling et la concurrence en JavaScript reposent en grande partie sur des **API standardisées** (spécifiées par le W3C, WHATWG ou TC39), ce qui signifie que le comportement est le même dans tous les navigateurs. Les différences sont mineures.
-
-**Comparaison par API :**
-
-| API | Chrome (V8) | Firefox (SpiderMonkey) | Safari (JSC) | Node.js |
-|---|---|---|---|---|
-| Web Workers | Oui | Oui | Oui | Non (Worker Threads à la place) |
-| Worker Threads | Non (navigateur) | Non (navigateur) | Non (navigateur) | **Oui** (spécifique Node.js) |
-| SharedArrayBuffer + Atomics | Oui (avec COOP/COEP) | Oui (avec COOP/COEP) | Oui (avec COOP/COEP) | Oui (sans restriction) |
-| requestAnimationFrame | Oui | Oui | Oui | Non |
-| requestIdleCallback | Oui | Oui | Non (pas supporté) | Non |
-| scheduler.postTask | Oui (Chrome 94+) | Non (pas encore supporté) | Non | Non |
-| scheduler.yield | Oui (Chrome 129+) | Non | Non | Non |
-
-**Points clés :**
-
-- **Web Workers** : l'API est **identique** dans tous les navigateurs (même constructeur, même `postMessage`, même `onmessage`). Le code écrit pour Chrome fonctionne tel quel dans Firefox et Safari.
-- **SharedArrayBuffer + Atomics** : la spécification est la même partout. La seule contrainte est l'obligation d'envoyer les en-têtes **COOP/COEP** (Cross-Origin-Opener-Policy / Cross-Origin-Embedder-Policy) pour activer SharedArrayBuffer dans les navigateurs (suite aux attaques Spectre). En Node.js, aucune restriction.
-- **requestAnimationFrame et requestIdleCallback** : ce sont des API navigateur standardisées, pas des API moteur JS. Elles fonctionnent de la même façon dans Chrome et Firefox. Attention : `requestIdleCallback` n'est **pas supporté dans Safari**.
-- **scheduler.postTask** : à ce jour, cette API est **principalement supportée dans Chrome/Edge**. Il faut vérifier la compatibilité navigateur (caniuse.com) avant de l'utiliser en production.
-- **Node.js Worker Threads** : c'est une API **spécifique à Node.js** qui n'existe pas dans les navigateurs. L'équivalent navigateur est Web Workers.
-
-> **À retenir** : pour le scheduling et la concurrence, la plupart des API sont standardisées et fonctionnent de la même façon dans tous les navigateurs. Les exceptions sont `scheduler.postTask` (Chrome principalement) et `requestIdleCallback` (pas dans Safari). En Node.js, Worker Threads remplace Web Workers.
+1. **Concurrence ≠ parallélisme** : la concurrence (event loop, 1 thread) garde l'app réactive en entrelaçant ; le parallélisme (workers, N threads) exécute vraiment en même temps et peut accélérer un calcul CPU-bound.
+2. L'event loop JS est **coopératif, non préemptif** : rien n'interrompt une fonction synchrone ; elle doit finir ou céder elle-même.
+3. **Chunker** un gros travail = insérer des points de yield entre les lots pour laisser l'event loop traiter les autres callbacks — l'app reste réactive mais le temps total ne diminue pas.
+4. En Node, on cède avec **`setImmediate`** ; au navigateur avec **`scheduler.yield()` / `scheduler.postTask` / `MessageChannel` / `setTimeout(0)`**.
+5. **Les microtâches ne cèdent pas** : `queueMicrotask`, `process.nextTick`, `Promise.then` sont drainées avant l'I/O — inutiles pour débloquer l'event loop.
+6. **`async` ne rend pas une boucle non-bloquante** : sans `await` d'une vraie opération async (ou d'une macrotâche), la boucle gèle le thread.
+7. **Offloader = CPU-bound uniquement**, jamais de l'I/O (déjà non-bloquant). Web Workers (navigateur) et `worker_threads` (Node) : heap isolée, communication par messages.
+8. **La frontière worker coûte** : structured clone O(n) par défaut ; utiliser les **transférables** (`ArrayBuffer`) ou charger la donnée dans le worker quand elle est volumineuse.
+9. **`SharedArrayBuffer` + `Atomics`** partagent la mémoire sans copie mais introduisent des race conditions — outil avancé et rare ; le message passing suffit presque toujours.
+10. **Backpressure** : borner les files (streams via `'drain'`, pool via file plafonnée) pour éviter que la mémoire explose quand le producteur va plus vite que le consommateur.
 
 ---
 
-## Points clés
+## 7. Seeds Anki
 
-1. **JavaScript est mono-thread** mais gère la concurrence via l'event loop et l'I/O asynchrone. Toute opération CPU-intensive bloque le thread principal.
-2. **Les Workers** (Web Workers / Worker Threads) offrent du vrai parallélisme avec des contextes JS isolés et leur propre heap.
-3. **`SharedArrayBuffer`** permet le partage de mémoire entre threads, mais nécessite des **`Atomics`** pour éviter les race conditions.
-4. **Les objets transférables** (`ArrayBuffer`, `MessagePort`, etc.) permettent un `postMessage` en O(1) au lieu d'une copie O(n).
-5. **`requestAnimationFrame`** synchronise le code avec le cycle de rendu du navigateur (16.67ms @ 60Hz).
-6. **`requestIdleCallback`** exécute du travail non-urgent pendant les temps morts du navigateur.
-7. **`scheduler.postTask`** offre un scheduling avec 3 niveaux de priorité (`user-blocking`, `user-visible`, `background`).
-8. **Le time slicing** découpe les longues tâches en chunks de < 50ms pour préserver la réactivité.
-9. **Un pool de Workers** réutilise les threads créés pour amortir le coût de création et limiter la consommation mémoire.
-10. **Le scheduling coopératif** repose sur le fait que chaque tâche cède volontairement le contrôle à l'event loop.
-
----
-
-## Atelier complémentaire — Typologies de Workers
-
-Objectif : consolider la théorie du module avec un mini parcours pratique qui
-couvre les principales familles de workers côté navigateur et Node.js.
-
-> Format suggéré : 6 exercices courts (30 à 60 minutes chacun), avec une
-> démonstration mesurable à la fin de chaque exercice.
-
-### Exercice 1 — Dedicated Worker (navigateur)
-
-- Déporter un calcul CPU-intensif hors du thread principal.
-- Envoyer la charge utile via `postMessage`, retourner un résultat structuré.
-- Afficher un indicateur UI (spinner/compteur) pour vérifier que l'interface ne
-  freeze pas.
-
-Critères de validation :
-
-- L'UI reste fluide pendant l'exécution.
-- Le résultat est correct et reçu via `onmessage`.
-
-### Exercice 2 — Dedicated Worker + Transferable objects
-
-- Envoyer de gros buffers (`ArrayBuffer`) au worker.
-- Comparer clone structuré vs transfert (`postMessage(data, [buffer])`).
-- Mesurer latence et effet "neutered" (`byteLength === 0` après transfert).
-
-Critères de validation :
-
-- Un tableau comparatif simple clone vs transfer est produit.
-- La conclusion explique quand préférer le transfert.
-
-### Exercice 3 — Shared Worker (multi-onglets)
-
-- Créer un `SharedWorker` qui centralise un état simple (ex : compteur global).
-- Connecter deux onglets et synchroniser les updates via `MessagePort`.
-- Diffuser les événements à tous les clients connectés.
-
-Critères de validation :
-
-- Une action dans un onglet est visible dans l'autre en temps réel.
-- La gestion `connect`, `port.start()` et `port.onmessage` est maîtrisée.
-
-### Exercice 4 — Service Worker (cache et offline)
-
-- Enregistrer un service worker côté app.
-- Implémenter une stratégie minimale (cache-first ou stale-while-revalidate).
-- Vérifier le comportement hors-ligne sur une route statique.
-
-Critères de validation :
-
-- La page ciblée reste consultable sans réseau.
-- Les assets versionnés sont invalidés proprement.
-
-### Exercice 5 — Worklet (Paint ou Audio)
-
-- Choisir un type de worklet : `PaintWorklet` (visuel) ou `AudioWorklet` (audio).
-- Produire une mini démo fonctionnelle.
-- Documenter les contraintes d'exécution (runtime isolé, API disponibles).
-
-Critères de validation :
-
-- Le rendu custom (paint/audio) fonctionne.
-- Les limites de l'approche sont expliquées.
-
-### Exercice 6 — Worker Threads + SharedArrayBuffer (Node.js)
-
-- Créer un mini pool de `worker_threads` pour un calcul parallèle.
-- Tester message passing puis mémoire partagée (`SharedArrayBuffer` + `Atomics`).
-- Comparer coût de coordination vs gain CPU.
-
-Critères de validation :
-
-- Le pool exécute plusieurs jobs correctement.
-- Une mesure montre les cas où le parallélisme est rentable (ou non).
-
-### Ordre recommandé et livrable final
-
-Ordre : 1 -> 2 -> 3 -> 4 -> 5 -> 6.
-
-Livrable :
-
-- Une note de synthèse (1 page max) avec :
-  - quelle typologie utiliser selon le besoin,
-  - les pièges rencontrés,
-  - un arbre de décision simple (UI, offline, multi-onglets, CPU backend).
-
----
-
----
-
-## Pour aller plus loin
-
-- [MDN — Web Workers API](https://developer.mozilla.org/fr/docs/Web/API/Web_Workers_API)
-- [MDN — SharedArrayBuffer](https://developer.mozilla.org/fr/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer)
-- [MDN — Atomics](https://developer.mozilla.org/fr/docs/Web/JavaScript/Reference/Global_Objects/Atomics)
-- [MDN — requestAnimationFrame](https://developer.mozilla.org/fr/docs/Web/API/window/requestAnimationFrame)
-- [MDN — requestIdleCallback](https://developer.mozilla.org/fr/docs/Web/API/Window/requestIdleCallback)
-- [MDN — Scheduler API](https://developer.mozilla.org/en-US/docs/Web/API/Scheduler)
-- [Node.js — Worker Threads](https://nodejs.org/api/worker_threads.html)
-- [Chrome — Optimize long tasks](https://web.dev/articles/optimize-long-tasks)
-- [TC39 — Proposal: Atomics.waitAsync](https://github.com/tc39/proposal-atomics-wait-async)
-- [V8 Blog — Shared memory and Atomics](https://v8.dev/features/shared-array-buffer)
-
----
-
-## Défi
-
-Considérez ce code qui implémente un "spinlock" en JavaScript avec `SharedArrayBuffer` et `Atomics` :
-
-```typescript
-const sab = new SharedArrayBuffer(4);
-const lock = new Int32Array(sab);
-// lock[0] : 0 = libre, 1 = verrouillé
-
-// Worker A
-function acquire(): void {
-  while (Atomics.compareExchange(lock, 0, 0, 1) !== 0) {
-    // Busy-wait (spinlock)
-  }
-}
-
-function release(): void {
-  Atomics.store(lock, 0, 0);
-}
-
-// Worker B (même code)
-acquire();
-// section critique
-release();
+```
+Quelle est la différence entre concurrence et parallélisme en JavaScript ?|La concurrence entrelace plusieurs tâches sur un seul thread (event loop) pour rester réactif — elle n'accélère rien. Le parallélisme exécute réellement en même temps sur plusieurs threads/cœurs (workers) et peut réduire le temps total d'un calcul CPU-bound.
+Pourquoi une boucle CPU-bound gèle-t-elle toute l'application Node même dans une fonction async ?|Parce que l'event loop est coopératif et non préemptif : rien ne peut interrompre une fonction synchrone. async ne cède la main que sur un await d'une opération réellement asynchrone ; une boucle synchrone sans yield garde le thread jusqu'au bout.
+Comment céder l'event loop entre deux chunks de travail en Node.js ?|Avec une macrotâche : await new Promise(r => setImmediate(r)). setImmediate s'exécute en phase check et laisse l'event loop traiter les I/O et autres requêtes entre les lots.
+Pourquoi queueMicrotask ou Promise.resolve() ne suffisent-ils pas à débloquer l'event loop ?|Parce que les microtâches sont drainées intégralement AVANT que l'event loop reprenne les I/O. Une boucle qui ne fait que queueMicrotask bloque toujours tout. Il faut une macrotâche (setImmediate, MessageChannel, setTimeout) pour vraiment céder.
+Quels mécanismes de yield utiliser dans le navigateur, par ordre de préférence ?|scheduler.yield() (cède et reprend en priorité) puis scheduler.postTask (priorité explicite) puis MessageChannel (macrotâche sans le clamp de setTimeout) puis setTimeout(0) en dernier recours. queueMicrotask ne cède pas.
+Quand faut-il offloader vers un worker plutôt que chunker ?|Quand le travail est CPU-bound ET qu'on veut zéro impact sur l'event loop (offload) ou réduire le temps total via plusieurs cœurs (pool de workers). Le chunking suffit si on veut juste rester réactif sans accélérer. Jamais pour de l'I/O, déjà non-bloquant.
+Quel est le coût caché de postMessage entre threads et comment l'éviter ?|Par défaut postMessage fait un structured clone (copie profonde O(n)) des données. Pour de gros buffers on utilise les transférables (ArrayBuffer passé en 2e argument) qui changent de propriétaire en O(1), ou on fait charger la donnée directement dans le worker.
+À quoi servent SharedArrayBuffer et Atomics, et pourquoi les éviter par défaut ?|SharedArrayBuffer partage une zone mémoire entre threads sans copie ; Atomics fournit les opérations indivisibles pour éviter les race conditions. C'est avancé et risqué (mémoire partagée égale races), soumis à COOP/COEP au navigateur. Le message passing par copie/transfert suffit dans 99 % des cas et est plus sûr.
+Qu'est-ce que la backpressure et comment la gère-t-on sur un stream Node ?|C'est le signal envoyé quand un consommateur est plus lent que le producteur, pour éviter que la file enfle et sature la mémoire. Sur un writable Node, write() retourne false quand le buffer est plein ; on attend l'événement 'drain' avant de reprendre l'écriture.
 ```
 
-**Questions :**
-
-1. Ce spinlock est-il correct du point de vue de la synchronisation ? Pourquoi ?
-2. Quel est le problème principal de cette implémentation en JavaScript ?
-3. Comment réécrire ce lock de manière idiomatique en JS pour éviter ce problème ?
-
-<details>
-<summary>Réponse</summary>
-
-**1. Correction du spinlock :**
-
-Oui, le spinlock est **correct** du point de vue synchronisation.
-`Atomics.compareExchange(lock, 0, 0, 1)` est une opération atomique
-compare-and-swap (CAS) : elle ne met `lock[0]` à 1 que si la valeur
-courante est 0, et retourne l'ancienne valeur. Seul un thread à la
-fois peut réussir le CAS quand le lock est libre.
-
-**2. Le problème : busy-waiting**
-
-Le **busy-wait** (boucle active) est catastrophique en JavaScript :
-
-- Il consomme 100% d'un coeur CPU en tournant dans la boucle `while`
-- En Node.js, il bloque l'event loop du Worker : aucun callback I/O,
-  timer ou message ne peut être traité pendant l'attente
-- JavaScript ne peut pas faire de `yield` CPU au niveau du thread comme
-  un vrai spinlock en C/Rust (pas d'instruction `pause`/`YIELD`)
-- Si le Worker qui détient le lock est sur le même coeur CPU, le
-  Worker en attente peut empêcher le premier de progresser (priority
-  inversion)
-
-**3. Réécriture idiomatique avec `Atomics.wait` / `Atomics.notify` :**
-
-```typescript
-const sab = new SharedArrayBuffer(4);
-const lock = new Int32Array(sab);
-
-function acquire(): void {
-  while (true) {
-    // Tenter de prendre le lock
-    if (Atomics.compareExchange(lock, 0, 0, 1) === 0) {
-      return; // Lock acquis
-    }
-    // Si le lock est pris, DORMIR jusqu'à notification
-    // Le thread est suspendu par l'OS, pas de busy-wait
-    Atomics.wait(lock, 0, 1); // dort tant que lock[0] === 1
-  }
-}
-
-function release(): void {
-  Atomics.store(lock, 0, 0);
-  // Réveiller UN thread en attente
-  Atomics.notify(lock, 0, 1);
-}
-```
-
-`Atomics.wait` suspend le thread au niveau de l'OS (pas de CPU consommé).
-`Atomics.notify` réveille un thread en attente. C'est l'équivalent JS
-d'un futex Linux.
-
-**Attention** : `Atomics.wait` ne peut PAS être appelé sur le thread
-principal du navigateur (il est bloquant). Utilisez `Atomics.waitAsync`
-sur le thread principal, qui retourne une Promise.
-
-</details>
-
 ---
 
-<!-- parcours-recommande -->
+## Pont vers le lab
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 13 scheduling](../screencasts/screencast-13-scheduling.md)
-2. **Lab** : [lab-13-scheduler-implementation](../labs/lab-13-scheduler-implementation/README)
-3. **Quiz** : [quiz 13 scheduling](../quizzes/quiz-13-scheduling.html)
-:::
+> Lab associé : `01-js-runtime/labs/lab-13-scheduler-implementation/README.md`. Implémenter de zéro un scheduler coopératif qui découpe un gros travail en chunks et cède l'event loop, mesurer que la latence reste basse, puis comparer avec une version offloadée en worker_threads.

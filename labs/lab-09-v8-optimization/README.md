@@ -1,57 +1,126 @@
-# Lab 09 — V8 Optimization / Bytecode
+# Lab 09 — Observer les tiers de compilation de V8
 
-## Objectifs
+> **Outcome :** à la fin, tu sais lire le bytecode Ignition d'une fonction et observer sa montée à travers les tiers (Ignition → Maglev → TurboFan) avec les vrais flags V8, sur la fonction chaude de l'API TribuZen.
+> **Vrai outil :** Node.js 20+ et ses flags V8 natifs (`--print-bytecode`, `--trace-opt`, `--trace-deopt`). Aucun harnais simulé — tu lis la sortie réelle du moteur.
+> **Feedback :** le coach valide en session (pas de test-runner auto-correcteur — l'observable, c'est la sortie de V8).
 
-- Comprendre comment V8 compile le JavaScript en bytecode via l'interpreteur Ignition
-- Identifier les bytecodes fondamentaux : `LdaSmi`, `Star`, `Add`, `MulSmi`, `Return`
-- Comparer le bytecode généré selon les declarations (`let`, `var`, `const`) et la stabilite de types
-- Distinguer code monomorphe (optimisable) vs megamorphe (non-optimisable)
-- Identifier quelles operations produisent un bytecode compact vs volumineux
+## Énoncé
 
-## Prérequis
+Tu profiles la fonction de scoring de l'endpoint `/recommendations` de TribuZen. Elle calcule un score d'affinité entre un membre et une activité, et tourne des milliers de fois par requête.
 
-- Node.js v18+ (V8 v10+)
-- Connaissance du pipeline V8 : parsing -> Ignition (bytecode) -> TurboFan (JIT)
+Crée un fichier `scoring.js` avec ce starter (le vrai code, pas un gap-fill) :
 
-## Commande d'exécution
+```js
+// scoring.js — fonction chaude de l'API TribuZen
+function affinityScore(member, activity) {
+  const dx = member.energy - activity.energyCost;
+  const dy = member.social - activity.socialLoad;
+  return Math.sqrt(dx * dx + dy * dy);
+}
 
-```bash
-# Partie 1 — Observer le bytecode de hotFunction
-node --print-bytecode --print-bytecode-filter=hotFunction exercise.js
+const members = Array.from({ length: 5000 }, (_, i) => ({ energy: i % 10, social: i % 7 }));
+const activity = { energyCost: 5, socialLoad: 3 };
 
-# Filtrer d'autres fonctions (Parties 2-4)
-node --print-bytecode --print-bytecode-filter=withLet exercise.js
-node --print-bytecode --print-bytecode-filter=typeStable exercise.js
-node --print-bytecode --print-bytecode-filter=typeUnstable exercise.js
-node --print-bytecode --print-bytecode-filter=monoAccess exercise.js
-node --print-bytecode --print-bytecode-filter=megaAccess exercise.js
-node --print-bytecode --print-bytecode-filter=compactOps exercise.js
-node --print-bytecode --print-bytecode-filter=bloatedOps exercise.js
-node --print-bytecode --print-bytecode-filter=withSpread exercise.js
-node --print-bytecode --print-bytecode-filter=withManual exercise.js
+// Trois phases de chaleur croissante
+console.time('froid');
+for (const m of members) affinityScore(m, activity);
+console.timeEnd('froid');
+
+console.time('tiede');
+for (let r = 0; r < 50; r++) for (const m of members) affinityScore(m, activity);
+console.timeEnd('tiede');
+
+console.time('chaud');
+for (let r = 0; r < 2000; r++) for (const m of members) affinityScore(m, activity);
+console.timeEnd('chaud');
 ```
 
-## Structure du lab
+Ton travail : **observer**, pas modifier — utiliser les flags V8 pour voir ce que le moteur fait de cette fonction, puis provoquer une déoptimisation.
 
-| Partie | Sujet |
-|--------|-------|
-| 1 | Écrire `hotFunction`, l'appeler 10 000 fois, lire le bytecode |
-| 2 | Comparer le bytecode : `let` vs `var` vs `const`, types stables vs instables |
-| 3 | Code monomorphe vs megamorphe — comparer la taille du bytecode |
-| 4 | Operations natives : bytecode compact vs bytecode volumineux |
+## Étapes (en friction)
 
-## Indices
+1. **Lis le bytecode.** Lance `node --print-bytecode --print-bytecode-filter="affinityScore" scoring.js`. Dans la sortie, repère : le `Parameter count`, les instructions `GetNamedProperty` (accès `member.energy` / `activity.energyCost`), les `Sub` / `Mul` avec leur feedback slot `[n]`, et le `Return`. Écris à la main, en une phrase, ce que fait chaque instruction — sans copier les commentaires du module.
+2. **Observe la montée en tier.** Lance `node --trace-opt scoring.js`. Repère les lignes `marking … affinityScore for optimization to MAGLEV` puis `… to TURBOFAN`. Note à quelle phase (froid / tiède / chaud) chacune apparaît, et compare avec les temps affichés par `console.timeEnd`.
+3. **Provoque une déoptimisation.** Sans regarder le corrigé, modifie le tableau `members` pour que certains objets aient une **forme différente** (par exemple ajouter conditionnellement une propriété `z`). Relance avec `node --trace-opt --trace-deopt scoring.js` et trouve la ligne `deoptimizing … affinityScore … reason: …`. Explique en une phrase pourquoi le code optimisé a été jeté.
+4. **Mesure le lazy parsing.** Compare `node scoring.js` et `node --no-lazy scoring.js`. Explique pourquoi la différence est faible ici (peu de fonctions non appelées) et dans quel cas elle serait importante.
 
-- `LdaSmi [n]` = Load Small Integer dans l'accumulateur
-- `Star rN` = Store Accumulator into Register
-- `Add rN, [slot]` = addition avec feedback de type
-- `MulSmi [n]` = multiplication par un petit entier
-- `Return` = retourne la valeur de l'accumulateur
-- Le bytecode monomorphe est plus court car V8 n'a pas besoin de gardes de type
-- `delete obj.prop` et l'acces dynamique `obj[key]` generent du bytecode plus lourd
-- Les slots `[N]` après les opcodes sont des feedback vector slots pour le JIT
+## Corrigé complet commenté
 
-## Ressources
+```js
+// scoring.js — version instrumentée pour l'étape 3 (déoptimisation)
+function affinityScore(member, activity) {
+  // Deux accès de propriété (feedback slots) + deux soustractions + une mult.
+  // TurboFan spécule que member a TOUJOURS la même Hidden Class (Map).
+  const dx = member.energy - activity.energyCost;
+  const dy = member.social - activity.socialLoad;
+  return Math.sqrt(dx * dx + dy * dy);
+}
 
-- [Understanding V8's Bytecode](https://medium.com/nicely-said/understanding-v8s-bytecode-317d46c94775)
-- [V8 Ignition Design Doc](https://v8.dev/blog/ignition-interpreter)
+// ── Étape 1-2 : feedback STABLE → montée jusqu'à TurboFan ────────────
+// Tous les members ont la même forme {energy, social} → même Map → monomorphe.
+const stable = Array.from({ length: 5000 }, (_, i) => ({ energy: i % 10, social: i % 7 }));
+const activity = { energyCost: 5, socialLoad: 3 };
+
+console.time('chaud-stable');
+for (let r = 0; r < 2000; r++) for (const m of stable) affinityScore(m, activity);
+console.timeEnd('chaud-stable'); // rapide : TurboFan, pas de déopt
+
+// ── Étape 3 : feedback INSTABLE → déoptimisation ────────────────────
+// Un member sur 1000 reçoit une propriété z → DEUXIÈME Map.
+// L'accès member.energy passe de monomorphe à polymorphe.
+// TurboFan avait compilé pour la Map A ; l'arrivée de la Map B viole
+// l'hypothèse → il jette le code optimisé et retombe sur Ignition.
+const unstable = Array.from({ length: 5000 }, (_, i) => {
+  const p = { energy: i % 10, social: i % 7 };
+  if (i % 1000 === 0) p.z = 0; // ← forme différente = Map différente
+  return p;
+});
+
+console.time('chaud-instable');
+for (let r = 0; r < 2000; r++) for (const m of unstable) affinityScore(m, activity);
+console.timeEnd('chaud-instable'); // plus lent : déopt visible avec --trace-deopt
+```
+
+**Ce que tu dois voir dans les sorties :**
+
+```bash
+# Bytecode (étape 1) — extrait
+node --print-bytecode --print-bytecode-filter="affinityScore" scoring.js
+#   [generated bytecode for function: affinityScore]
+#   Parameter count 3
+#   ... GetNamedProperty a1, [0]   ← member.energy, feedback slot 0
+#   ... Sub r0, [4]                ← soustraction, feedback slot 4
+#   ... Return
+
+# Montée en tier (étape 2)
+node --trace-opt scoring.js
+#   [marking ... affinityScore for optimization to MAGLEV, reason: hot]
+#   [marking ... affinityScore for optimization to TURBOFAN, reason: hot and stable]
+
+# Déoptimisation (étape 3)
+node --trace-opt --trace-deopt scoring.js
+#   [deoptimizing ... affinityScore ... reason: wrong map]
+```
+
+**La leçon :** la vitesse d'une fonction chaude ne dépend pas que du nombre d'appels (la « chaleur »), mais aussi de la **stabilité des formes d'objets** qu'elle reçoit. Un feedback stable = TurboFan qui tient ; un feedback instable = déoptimisation et retour à l'interprétation. Les Hidden Classes qui expliquent ce `wrong map` sont le sujet du module 11.
+
+## Variante J+30 (fading)
+
+Reprends `scoring.js` **30 jours plus tard, en 20 minutes chrono, sans relire le corrigé** :
+
+1. Écris de mémoire la fonction `affinityScore` et les trois phases de charge.
+2. Retrouve, sans notes, les trois flags pour : lire le bytecode, voir la montée en tier, voir la déoptimisation.
+3. Contrainte ajoutée : cette fois, **prédis à l'avance** dans un commentaire à quelle phase (froid/tiède/chaud) Maglev puis TurboFan vont apparaître, *avant* de lancer `--trace-opt`. Vérifie ta prédiction. Si elle est fausse, c'est le signal que la notion de seuil n'est pas ancrée.
+
+## Application TribuZen
+
+Porte l'exercice dans le vrai produit :
+
+1. Dans `smaurier/tribuzen`, isole la vraie fonction de scoring de `api/src/recommendations/scoring.ts` dans un script de repro `scoring-repro.js` (hors prod, avec des données synthétiques réalistes).
+2. Lance `node --trace-opt --trace-deopt scoring-repro.js` et vérifie que la fonction atteint bien TurboFan **et n'est pas déoptimisée** sous une charge représentative.
+3. Si tu vois un `deoptimizing … reason: wrong map`, c'est que les objets `member` passés à la fonction n'ont pas tous la même forme (propriétés ajoutées conditionnellement, ordre d'initialisation variable). Corrige la construction des objets pour stabiliser leur Hidden Class (préparation du module 11).
+4. Commit sur `smaurier/tribuzen` :
+   ```bash
+   git add api/src/recommendations/scoring-repro.js
+   git commit -m "perf(reco): repro tiering V8 sur affinityScore + observation TurboFan"
+   ```

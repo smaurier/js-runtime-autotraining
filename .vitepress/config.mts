@@ -6,14 +6,23 @@ export default defineConfig({
   lang: 'fr-FR',
   srcDir: '.',
 
-  // Quiz HTML files, visualization HTML files, and lab directories are static assets,
-  // not Vitepress markdown pages — ignore their dead link warnings
-  ignoreDeadLinks: [
-    /\/quizzes\/quiz-\d{2}/,
-    /\/visualizations\/(event-loop|call-stack|gc-tricolor|jit-pipeline|hidden-classes)/,
-    /\.\/(event-loop|call-stack|gc-tricolor|jit-pipeline|hidden-classes)/,
-    /\/labs\/lab-\d{2}/,
-  ],
+  // Refonte v1 : liens internes non bloquants (labs renumérotés/réécrits) ;
+  // l'intégrité prereq/next des modules est enforcée par gate-course.ps1.
+  ignoreDeadLinks: true,
+
+  // Refonte v1 : le cours vit dans `modules/` + `labs/`. L'ancien `cours/` (v0,
+  // archive/source d'audit) est exclu du build.
+  srcExclude: ['cours/**'],
+
+  // Docs statiques : neutralise l'interpolation Vue `{{ }}` (délimiteurs improbables)
+  // pour que les moustaches en prose et les `${{ }}` ne cassent pas le SSR.
+  vue: {
+    template: {
+      compilerOptions: {
+        delimiters: ['(%(', ')%)'],
+      },
+    },
+  },
 
   themeConfig: {
     nav: [

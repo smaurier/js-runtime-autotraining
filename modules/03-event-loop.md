@@ -1,785 +1,303 @@
-# Module 03 — La Boucle d'Événements (Event Loop)
+---
+titre: L'event loop
+cours: 01-js-runtime
+notions: [JS single-threaded, concurrence via event loop, call stack, task queue, APIs asynchrones fournies par le host, Web APIs navigateur, libuv Node, setTimeout(0) n'est pas 0, rendering et event loop, navigateur vs Node]
+outcomes: [expliquer pourquoi JS mono-thread reste non-bloquant, tracer call stack + task queue + event loop sur un extrait, prédire l'ordre d'exécution d'un code mêlant sync et setTimeout]
+prerequis: [02-scope-closures-memory]
+next: 04-microtasks-macrotasks
+libs: []
+tribuzen: couche runtime de l'API TribuZen — ordonnancement des handlers et tâches différées côté Node
+last-reviewed: 2026-07
+---
 
-> **Objectif** : Comprendre en profondeur le fonctionnement de l'event loop, ses phases d'exécution dans Node.js et le navigateur, et savoir prédire l'ordre d'exécution de tout code asynchrone JavaScript.
+# L'event loop
 
-> **Difficulté** : ⭐⭐⭐ (Avancé) — Prends ton temps, ce module est dense.
+> **Outcomes — tu sauras FAIRE :** expliquer pourquoi un JS mono-thread reste non-bloquant, tracer call stack + task queue + event loop sur un extrait de code, prédire l'ordre d'exécution d'un code mêlant synchrone et `setTimeout`.
+> **Difficulté :** :star::star::star:
 
-> **Pas de panique !** Ce module est dense, mais tu n'as pas besoin de tout retenir du premier coup. L'objectif est de construire un modèle mental, pas de mémoriser des règles. Relis ce module après avoir fait le lab — beaucoup de choses s'éclaireront à la pratique.
+## 1. Cas concret d'abord
+
+Tu écris un handler dans l'API TribuZen (Node/Express). Quand un membre rejoint une famille, tu veux répondre tout de suite au client, puis envoyer un e-mail de bienvenue « juste après ». Un collègue a écrit ceci :
+
+```js
+// POST /families/:id/join — handler TribuZen
+app.post('/families/:id/join', (req, res) => {
+  console.log('1. début handler');
+
+  setTimeout(() => {
+    console.log('4. envoi e-mail de bienvenue');
+    sendWelcomeEmail(req.body.email);
+  }, 0); // "0ms => tout de suite", pense le collègue
+
+  console.log('2. réponse envoyée au client');
+  res.json({ joined: true });
+
+  console.log('3. fin handler');
+});
+```
+
+Le collègue s'attend à l'ordre `1, 4, 2, 3` — « le timer est à 0 ms, donc il part immédiatement ». La console affiche en réalité :
+
+```
+1. début handler
+2. réponse envoyée au client
+3. fin handler
+4. envoi e-mail de bienvenue
+```
+
+Le `setTimeout(…, 0)` ne s'exécute **pas** au milieu du handler. Il attend que **toute** la fonction synchrone soit finie, que la call stack soit vide, avant d'être repris. Ce module explique pourquoi — et qui, exactement, décide de ce « plus tard ». Indice : ce n'est pas le moteur JavaScript.
 
 ---
 
-## Prérequis
+## 2. Théorie complète, concise
 
-- Maîtrise de la pile d'appels (call stack) et du modèle d'exécution synchrone (Module 01)
-- Connaissance de la gestion mémoire et du garbage collector (Module 02)
-- Familiarité avec les callbacks, Promises et `async/await`
-- Notions de base sur les threads et la programmation concurrente
+### 2.1 JS est single-threaded
+
+Un runtime JavaScript exécute ton code sur **un seul thread** : il y a une seule **call stack**, donc une seule chose s'exécute à un instant donné. Pas de parallélisme au niveau de ton code JS. Si une fonction tourne, rien d'autre ne tourne en même temps.
+
+```js
+function a() { b(); }
+function b() { c(); }
+function c() { console.log('au fond de la pile'); }
+
+a();
+// call stack empilée : a -> b -> c, puis dépilée c -> b -> a
+```
+
+Conséquence directe : **du code synchrone lourd bloque tout**. Une boucle qui tourne 5 secondes gèle le thread pendant 5 secondes — aucun autre code ne peut s'exécuter, aucun clic traité, aucune requête servie.
+
+### 2.2 Alors comment JS fait-il des choses « en même temps » ?
+
+C'est le paradoxe apparent : un thread unique, mais des milliers d'opérations I/O concurrentes (requêtes réseau, lectures de fichiers, timers). La réponse tient en un mot : **délégation**.
+
+Le moteur JS (V8 dans Chrome et Node) ne sait faire qu'une chose : exécuter du JavaScript synchrone. Les opérations longues (attendre le réseau, lire un fichier, compter un délai) **ne sont pas exécutées par le moteur JS**. Elles sont déléguées à l'**environnement hôte** :
+
+- Dans le **navigateur** : les **Web APIs** (fournies par le navigateur, pas par le moteur JS) — `setTimeout`, `fetch`, événements DOM, `XMLHttpRequest`…
+- Dans **Node.js** : **libuv**, une bibliothèque écrite en C qui gère les timers, l'I/O disque/réseau via un thread pool et les APIs asynchrones de l'OS.
+
+Le moteur JS se contente de :
+
+1. enregistrer un callback,
+2. confier l'opération longue à l'hôte,
+3. continuer son code synchrone sans attendre,
+4. récupérer le résultat plus tard, via le callback.
+
+```
+  Ton code JS (1 thread)            HÔTE (Web APIs / libuv) — hors du moteur JS
+  ======================            ============================================
+  setTimeout(cb, 100)   -enregistre-> minuteur compte 100 ms (en parallèle)
+  fetch(url)            -délègue----> requête réseau via l'OS
+  ...code sync continue...            ...travail de fond, ne bloque pas le thread JS...
+  callback exécuté  <---quand prêt--- l'hôte pousse le callback dans la task queue
+```
+
+### 2.3 Les trois pièces : call stack, task queue, event loop
+
+Trois éléments collaborent. **Point crucial d'audit : un seul des trois est dans le moteur JS.**
+
+| Pièce | Rôle | Qui la fournit |
+|---|---|---|
+| **Call stack** | Empile les appels de fonction en cours. Une par thread. | Le moteur JS (V8) |
+| **Task queue** (callback / macrotask queue) | File d'attente des callbacks prêts à être exécutés. | L'**hôte** (navigateur / Node) |
+| **Event loop** | Boucle qui surveille la pile ; dès qu'elle est vide, prend le prochain callback de la file et le pousse sur la pile. | L'**hôte** (navigateur / libuv) — **PAS V8** |
+
+> **À retenir absolument :** l'event loop **n'est pas dans le moteur JavaScript**. V8 ne connaît pas l'event loop : il exécute des fonctions et vide sa pile. C'est l'**hôte** (le navigateur, ou libuv pour Node) qui fournit l'event loop, la task queue, et toutes les APIs asynchrones. Le même moteur V8 tourne dans Chrome et dans Node, mais l'event loop et les APIs async diffèrent car l'hôte diffère.
+
+L'algorithme de l'event loop, en version simplifiée :
+
+```
+répéter à l'infini :
+  1. exécuter tout le code synchrone jusqu'à ce que la call stack soit VIDE
+  2. la pile est vide ? prendre le prochain callback prêt dans la task queue
+  3. le pousser sur la pile et l'exécuter (retour à l'étape 1)
+```
+
+La règle d'or : **l'event loop ne prend un callback dans la file QUE quand la call stack est complètement vide.** Un callback n'interrompt jamais du code synchrone en cours.
+
+### 2.4 Dérouler le cas concret
+
+Reprenons le handler du §1 :
+
+1. `console.log('1…')` — synchrone, s'exécute, se dépile.
+2. `setTimeout(cb, 0)` — le moteur JS **délègue** à l'hôte : « minuteur de 0 ms, puis mets `cb` dans la task queue ». Le moteur **ne s'arrête pas**, il continue.
+3. `console.log('2…')` puis `res.json()` puis `console.log('3…')` — tout le reste du code synchrone s'exécute.
+4. Le handler retourne. La call stack se vide.
+5. **Maintenant seulement**, l'event loop voit la pile vide, prend `cb` dans la task queue et l'exécute → `console.log('4…')`.
+
+Le timer était « prêt » depuis longtemps, mais il a dû **attendre la fin du synchrone**. D'où l'ordre `1, 2, 3, 4`.
+
+### 2.5 `setTimeout(fn, 0)` n'est pas « 0 »
+
+`setTimeout(fn, 0)` ne veut pas dire « exécute `fn` maintenant », ni même « exécute `fn` dans 0 ms ». Ça veut dire : **« mets `fn` dans la task queue une fois le délai écoulé ; elle sera reprise quand la pile sera vide »**. Deux raisons pour lesquelles ce n'est jamais vraiment 0 :
+
+1. **La pile doit d'abord se vider.** Si du code synchrone prend 500 ms après le `setTimeout`, le callback attend 500 ms, pas 0.
+2. **Le délai est « clampé » (minimum imposé).** La spec HTML impose un plancher de **4 ms** pour les timers imbriqués au-delà de 5 niveaux ; les onglets en arrière-plan sont ralentis (~1000 ms). Node clampe `setTimeout(fn, 0)` à **1 ms**.
+
+`setTimeout(fn, 0)` est donc un idiome pour dire : **« exécute ça plus tard, après le code synchrone en cours »** — pas « immédiatement ».
+
+### 2.6 Rendering et event loop (navigateur)
+
+Dans le **navigateur**, l'event loop coordonne aussi le **rendu** (le repaint de l'écran). Le rendu s'intercale entre les tâches, quand le navigateur le juge nécessaire (typiquement ~toutes les 16 ms pour viser 60 fps) :
+
+```
+  navigateur, boucle simplifiée :
+    1. exécuter UNE tâche de la task queue
+    2. (les microtâches — détaillées au module 04)
+    3. si le moment est venu de rafraîchir : style -> layout -> paint
+    4. retour à 1.
+```
+
+Conséquence pratique : **le rendu ne peut pas se faire pendant qu'une tâche synchrone tourne.** Une boucle JS de 2 secondes gèle l'UI — pas de repaint, pas de scroll, pas de clic traité — car le navigateur ne peut repeindre qu'entre les tâches, et la pile n'est pas vide. C'est le fameux « la page ne répond plus ».
+
+### 2.7 Navigateur vs Node : même principe, hôtes différents
+
+Le concept est le même ; l'implémentation diffère car l'hôte diffère.
+
+| Aspect | Navigateur | Node.js |
+|---|---|---|
+| Fournisseur de l'event loop | Le navigateur (Blink / Gecko) | **libuv** (C) |
+| APIs asynchrones | Web APIs (`fetch`, DOM, `setTimeout`) | libuv + bindings (`fs`, `net`, `setTimeout`, `setImmediate`) |
+| Rendu (paint) | Oui (DOM à l'écran) | Non (pas de DOM) |
+| Structure de la boucle | Simple (une task queue + micro) | **6 phases** libuv (timers, poll, check…) |
+| Extras | `requestAnimationFrame` | `setImmediate`, `process.nextTick` |
+
+Node ajoute une granularité : libuv organise la boucle en **phases** (timers → pending → poll → check → close). On survole ici — le détail des phases et des microtâches / macrotâches est le sujet du **module 04**. Ce qu'il faut retenir maintenant : dans les deux cas, **c'est l'hôte, pas V8, qui fait tourner la boucle et fournit l'asynchrone**.
 
 ---
 
-## Théorie
+## 3. Worked examples
 
-> 🎯 **Analogie** : L'event loop, c'est comme un serveur dans un restaurant. Il ne cuisine pas lui-même (single-threaded), mais il prend les commandes, les transmet en cuisine (Web APIs/libuv), et sert les plats quand ils sont prêts. Il ne peut servir qu'un plat à la fois, mais il gère des dizaines de tables en parallèle grâce à cette organisation.
->
-> Pour filer la métaphore : le **serveur**, c'est l'**event loop** — il coordonne tout mais ne fait qu'une chose à la fois. La **cuisine**, ce sont les **Web APIs** (navigateur) ou **libuv** (Node.js) — c'est là que le vrai travail de fond se passe, en parallèle. Le **comptoir** ou les plats prêts attendent, c'est la **task queue** (file de macrotâches). Et les **clients prioritaires** qui passent toujours devant les autres au comptoir, ce sont les **microtâches** (Promises, `queueMicrotask`).
+### Exemple 1 — Tracer call stack + task queue pas à pas
 
-### 1. Pourquoi JavaScript est mono-thread mais non-bloquant
-
-JavaScript s'exécute sur un **unique thread principal**. Il n'y a qu'une seule pile d'appels (call stack), donc une seule instruction s'exécute à la fois. Pourtant, JS gère des milliers d'opérations I/O concurrentes. Comment ?
-
-La réponse tient en un mot : **délégation**. Les opérations longues (réseau, fichiers, timers) ne sont pas exécutées par le moteur JS lui-même mais par l'environnement hôte (libuv pour Node.js, les Web APIs pour le navigateur). Le moteur JS ne fait que :
-
-1. Enregistrer un callback
-2. Déléguer l'opération à l'environnement
-3. Continuer l'exécution synchrone
-4. Récupérer le résultat via le callback quand l'opération est terminée
-
-```
-  Thread principal JS          Environnement hôte (libuv / Web APIs)
-  =====================        =======================================
-  |                   |        |                                     |
-  | fs.readFile(cb)   | -----> | Thread pool: lecture disque          |
-  |                   |        |                                     |
-  | http.get(cb)      | -----> | OS async I/O: requête réseau        |
-  |                   |        |                                     |
-  | setTimeout(cb, 5) | -----> | Timer system: compte 5ms             |
-  |                   |        |                                     |
-  | Exécution sync... |        | ... travail en parallèle ...        |
-  |                   |        |                                     |
-  | <- cb()           | <----- | Opération terminée, callback prêt   |
-  =====================        =======================================
-```
-
-Le thread principal n'est **jamais bloqué** par une opération I/O. Il est bloqué uniquement par du code synchrone lourd (boucle `while` infinie, calcul CPU intensif, etc.).
-
-### 2. Le cycle complet de l'event loop
-
-#### Modèle simplifié d'abord
-
-Avant de plonger dans le diagramme complet, retiens ce modèle ultra-simple en 2 étapes. C'est la base de tout :
-
-1. **Exécuter tout le code synchrone** — JavaScript parcourt ton fichier de haut en bas et exécute tout ce qui n'est pas dans un callback. Les callbacks sont *enregistrés* mais pas encore exécutés.
-2. **Quand la pile d'appels est vide, piocher le prochain callback dans la file** — une fois que tout le code synchrone est terminé, l'event loop va chercher le prochain callback prêt et l'exécute. Puis il recommence.
-
-```
-  Code synchrone (pile d'appels)
-        │
-        │  tout exécuté ?
-        v
-  Pile vide ? ──non──> continuer l'exécution synchrone
-        │
-       oui
-        │
-        v
-  Prendre le prochain callback prêt dans la file
-        │
-        v
-  L'exécuter (retour en haut)
-```
-
-C'est tout. Si tu retiens juste ça, tu as déjà le coeur du mécanisme. Maintenant qu'on a le modèle simple, voici le modèle complet avec les détails qui font la différence (microtâches, macrotâches, rendering) :
-
-L'event loop est l'algorithme central qui orchestre l'exécution du code asynchrone. Voici le cycle simplifié applicable au navigateur :
-
-```
-  +---------------------------------------------------------+
-  |                    EVENT LOOP CYCLE                      |
-  |                                                         |
-  |  +------------------+                                   |
-  |  |   Call Stack     |  <-- Exécution synchrone          |
-  |  |   (pile vide ?)  |                                   |
-  |  +--------+---------+                                   |
-  |           |                                             |
-  |           | oui, la pile est vide                        |
-  |           v                                             |
-  |  +------------------+                                   |
-  |  | Microtask Queue  |  <-- Promise.then, queueMicrotask |
-  |  | (vider TOUT)     |      MutationObserver              |
-  |  +--------+---------+                                   |
-  |           |                                             |
-  |           | file de microtâches vide                     |
-  |           v                                             |
-  |  +------------------+                                   |
-  |  | Macrotask Queue  |  <-- setTimeout, setInterval,     |
-  |  | (UNE seule)      |      I/O callbacks, events DOM    |
-  |  +--------+---------+                                   |
-  |           |                                             |
-  |           | après chaque macrotâche                      |
-  |           v                                             |
-  |  +------------------+                                   |
-  |  |  Rendering       |  <-- requestAnimationFrame,       |
-  |  |  (si nécessaire) |      Style, Layout, Paint          |
-  |  +--------+---------+                                   |
-  |           |                                             |
-  |           +-----------> retour au début du cycle         |
-  +---------------------------------------------------------+
-```
-
-**Règle fondamentale** : entre chaque macrotâche, TOUTES les microtâches sont vidées. Le rendering n'intervient que si le navigateur juge nécessaire un rafraîchissement (~16ms pour 60fps).
-
-### 3. Les phases de l'event loop Node.js
-
-> 📋 **Rappel** : **libuv** est une bibliothèque écrite en C qui fournit à Node.js son event loop et ses capacités d'I/O asynchrone. C'est le « moteur sous le capot » qui permet à Node.js de gérer des milliers de connexions sans bloquer — tu n'interagis jamais directement avec libuv, mais c'est elle qui fait tourner la mécanique.
-
-Node.js utilise **libuv** comme moteur d'event loop. Le cycle est plus granulaire que celui du navigateur et comporte **6 phases distinctes** :
-
-```
-   ┌───────────────────────────┐
-┌─>│        timers              │ setTimeout, setInterval
-│  └─────────────┬─────────────┘
-│  ┌─────────────┴─────────────┐
-│  │     pending callbacks      │ callbacks I/O différés (erreurs TCP, etc.)
-│  └─────────────┬─────────────┘
-│  ┌─────────────┴─────────────┐
-│  │       idle, prepare        │ usage interne libuv uniquement
-│  └─────────────┬─────────────┘
-│  ┌─────────────┴─────────────┐
-│  │           poll             │ récupère les événements I/O,
-│  │                           │ exécute les callbacks I/O
-│  │                           │ (peut bloquer ici si rien à faire)
-│  └─────────────┬─────────────┘
-│  ┌─────────────┴─────────────┐
-│  │          check             │ setImmediate callbacks
-│  └─────────────┬─────────────┘
-│  ┌─────────────┴─────────────┐
-│  │     close callbacks        │ socket.on('close', ...)
-│  └─────────────┬─────────────┘
-│                │
-│  ┌─────────────┴─────────────┐
-│  │  process.nextTick queue    │ <── vidée ENTRE chaque phase
-│  │  microtask queue           │ <── vidée ENTRE chaque phase
-│  └─────────────┬─────────────┘
-│                │
-└────────────────┘
-```
-
-**Détail de chaque phase :**
-
-| Phase | Description | APIs concernées |
-|-------|-------------|-----------------|
-| **timers** | Exécute les callbacks dont le délai est expiré | `setTimeout`, `setInterval` |
-| **pending callbacks** | Exécute les callbacks I/O reportés au cycle précédent | Erreurs système (ECONNREFUSED, etc.) |
-| **idle, prepare** | Usage interne de libuv | Aucune API JS exposée |
-| **poll** | Récupère les nouveaux événements I/O, exécute les callbacks I/O | `fs.readFile`, `net.Socket`, etc. |
-| **check** | Exécute les callbacks `setImmediate` | `setImmediate` |
-| **close callbacks** | Exécute les callbacks de fermeture | `socket.on('close', ...)` |
-
-**Point critique** : entre CHAQUE phase (pas entre chaque callback), Node.js vide :
-1. La file `process.nextTick` (priorité maximale)
-2. La file des microtâches (Promises)
-
-**Changement important depuis Node.js 11** : avant la version 11, Node.js vidait toutes les macrotâches d'une même phase avant de traiter les microtâches. Depuis Node 11+, le comportement est aligné sur le navigateur : les microtâches sont vidées après **chaque** callback, pas seulement entre les phases.
-
-### 4. Navigateur vs Node.js : différences clés
-
-```
-  Aspect                  Navigateur                 Node.js
-  ======================= ========================== ==========================
-  Moteur event loop       Intégré au navigateur      libuv (C)
-  Phases                  Simplifié (macro/micro)    6 phases distinctes
-  Rendering               Oui (rAF, paint)           Non (pas de DOM)
-  setImmediate            Non standard (IE only)     Oui (phase check)
-  process.nextTick        Non disponible             Oui (priorité max)
-  requestAnimationFrame   Oui                        Non disponible
-  Web Workers             Oui                        worker_threads
-  Microtâches entre       Chaque macrotâche          Chaque callback (Node 11+)
-  queueMicrotask          Oui                        Oui (depuis Node 11+)
-```
-
-### 5. `setTimeout(fn, 0)` n'est PAS "exécuter immédiatement"
-
-C'est l'une des confusions les plus répandues. `setTimeout(fn, 0)` ne signifie pas "exécuter fn maintenant". Cela signifie :
-
-1. Enregistrer `fn` dans la file des timers
-2. Le délai minimum est **clampé** à ~1ms (voire 4ms dans certains cas, cf. HTML spec)
-3. `fn` sera exécutée au **prochain passage** dans la phase timers, une fois la pile vide
-4. Si du code synchrone prend 500ms, le timer de 0ms attendra 500ms
-
-```typescript
+```js
 console.log('A');
 
 setTimeout(() => {
-  console.log('B'); // macrotâche — phase timers
+  console.log('B'); // délégué à l'hôte, repris plus tard
 }, 0);
 
-Promise.resolve().then(() => {
-  console.log('C'); // microtâche — prioritaire sur le timer
-});
-
-console.log('D');
-
-// Sortie garantie : A, D, C, B
-// Le timer de 0ms passe APRÈS la microtâche Promise
+console.log('C');
 ```
 
-**Le clamping du délai** selon la spécification HTML :
-- Pour les timers imbriqués à plus de 5 niveaux, le délai minimum est clampé à **4ms**
-- Les navigateurs peuvent augmenter ce minimum pour les onglets en arrière-plan (~1000ms)
-- Node.js clampe à **1ms** (un `setTimeout(fn, 0)` devient `setTimeout(fn, 1)`)
-
-### 6. `setImmediate` vs `setTimeout(fn, 0)` vs `process.nextTick`
-
-Ces trois mécanismes planifient du code asynchrone, mais à des moments **très différents** du cycle :
+Déroulé, pile et file à chaque étape :
 
 ```
-  Priorité d'exécution (du plus prioritaire au moins prioritaire) :
-
-  ┌─────────────────────────────────┐
-  │ 1. process.nextTick             │ <-- entre chaque opération interne
-  │    (pas une microtâche !)       │    vidé AVANT les microtâches
-  ├─────────────────────────────────┤
-  │ 2. Microtâches                  │ <-- Promise.then, queueMicrotask
-  │    (vidées intégralement)       │
-  ├─────────────────────────────────┤
-  │ 3. Macrotâches                  │
-  │    ├── timers (setTimeout)      │ <-- phase timers
-  │    ├── I/O callbacks            │ <-- phase poll
-  │    └── setImmediate             │ <-- phase check
-  └─────────────────────────────────┘
+étape 1 : console.log('A')       pile: [log]          file: []       -> affiche A
+étape 2 : setTimeout(cb, 0)      pile: [setTimeout]   file: []
+          -> l'hôte prend le relais : minuteur 0 ms puis dépose cb
+          après ~1 ms, l'hôte :  pile: []             file: [cb]
+étape 3 : console.log('C')       pile: [log]          file: [cb]     -> affiche C
+étape 4 : pile VIDE              pile: []             file: [cb]
+          -> event loop prend cb pile: [cb]           file: []       -> affiche B
 ```
 
-**Cas piège** : l'ordre entre `setTimeout(fn, 0)` et `setImmediate` n'est **pas déterministe** lorsqu'ils sont appelés depuis le contexte principal :
+**Sortie : `A`, `C`, `B`.** Bien que le timer soit à 0, `B` sort en dernier : le synchrone (`A`, `C`) passe toujours avant tout callback de la file.
 
-```typescript
-// Depuis le contexte principal : ordre NON garanti
-setTimeout(() => console.log('timeout'), 0);
-setImmediate(() => console.log('immediate'));
-// Peut afficher "timeout, immediate" OU "immediate, timeout"
-// Cela dépend de la performance du système au moment du lancement
+### Exemple 2 — Le synchrone lourd retarde le timer (fading)
 
-// Depuis un callback I/O : setImmediate TOUJOURS en premier
-const fs = require('fs');
-fs.readFile(__filename, () => {
-  setTimeout(() => console.log('timeout'), 0);
-  setImmediate(() => console.log('immediate'));
-});
-// Toujours : "immediate, timeout"
-// Car après I/O (phase poll), la prochaine phase est check (setImmediate)
-```
+Même mécanique, mais on ajoute une contrainte : un calcul bloquant entre le `setTimeout` et la fin du code. Prédis avant de lire la réponse.
 
-**Explication** : dans un callback I/O (phase poll), la phase suivante est **check** (setImmediate), puis le cycle recommence par **timers** (setTimeout). Donc `setImmediate` passe toujours en premier dans ce contexte.
+```js
+console.log('début');
 
-### 7. `requestAnimationFrame` dans la boucle
+setTimeout(() => console.log('timer 0ms'), 0);
 
-`requestAnimationFrame` (rAF) n'est ni une microtâche ni une macrotâche classique. Il s'inscrit dans l'étape de **rendering** du navigateur :
-
-```
-  ┌─────────────────────────────────────────┐
-  │           Cycle navigateur              │
-  │                                         │
-  │  1. Macrotâche (une seule)              │
-  │  2. Vider TOUTES les microtâches        │
-  │  3. Si ~16ms écoulés (60fps) :          │
-  │     a. Exécuter TOUS les callbacks rAF  │
-  │     b. Style recalculation              │
-  │     c. Layout                           │
-  │     d. Paint                            │
-  │  4. Retour à 1.                         │
-  └─────────────────────────────────────────┘
-```
-
-```typescript
-// rAF s'exécute AVANT le prochain paint
-requestAnimationFrame(() => {
-  console.log('rAF'); // avant le paint, après les microtâches
-});
-
-setTimeout(() => {
-  console.log('timeout'); // macrotâche classique
-}, 0);
-
-Promise.resolve().then(() => {
-  console.log('promise'); // microtâche
-});
-
-// Ordre typique : promise, rAF, timeout
-// MAIS rAF et timeout peuvent s'inverser selon le timing du frame
-```
-
-**Attention** : rAF n'est **pas garanti** de s'exécuter avant le prochain `setTimeout(fn, 0)`. Son exécution dépend du cycle de rendu du navigateur. Si le navigateur décide qu'un rendu n'est pas nécessaire, rAF est retardé.
-
-### 8. Famine (Starvation) : quand les microtâches ne finissent jamais
-
-> 📋 **Rappel (analogie du restaurant)** : Souviens-toi des « clients prioritaires » (microtâches) qui passent TOUS avant le prochain client normal (macrotâche). Maintenant imagine que chaque client prioritaire invite un autre client prioritaire juste avant de partir. Le serveur ne peut JAMAIS servir les clients normaux — c'est exactement ça, la famine.
-
-Les microtâches sont vidées **intégralement** avant de passer à la macrotâche suivante. Si une microtâche en crée une autre, et ainsi de suite, l'event loop est **bloqué** :
-
-```typescript
-// DANGER : ceci bloque l'event loop indéfiniment
-function recursiveMicrotask(): void {
-  Promise.resolve().then(() => {
-    console.log('microtask');
-    recursiveMicrotask(); // crée une nouvelle microtâche à chaque fois
-  });
-}
-recursiveMicrotask();
-
-setTimeout(() => {
-  console.log('Ce message ne s\'affichera JAMAIS');
-}, 0);
-```
-
-```
-  Cycle de l'event loop bloqué :
-
-  Macrotâche courante terminée
-         │
-         v
-  Vider les microtâches ──> microtask 1 ──> crée microtask 2
-                            microtask 2 ──> crée microtask 3
-                            microtask 3 ──> crée microtask 4
-                            ...                  (infini)
-
-  ╔══════════════════════════════════════════╗
-  ║  La file de macrotâches n'est JAMAIS     ║
-  ║  atteinte. setTimeout est affamé.        ║
-  ║  Le rendering est bloqué.                ║
-  ║  L'UI est gelée.                         ║
-  ╚══════════════════════════════════════════╝
-```
-
-Avec `process.nextTick`, c'est encore pire car il à une priorité **supérieure** aux microtâches :
-
-```typescript
-// Encore plus dangereux : bloque même les Promises
-function recursiveNextTick(): void {
-  process.nextTick(() => {
-    recursiveNextTick();
-  });
-}
-recursiveNextTick();
-
-Promise.resolve().then(() => {
-  console.log('Promise jamais résolue non plus');
-});
-```
-
-### 9. L'event loop interne de libuv (pour les curieux)
-
-Au coeur de Node.js, libuv implémente l'event loop en C. Voici une version simplifiée du pseudo-code de `uv_run()` :
-
-```
-  uv_run(loop, mode):
-      while (loop est actif):
-          // 1. Mettre à jour le temps interne
-          uv__update_time(loop)
-
-          // 2. Phase timers
-          uv__run_timers(loop)
-
-          // --- process.nextTick + microtasks ---
-
-          // 3. Phase pending callbacks
-          uv__run_pending(loop)
-
-          // --- process.nextTick + microtasks ---
-
-          // 4. Phase idle
-          uv__run_idle(loop)
-
-          // 5. Phase prepare
-          uv__run_prepare(loop)
-
-          // 6. Phase poll (peut bloquer)
-          timeout = uv_backend_timeout(loop)
-          uv__io_poll(loop, timeout)
-
-          // --- process.nextTick + microtasks ---
-
-          // 7. Phase check (setImmediate)
-          uv__run_check(loop)
-
-          // --- process.nextTick + microtasks ---
-
-          // 8. Phase close callbacks
-          uv__run_closing_handles(loop)
-
-          // --- process.nextTick + microtasks ---
-
-          // Vérifier s'il reste du travail
-          si (mode == UV_RUN_ONCE || plus rien à faire):
-              break
-```
-
-### 10. Comment l'I/O est réellement asynchrone
-
-JavaScript est mono-threadé, mais l'I/O est asynchrone grâce à deux mécanismes complémentaires :
-
-```
-  a) Thread pool de libuv (4 threads par défaut, max 1024 via UV_THREADPOOL_SIZE)
-  ===============================================================================
-
-    Thread principal JS          Thread Pool (libuv)
-    ┌──────────────┐            ┌──────────────┐
-    │ fs.readFile() │──demande──>│  Thread 1    │
-    │ (non bloquant)│            │  (lit le     │
-    │               │            │   fichier)   │
-    │ continue...   │            ├──────────────┤
-    │               │            │  Thread 2    │
-    │               │<─callback──│  (disponible)│
-    │ exécute cb    │            ├──────────────┤
-    └──────────────┘            │  Thread 3    │
-                                ├──────────────┤
-                                │  Thread 4    │
-                                └──────────────┘
-
-  b) APIs asynchrones de l'OS (pas de thread supplémentaire)
-  ==========================================================
-    - epoll (Linux)
-    - kqueue (macOS/BSD)
-    - IOCP (Windows)
-    - Utilisé pour : sockets réseau, DNS (sur certains OS), signaux
-```
-
----
-
-## Démonstration
-
-### Demo 1 — Prouver l'ordre des phases
-
-```typescript
-// demo1-phases-order.js
-// Exécuter avec : node demo1-phases-order.js
-
-const fs = require('fs');
-
-// Phase timers
-setTimeout(() => {
-  console.log('1. setTimeout (phase timers)');
-}, 0);
-
-// Phase check
-setImmediate(() => {
-  console.log('2. setImmediate (phase check)');
-});
-
-// Microtâche
-Promise.resolve().then(() => {
-  console.log('3. Promise.then (microtask)');
-});
-
-// process.nextTick — priorité maximale
-process.nextTick(() => {
-  console.log('4. process.nextTick');
-});
-
-// Code synchrone — s'exécute en premier
-console.log('5. Synchrone');
-
-// Sortie garantie :
-// 5. Synchrone
-// 4. process.nextTick
-// 3. Promise.then (microtask)
-// 1. setTimeout (phase timers)    -- ou 2 en premier (non déterministe)
-// 2. setImmediate (phase check)   -- ou 1 en premier (non déterministe)
-```
-
-### Demo 2 — setImmediate toujours avant setTimeout dans un callback I/O
-
-```typescript
-// demo2-io-context.js
-const fs = require('fs');
-
-console.log('--- Contexte principal (ordre non déterministe) ---');
-setTimeout(() => console.log('  main: setTimeout'), 0);
-setImmediate(() => console.log('  main: setImmediate'));
-
-console.log('--- Contexte I/O (ordre déterministe) ---');
-fs.readFile(__filename, () => {
-  // Nous sommes dans la phase poll
-  // Prochaine phase : check (setImmediate)
-  // Puis le cycle recommence : timers (setTimeout)
-
-  setTimeout(() => console.log('  I/O: setTimeout'), 0);
-  setImmediate(() => console.log('  I/O: setImmediate'));
-
-  process.nextTick(() => console.log('  I/O: nextTick'));
-  Promise.resolve().then(() => console.log('  I/O: Promise'));
-});
-
-// Dans le contexte I/O, la sortie est TOUJOURS :
-//   I/O: nextTick
-//   I/O: Promise
-//   I/O: setImmediate
-//   I/O: setTimeout
-```
-
-### Demo 3 — Visualiser la famine par microtâches
-
-```typescript
-// demo3-starvation.js
-// Ce script illustre la famine de manière contrôlée
-
-let count: number = 0;
-const MAX = 1_000_000;
-
-// Ce timer ne s'exécutera qu'après MAX microtâches
-const start = Date.now();
-setTimeout(() => {
-  console.log(`setTimeout exécuté après ${Date.now() - start}ms`);
-  console.log(`${count} microtâches ont été traitées avant`);
-}, 0);
-
-function floodMicrotasks(): void {
-  if (count >= MAX) return;
-  count++;
-  Promise.resolve().then(floodMicrotasks);
-}
-floodMicrotasks();
-
-// Sur une machine typique, le setTimeout sera retardé de plusieurs
-// centaines de millisecondes car 1 million de microtâches passent avant.
-```
-
-### Demo 4 — Mesurer le temps réel d'un setTimeout(fn, 0)
-
-```typescript
-// demo4-timer-accuracy.js
-
-const iterations = 20;
-const results: number[] = [];
-
-function measureTimer(i: number): void {
-  if (i >= iterations) {
-    console.log('Délais réels de setTimeout(fn, 0) :');
-    results.forEach((ms, idx) => {
-      const bar = '='.repeat(Math.round(ms));
-      console.log(`  Itération ${String(idx).padStart(2)}: ${ms.toFixed(2)}ms ${bar}`);
-    });
-    const avg = results.reduce((a, b) => a + b, 0) / results.length;
-    console.log(`  Moyenne : ${avg.toFixed(2)}ms`);
-    console.log('  (rappel : le délai demandé était 0ms)');
-    return;
-  }
-
-  const start = performance.now();
-  setTimeout(() => {
-    results.push(performance.now() - start);
-    measureTimer(i + 1);
-  }, 0);
+// calcul synchrone lourd : bloque le thread ~2 secondes
+const fin = Date.now() + 2000;
+while (Date.now() < fin) {
+  // rien — on occupe le thread
 }
 
-measureTimer(0);
-
-// Résultat typique : les délais réels sont entre 1ms et 4ms,
-// jamais exactement 0ms.
+console.log('fin du bloc synchrone');
 ```
 
-### Demo 5 — Ordre complet avec toutes les primitives
+Raisonnement :
 
-```typescript
-// demo5-complete-order.js
+1. `console.log('début')` s'exécute.
+2. `setTimeout` délègue à l'hôte ; après ~1 ms le callback est **prêt dans la file**.
+3. MAIS la call stack n'est **pas vide** : la boucle `while` tourne encore. L'event loop **ne peut rien prendre** tant que la pile n'est pas vide.
+4. Au bout de 2 s, la boucle finit, `console.log('fin…')` s'exécute, la pile se vide.
+5. Enfin l'event loop prend le callback → `console.log('timer 0ms')`.
 
-console.log('=== Début synchrone ===');
+**Sortie : `début`, `fin du bloc synchrone`, `timer 0ms`** — le timer « 0 ms » s'est exécuté après ~2 secondes. Le délai demandé est un **minimum**, jamais une garantie. C'est exactement le piège du handler TribuZen : un traitement synchrone lourd repousse toutes les tâches en attente.
 
-setTimeout(() => {
-  console.log('T1: setTimeout 0ms');
+---
 
-  process.nextTick(() => {
-    console.log('T1-NT: nextTick dans setTimeout');
-  });
+## 4. Pièges & misconceptions
 
-  Promise.resolve().then(() => {
-    console.log('T1-P: Promise dans setTimeout');
-  });
-}, 0);
+### PIÈGE #1 — « L'event loop est dans V8 / dans le moteur JS »
 
-setTimeout(() => {
-  console.log('T2: setTimeout 0ms (second)');
-}, 0);
+**Faux.** Le moteur JS (V8) ne fait qu'exécuter du JavaScript synchrone et gérer sa call stack. L'**event loop, la task queue et les APIs asynchrones sont fournis par l'HÔTE** : le navigateur, ou libuv pour Node. Preuve : le même V8 tourne dans Chrome et dans Node, pourtant `setImmediate` et `process.nextTick` n'existent que dans Node, et `requestAnimationFrame` / le DOM que dans le navigateur. Ce ne sont pas des fonctions du langage — ce sont des services de l'hôte.
 
-setImmediate(() => {
-  console.log('I1: setImmediate');
+### PIÈGE #2 — « `setTimeout(fn, 0)` exécute `fn` immédiatement »
 
-  setImmediate(() => {
-    console.log('I2: setImmediate imbriqué');
-  });
+**Faux.** `setTimeout(fn, 0)` planifie `fn` dans la task queue ; elle ne sera reprise que **quand la pile sera vide**, donc après tout le code synchrone en cours. Et le délai est clampé (min 1 ms Node, jusqu'à 4 ms navigateur). C'est un « exécute plus tard », jamais un « exécute maintenant ».
 
-  process.nextTick(() => {
-    console.log('I1-NT: nextTick dans setImmediate');
-  });
+### PIÈGE #3 — « Le code asynchrone tourne en parallèle de mon code JS »
 
-  Promise.resolve().then(() => {
-    console.log('I1-P: Promise dans setImmediate');
-  });
-});
+Nuance importante. Le **travail de fond** (attendre le réseau, lire un fichier, compter un timer) tourne bien en parallèle — mais **dans l'hôte** (Web APIs, thread pool libuv), **pas dans ton thread JS**. Ton **callback JavaScript**, lui, s'exécute toujours sur l'unique thread principal, un à la fois, jamais en parallèle d'un autre code JS. Le parallélisme est dans l'hôte, pas dans ton JS.
 
-process.nextTick(() => {
-  console.log('NT1: nextTick 1');
-  process.nextTick(() => {
-    console.log('NT2: nextTick imbriqué');
-  });
-});
+### PIÈGE #4 — « Un calcul lourd, c'est comme de l'I/O, ça ne bloque pas »
 
-Promise.resolve()
-  .then(() => {
-    console.log('P1: Promise 1');
-    return Promise.resolve();
-  })
-  .then(() => {
-    console.log('P2: Promise 2 (chaîné)');
-  });
+**Faux et dangereux.** L'I/O est délégué à l'hôte, donc non-bloquant. Mais un **calcul CPU synchrone** (grosse boucle, tri d'un énorme tableau, hachage) s'exécute **sur le thread JS** et **bloque tout** : dans le navigateur l'UI gèle, dans Node **toutes les requêtes attendent**. La solution n'est pas `setTimeout` (ça reste sur le même thread), mais de découper le travail ou de le déporter (Web Worker / `worker_threads`).
 
-queueMicrotask(() => {
-  console.log('QM: queueMicrotask');
-});
+### PIÈGE #5 — « Navigateur et Node ont le même event loop »
 
-console.log('=== Fin synchrone ===');
+Approximation trompeuse. Le **principe** est identique (pile vide → prendre un callback). Mais Node utilise **libuv** avec **6 phases** et des primitives propres (`setImmediate`, `process.nextTick`), tandis que le navigateur a une boucle plus simple qui gère en plus le **rendu**. Même idée, hôtes et détails différents (approfondis au module 04).
 
-// Sortie :
-// === Début synchrone ===
-// === Fin synchrone ===
-// NT1: nextTick 1
-// NT2: nextTick imbriqué
-// P1: Promise 1
-// QM: queueMicrotask
-// P2: Promise 2 (chaîné)
-// T1: setTimeout 0ms          -- ou I1 d'abord (non déterministe hors I/O)
-// T1-NT: nextTick dans setTimeout
-// T1-P: Promise dans setTimeout
-// T2: setTimeout 0ms (second)
-// I1: setImmediate
-// I1-NT: nextTick dans setImmediate
-// I1-P: Promise dans setImmediate
-// I2: setImmediate imbriqué
+---
+
+## 5. Ancrage TribuZen
+
+L'API TribuZen tourne sous **Node**, donc son event loop est celui de **libuv** — c'est libuv qui ordonne les handlers HTTP, les requêtes Prisma vers PostgreSQL, les timers d'e-mails.
+
+**Où ça compte concrètement :**
+
+1. **Le `setTimeout` du cas concret** (`src/routes/families.ts`) — l'e-mail de bienvenue planifié « à 0 ms » ne part qu'une fois le handler terminé et la pile vide. Comprendre l'event loop, c'est savoir que « différer » ≠ « immédiatement », et ne pas s'étonner de l'ordre des logs.
+
+2. **Un handler qui bloque l'event loop gèle l'API entière.** Si un endpoint TribuZen fait un calcul synchrone lourd — par exemple agréger en mémoire les statistiques d'activité de toutes les familles dans une grosse boucle — pendant ce calcul, **aucune autre requête n'est servie** : Node est mono-thread, la pile n'est jamais vide, l'event loop est à l'arrêt. Tous les membres connectés voient l'app « ramer ». Le réflexe : déléguer (job en arrière-plan, `worker_threads`, ou découper le calcul).
+
+3. **Ordonner des tâches côté serveur.** Répondre vite au client, puis faire le travail non-urgent « après la réponse » (log analytics, notification, invalidation de cache) est un pattern courant. Comprendre que ces callbacks passent *après* le synchrone en cours est la base pour les ordonnancer correctement (le détail micro / macro et `setImmediate` vient au module 04).
+
+Fichiers cibles dans `smaurier/tribuzen` :
+```
+tribuzen/src/
+  routes/
+    families.ts        # handler join + setTimeout e-mail
+  services/
+    stats.ts           # calcul d'agrégats — NE PAS bloquer l'event loop
 ```
 
 ---
 
-### V8 vs SpiderMonkey (Firefox)
+## 6. Points clés
 
-> 📋 **Rappel** : Cette section compare les implémentations internes. En tant que développeur, le comportement observable est le même dans tous les navigateurs modernes — seuls les détails « sous le capot » diffèrent.
-
-**L'event loop navigateur est défini par la spécification HTML** — Chrome (V8) et Firefox (SpiderMonkey) implémentent le **même algorithme**. L'ordre d'exécution des microtâches et des macrotâches est identique dans tous les navigateurs conformes à la spec. Si tu observes un comportement différent entre Chrome et Firefox, c'est un bug de l'un des deux, pas une différence de design.
-
-**Ce qui diffère, c'est l'implémentation côté runtime** :
-
-| Aspect | Chrome / Node.js (V8) | Firefox (SpiderMonkey) | Deno |
-|--------|----------------------|------------------------|------|
-| Event loop navigateur | Basé sur la spec HTML, implémenté en C++ dans Blink | Basé sur la spec HTML, implémenté en C++ dans Gecko | N/A (pas un navigateur) |
-| Event loop runtime | **libuv** (C) pour Node.js | N/A (pas de runtime serveur officiel) | **tokio** (Rust) |
-| Thread pool I/O | libuv thread pool (4 par défaut) | N/A | tokio runtime (async Rust) |
-| Scheduling interne | Task queues Blink | Task queues Gecko (nsIRunnable) | tokio tasks |
-
-**Points importants** :
-
-- **La spécification HTML définit l'algorithme de l'event loop** (section 8.1.7). Chrome et Firefox l'implémentent tous les deux fidèlement. Les différences visibles sont extrêmement rares et considérées comme des bugs.
-- **Node.js utilise libuv**, une bibliothèque C qui fournit un event loop cross-platform avec ses 6 phases spécifiques (timers, poll, check, etc.). Ce modèle à phases est propre à libuv, pas à la spec ECMAScript.
-- **Deno utilise tokio**, un runtime asynchrone écrit en Rust. Le modèle est conceptuellement similaire (event loop + callbacks), mais l'implémentation est complètement différente de libuv.
-- **Firefox n'a pas d'équivalent à Node.js** en tant que runtime serveur. Cependant, SpiderMonkey est embarqué dans d'autres projets (comme le runtime serveur expérimental de Mozilla) avec leurs propres mécanismes d'I/O.
-
-**Conclusion** : l'event loop est un concept partagé. Que tu écrives du code pour Chrome, Firefox, Node.js ou Deno, les **règles d'ordonnancement** (microtâches avant macrotâches, vidage complet des microtâches, etc.) sont les mêmes. Seuls les détails d'implémentation internes changent.
+1. JavaScript est **single-threaded** : une seule call stack, une seule chose exécutée à la fois ; le code synchrone lourd bloque tout.
+2. La concurrence vient de la **délégation** : les opérations longues sont confiées à l'**hôte**, pas exécutées par le moteur JS.
+3. Les **APIs asynchrones** (`setTimeout`, `fetch`, `fs`…) sont fournies par l'**hôte** (Web APIs navigateur / libuv Node), **pas par le moteur JS**.
+4. **L'event loop et la task queue ne sont PAS dans V8** : c'est l'hôte (navigateur / libuv) qui les fournit. V8 ne connaît que sa call stack.
+5. Règle d'or : l'event loop ne prend un callback **que lorsque la call stack est vide** — un callback n'interrompt jamais du synchrone en cours.
+6. `setTimeout(fn, 0)` = « plus tard, après le synchrone », pas « maintenant » ; le délai est clampé (1 ms Node, jusqu'à 4 ms navigateur) et attend la pile vide.
+7. Dans le **navigateur**, le rendu (paint) s'intercale entre les tâches — un JS bloquant gèle l'UI.
+8. **Navigateur vs Node** : même principe, hôtes différents. Node = libuv à 6 phases (`setImmediate`, `process.nextTick`) ; détail au module 04.
 
 ---
 
-## Points clés
+## 7. Seeds Anki
 
-1. **JavaScript est mono-thread** : une seule pile d'appels, mais l'environnement hôte (libuv, Web APIs) fournit le parallélisme pour les opérations I/O.
-
-2. **L'event loop est un algorithme**, pas un thread séparé. Il orchestre l'exécution des callbacks en vérifiant les files d'attente quand la pile est vide. **Nuance pour Node.js** : bien que la logique de l'event loop s'exécute sur le thread principal, libuv gère le polling I/O via des mécanismes du système d'exploitation (epoll sur Linux, kqueue sur macOS/BSD, IOCP sur Windows) qui fonctionnent au niveau du noyau, en dehors du thread JS.
-
-3. **Node.js a 6 phases** : timers, pending callbacks, idle/prepare, poll, check, close callbacks. Entre chaque phase, `process.nextTick` puis les microtâches sont vidés.
-
-4. **Les microtâches sont toujours prioritaires** sur les macrotâches. Elles sont vidées intégralement après chaque callback (depuis Node 11+).
-
-5. **`setTimeout(fn, 0)` n'est pas immédiat** : le délai est clampé à 1ms minimum (Node.js) ou potentiellement 4ms (navigateur, timers imbriqués).
-
-6. **`setImmediate` vs `setTimeout(fn, 0)`** : l'ordre est non-déterministe dans le contexte principal, mais `setImmediate` passe toujours en premier dans un callback I/O.
-
-7. **`process.nextTick` est le plus prioritaire** : il s'exécute avant les microtâches Promise, entre chaque phase de l'event loop.
-
-8. **La famine (starvation)** est un danger réel : des microtâches récursives empêchent toute macrotâche de s'exécuter et gèlent l'application.
-
-9. **`requestAnimationFrame`** s'exécute dans l'étape de rendering du navigateur, avant chaque paint, mais son timing exact dépend du cycle de rendu (~60fps).
-
-10. **Depuis Node.js 11**, le comportement des microtâches est aligné sur celui des navigateurs : elles sont vidées après chaque callback individuel, pas après chaque phase entière.
-
----
-
----
-
-## Si tu es perdu
-
-Si ce module te semble trop dense, retiens juste ces 5 points :
-
-1. **JavaScript est mono-thread** — il ne fait qu'une chose à la fois, comme un serveur unique dans un restaurant.
-2. **Les opérations longues sont déléguées** — le serveur (JS) passe la commande en cuisine (Web APIs / libuv) et continue de servir d'autres clients.
-3. **Les résultats reviennent dans une file** — quand la cuisine a fini, le plat est posé sur le comptoir (la task queue). Le serveur le sert quand il est libre.
-4. **La pile doit être vide** — le serveur ne va chercher un plat au comptoir que quand il a fini de servir le client en cours (la call stack est vide).
-5. **Les microtasks passent avant les macrotasks** — c'est comme des clients prioritaires : ils passent TOUS avant le prochain client normal.
-
-Relis le module après le lab — ça sera beaucoup plus clair avec la pratique.
-
----
-
-## Pour aller plus loin
-
-- [Node.js — The Node.js Event Loop, Timers, and process.nextTick()](https://nodejs.org/en/guides/event-loop-timers-and-nexttick)
-- [HTML Living Standard — Event loops](https://html.spec.whatwg.org/multipage/webappapis.html#event-loops)
-- [MDN — Event loop (Concurrency model)](https://developer.mozilla.org/fr/docs/Web/JavaScript/EventLoop)
-- [libuv documentation — Design overview](https://docs.libuv.org/en/v1.x/design.html)
-- [Jake Archibald — In The Loop (JSConf.Asia 2018)](https://www.youtube.com/watch?v=cCOL7MC4Pl0)
-- [V8 Blog — Fast async](https://v8.dev/blog/fast-async)
-- [MDN — requestAnimationFrame](https://developer.mozilla.org/fr/docs/Web/API/window/requestAnimationFrame)
-- [MDN — queueMicrotask](https://developer.mozilla.org/fr/docs/Web/API/queueMicrotask)
-
----
-
-## Défi
-
-Quel est l'ordre exact de sortie du code suivant dans Node.js (v18+) ?
-
-```typescript
-const fs = require('fs');
-
-fs.readFile(__filename, () => {
-  setTimeout(() => console.log('A'), 0);
-  setImmediate(() => {
-    console.log('B');
-    process.nextTick(() => console.log('C'));
-    Promise.resolve().then(() => {
-      console.log('D');
-      queueMicrotask(() => console.log('E'));
-    });
-  });
-  process.nextTick(() => console.log('F'));
-  Promise.resolve().then(() => console.log('G'));
-});
+```
+Combien de threads exécutent ton code JavaScript, et quelle en est la conséquence ?|Un seul (single-threaded) : une seule call stack, une chose à la fois. Conséquence : tout code synchrone lourd bloque le thread et gèle l'app.
+Si JS est mono-thread, comment gère-t-il des milliers d'opérations I/O concurrentes ?|Par délégation : le moteur JS confie les opérations longues à l'hôte (Web APIs / libuv), continue son code synchrone, et récupère les résultats plus tard via des callbacks.
+Qui fournit les APIs asynchrones comme setTimeout et fetch : le moteur JS ou l'hôte ?|L'hôte. Le navigateur fournit les Web APIs, Node fournit libuv. Ce ne sont PAS des fonctions du moteur JS (V8) ni du langage.
+L'event loop est-il dans le moteur JavaScript (V8) ?|Non. V8 ne gère que la call stack et l'exécution du JS synchrone. L'event loop et la task queue sont fournis par l'hôte (navigateur / libuv). Le même V8 tourne dans Chrome et Node, mais l'event loop diffère car l'hôte diffère.
+Quelle est la règle d'or de l'event loop vis-à-vis de la call stack ?|L'event loop ne prend un callback dans la task queue QUE lorsque la call stack est complètement vide. Un callback n'interrompt jamais du code synchrone en cours.
+Que signifie réellement setTimeout(fn, 0) ?|« Mets fn dans la task queue après le délai, elle sera reprise quand la pile sera vide » — donc après tout le code synchrone en cours. Pas « immédiatement ». Le délai est en plus clampé (1 ms Node, jusqu'à 4 ms navigateur).
+Pourquoi un calcul CPU lourd dans un handler Node bloque-t-il toutes les requêtes ?|Node est mono-thread : le calcul synchrone occupe la call stack, qui n'est jamais vide, donc l'event loop ne peut reprendre aucun autre callback (autres requêtes incluses) tant que le calcul n'est pas fini.
+Quelle différence entre l'event loop du navigateur et celui de Node ?|Même principe (pile vide -> prendre un callback), mais hôtes différents : le navigateur gère aussi le rendu et a une boucle simple ; Node utilise libuv avec 6 phases et des primitives propres (setImmediate, process.nextTick).
 ```
 
-<details>
-<summary>Réponse</summary>
-
-**Sortie : `F, G, B, C, D, E, A`**
-
-Raisonnement pas à pas :
-
-1. Le callback de `fs.readFile` s'exécute dans la **phase poll**. Le code synchrone à l'intérieur enregistre les différents callbacks.
-
-2. Avant de quitter le callback et passer à la phase suivante, Node.js vide `process.nextTick` puis les microtâches :
-   - **`F`** (`process.nextTick` -- priorité maximale)
-   - **`G`** (`Promise.then` -- microtâche)
-
-3. La phase suivante après poll est **check** (`setImmediate`) :
-   - **`B`** (le callback `setImmediate` s'exécute)
-   - À l'intérieur de `setImmediate`, on enregistre un `nextTick` et une `Promise`
-   - Avant de continuer : vidage de `nextTick` puis microtâches :
-     - **`C`** (`process.nextTick`)
-     - **`D`** (`Promise.then`)
-     - **`E`** (`queueMicrotask` créé par la Promise -- c'est une microtâche, vidée dans le même cycle)
-
-4. La phase suivante est **close callbacks** (rien ici), puis le cycle recommence par **timers** :
-   - **`A`** (`setTimeout` de 0ms, maintenant expiré)
-
-</details>
-
 ---
 
-<!-- parcours-recommande -->
+## Pont vers le lab
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 03 event loop](../screencasts/screencast-03-event-loop.md)
-2. **Lab** : [lab-03-event-loop-order](../labs/lab-03-event-loop-order/README)
-3. **Visualisation** : [Event Loop](../visualizations/event-loop.html)
-4. **Quiz** : [quiz 03 event loop](../quizzes/quiz-03-event-loop.html)
-:::
+> Lab associé : `01-js-runtime/labs/lab-03-event-loop-order/README.md`. Prédire puis observer l'ordre réel d'exécution d'extraits mêlant synchrone et `setTimeout`, en Node et dans le navigateur, avec corrigé commenté.

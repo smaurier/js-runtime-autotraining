@@ -1,1219 +1,449 @@
-# Module 11 — Hidden Classes & Inline Caching
-
-> **Objectif** : Ce module est la référence unique et approfondie sur les Hidden Classes (Maps) et l'Inline Caching dans V8. Comprendre la structure mémoire interne des objets JavaScript (JSObject header, in-object properties, backing store), les chaînes et arbres de transitions de Maps, les descriptor arrays, le slack tracking, la dépréciation de Maps, le dictionary mode, l'Inline Caching (IC) et ses états, les Éléments Kinds des tableaux, le property type tracking, et les intrinsics V8 pour le diagnostic. Ce module ne revient pas sur le pipeline V8 (Module 09) ni sur les optimisations JIT (Module 10) — il se concentre exclusivement sur la manière dont V8 représente et accède aux propriétés des objets.
-
-> **Difficulté** : ⭐⭐⭐⭐ (Expert)
-
+---
+titre: Hidden Classes et Inline Caching
+cours: 01-js-runtime
+notions: [hidden classes et Maps V8, forme d'objet et transitions, ordre d'ajout des propriétés, initialisation complète dans le constructeur, inline caches, IC monomorphe polymorphe mégamorphe, coût de delete et du dictionary mode, lien avec le JIT]
+outcomes: [créer des objets de forme stable pour garder les accès monomorphes, diagnostiquer une divergence de hidden classes avec les intrinsics V8, réécrire un code qui casse les inline caches pour restaurer des accès rapides]
+prerequis: [10-jit-compilation-optimization]
+next: 12-performance-patterns
+libs: []
+tribuzen: normalisation de la forme des objets Member et Family de l'API TribuZen pour garder les inline caches monomorphes sur les chemins chauds
+last-reviewed: 2026-07
 ---
 
-## Prérequis
+# Hidden Classes et Inline Caching
 
-- Module 09 — Architecture V8 (pipeline, Feedback Vectors)
-- Bonne maîtrise de la création d'objets en JavaScript (literals, constructeurs, classes)
-- Accès à Node.js >= 18 avec le flag `--allow-natives-syntax`
+> **Outcomes — tu sauras FAIRE :** créer des objets de forme stable pour garder les accès monomorphes, diagnostiquer une divergence de hidden classes avec `%HaveSameMap`, réécrire un code qui casse les inline caches pour restaurer les accès rapides.
+> **Difficulté :** :star::star::star::star:
 
----
+## 1. Cas concret d'abord
 
-## Théorie
-
-> **Analogie pour débuter** : Les Hidden Classes, c'est comme un plan d'architecte pour une maison. Toutes les maisons construites avec le même plan (mêmes propriétés, même ordre) partagent le plan. Mais si tu ajoutes une pièce après construction (ajouter une propriété), tu as besoin d'un nouveau plan.
-
-### 1. Le problème fondamental : JavaScript est dynamique
-
-En C++ ou Java, le compilateur connaît la structure exacte de chaque objet à la compilation. Le moteur sait à quel *offset mémoire* se trouve chaque propriété.
-
-```cpp
-// C++ — le compilateur sait que 'x' est à l'offset 0, 'y' à l'offset 8
-struct Point { double x; double y; };
-
-// L'accès à p.x est une simple instruction :
-// mov rax, [rdi + 0]    ; offset 0 = x
-// Temps : ~1 ns
-```
-
-> **Note** : même si tu ne connais pas le C++, l'idée est simple. Dans un langage statique comme C++, le compilateur sait **avant l'exécution** ou chaque propriété se trouve en mémoire. En JavaScript, cette information n'existe pas à l'avance — d'où l'invention des Hidden Classes.
-
-En JavaScript, un objet est un dictionnaire ouvert. On peut ajouter, supprimer, changer le type de n'importe quelle propriété à tout moment.
+L'endpoint `GET /api/families/:id/members` de TribuZen renvoie la liste des membres d'une famille. Sous charge, le tri et l'agrégation deviennent 6x plus lents que ce que la logique justifie. Voici comment les objets `Member` sont construits dans le service :
 
 ```js
-const p = { x: 1, y: 2 };
-p.z = 3;        // ajout dynamique
-delete p.y;     // suppression
-p.x = "hello";  // changement de type
-```
-
-Si V8 devait chercher chaque propriété dans un hash table à chaque accès, les performances seraient catastrophiques (~100 ns par accès au lieu de ~1 ns). D'où l'invention des **Hidden Classes**.
-
----
-
-### 2. Hidden Classes (Maps) : la structure interne
-
-Chaque objet JavaScript en V8 possède un pointeur vers une **Map** (aussi appelée *Hidden Class* dans la littérature académique, ou *Shape* dans SpiderMonkey/JSC).
-
-Une Map décrit :
-- La liste des propriétés de l'objet et l'**offset** de chacune dans le stockage interne
-- Le **type** de chaque propriété (Smi, Double, HeapObject)
-- Le **prototype** de l'objet
-- Les **transitions** possibles vers d'autres Maps (quand on ajoute une propriété)
-- La taille de l'objet et le nombre de propriétés in-object
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  STRUCTURE D'UN OBJET JS EN MÉMOIRE (JSObject)                    │
-  │                                                                   │
-  │  ┌──────────────────────────────────────────────────────┐         │
-  │  │ JSObject Header (2 mots machine)                      │         │
-  │  │ ┌─────────────────┐ ┌──────────────────────────────┐ │         │
-  │  │ │  Map pointer     │ │  Properties/Elements pointer │ │         │
-  │  │ │  (Hidden Class)  │ │  (backing store)             │ │         │
-  │  │ └────────┬────────┘ └──────────────┬───────────────┘ │         │
-  │  │          │                          │                 │         │
-  │  │  In-object properties (slots fixes)                   │         │
-  │  │ ┌────────┐ ┌────────┐ ┌────────┐                     │         │
-  │  │ │ slot 0 │ │ slot 1 │ │ slot 2 │  ...                │         │
-  │  │ │ (x: 1) │ │ (y: 2) │ │ (z: 3) │                     │         │
-  │  │ └────────┘ └────────┘ └────────┘                     │         │
-  │  └──────────────────────────────────────────────────────┘         │
-  │                                                                   │
-  │  Map pointer → pointe vers la Map qui décrit cette structure      │
-  │  Properties pointer → pointe vers le backing store si les         │
-  │    propriétés dépassent les slots in-object                       │
-  │  Elements pointer → pointe vers le stockage des propriétés        │
-  │    indexées (arr[0], arr[1], ...)                                  │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
-### 3. In-object properties vs Out-of-object backing store
-
-V8 stocke les propriétés de deux manières :
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  IN-OBJECT PROPERTIES vs BACKING STORE                             │
-  │                                                                   │
-  │  Scénario 1 : peu de propriétés (< slots in-object disponibles)   │
-  │                                                                   │
-  │  const obj = { a: 1, b: 2, c: 3 };                               │
-  │                                                                   │
-  │  ┌────────────────────────────────────────┐                       │
-  │  │ JSObject                                │                       │
-  │  │ ┌──────────┐ ┌───────────────────────┐ │                       │
-  │  │ │ Map *    │ │ Properties: empty_arr │ │                       │
-  │  │ └──────────┘ └───────────────────────┘ │                       │
-  │  │ ┌──────┐ ┌──────┐ ┌──────┐            │                       │
-  │  │ │ a: 1 │ │ b: 2 │ │ c: 3 │ in-object  │ ← RAPIDE             │
-  │  │ └──────┘ └──────┘ └──────┘            │ (un seul déréférencement)
-  │  └────────────────────────────────────────┘                       │
-  │                                                                   │
-  │  Scénario 2 : trop de propriétés → overflow vers backing store    │
-  │                                                                   │
-  │  const obj = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, ... };      │
-  │                                                                   │
-  │  ┌────────────────────────────────────────┐                       │
-  │  │ JSObject                                │                       │
-  │  │ ┌──────────┐ ┌─────────────────────┐   │                       │
-  │  │ │ Map *    │ │ Properties: ────────┼───┼──┐                    │
-  │  │ └──────────┘ └─────────────────────┘   │  │                    │
-  │  │ ┌──────┐ ┌──────┐ ┌──────┐            │  │                    │
-  │  │ │ a: 1 │ │ b: 2 │ │ c: 3 │ in-object  │  │                    │
-  │  │ └──────┘ └──────┘ └──────┘            │  │                    │
-  │  └────────────────────────────────────────┘  │                    │
-  │                                               │                    │
-  │  ┌────────────────────────────────────────┐  │                    │
-  │  │ FixedArray (backing store) ◄────────────┘                      │
-  │  │ ┌──────┐ ┌──────┐ ┌──────┐                                    │
-  │  │ │ d: 4 │ │ e: 5 │ │ f: 6 │ ...          │ ← PLUS LENT        │
-  │  │ └──────┘ └──────┘ └──────┘              │ (deux déréférencements)
-  │  └────────────────────────────────────────┘                       │
-  │                                                                   │
-  │  Nombre de slots in-object par défaut :                           │
-  │  - Object literal : ~4 slots (ajustable par slack tracking)       │
-  │  - Classe/constructeur : déterminé par le constructeur            │
-  │  - Au-delà → FixedArray en backing store                          │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
-**Implication performance** : les propriétés in-object sont les plus rapides d'accès (un seul déréférencement de pointeur depuis l'objet). Les propriétés en backing store nécessitent un déréférencement supplémentaire vers le FixedArray.
-
-### 4. Descriptor Arrays : les métadonnées des propriétés
-
-Chaque Map possède un **Descriptor Array** qui décrit les propriétés associées à cette Map.
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  DESCRIPTOR ARRAY                                                  │
-  │                                                                   │
-  │  Map M2 (pour les objets { x, y }) :                              │
-  │                                                                   │
-  │  Descriptor Array :                                               │
-  │  ┌────────┬──────────────┬───────────┬──────────────────────┐     │
-  │  │ Index  │ Nom          │ Type      │ Détails              │     │
-  │  ├────────┼──────────────┼───────────┼──────────────────────┤     │
-  │  │ 0      │ "x"          │ DATA      │ offset: 0            │     │
-  │  │        │              │           │ repr: Smi            │     │
-  │  │        │              │           │ attrs: W,E,C         │     │
-  │  ├────────┼──────────────┼───────────┼──────────────────────┤     │
-  │  │ 1      │ "y"          │ DATA      │ offset: 1            │     │
-  │  │        │              │           │ repr: Smi            │     │
-  │  │        │              │           │ attrs: W,E,C         │     │
-  │  └────────┴──────────────┴───────────┴──────────────────────┘     │
-  │                                                                   │
-  │  W = Writable, E = Enumerable, C = Configurable                   │
-  │  repr = représentation en mémoire (Smi, Double, Tagged/HeapObject)│
-  │                                                                   │
-  │  Le Descriptor Array est PARTAGÉ entre toutes les Maps qui        │
-  │  sont dans la même chaîne de transitions (les Maps enfants        │
-  │  réutilisent les descriptors de leurs parents + en ajoutent).     │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
-### 5. Chaînes de transitions (Transition Chains)
-
-Quand on crée un objet vide puis qu'on ajoute des propriétés une par une, V8 crée une **chaîne de transitions** entre Maps.
-
-```js
-const obj = {};    // Map M0 (objet vide)
-obj.x = 1;        // Transition M0 → M1 (propriété "x")
-obj.y = 2;        // Transition M1 → M2 (propriétés "x", "y")
-obj.z = 3;        // Transition M2 → M3 (propriétés "x", "y", "z")
-```
-
-```
-  Chaîne de transitions (Transition Chain) :
-
-  M0 (vide)
-    │
-    │ + "x" (Smi)
-    ▼
-  M1 { x }
-    │
-    │ + "y" (Smi)
-    ▼
-  M2 { x, y }
-    │
-    │ + "z" (Smi)
-    ▼
-  M3 { x, y, z }
-```
-
-**Point crucial** : si un autre objet ajoute les mêmes propriétés dans le même ordre, il **réutilise** les mêmes Maps. Les transitions sont partagées.
-
-```js
-const a = {};  a.x = 1;  a.y = 2;  // parcourt M0 → M1 → M2
-const b = {};  b.x = 10; b.y = 20; // réutilise M0 → M1 → M2 (même Maps !)
-// a et b partagent M2
-```
-
-### 6. Arbre de transitions (Transition Tree)
-
-Quand des objets ajoutent des propriétés différentes à partir d'une même Map, cela crée un **arbre** de transitions :
-
-```
-  M0 (vide)
-    ├──── + "x" ────→ M1 { x }
-    │                    ├──── + "y" ────→ M2 { x, y }    ← objets {x, y}
-    │                    └──── + "z" ────→ M5 { x, z }    ← objets {x, z}
-    │
-    └──── + "a" ────→ M3 { a }
-                         └──── + "b" ────→ M4 { a, b }    ← objets {a, b}
-
-  Les objets { x, y } et { a, b } n'ont PAS la même Map.
-  Les objets { x, y } et { x, z } n'ont PAS la même Map non plus.
-
-  Seuls les objets construits avec EXACTEMENT les mêmes propriétés,
-  dans le MÊME ordre, partagent la même Map.
-```
-
-### 7. Pourquoi l'ordre des propriétés compte
-
-```js
-function PointA(x, y) {
-  this.x = x;   // transition +x
-  this.y = y;   // transition +y → Map M2
-}
-
-function PointB(x, y) {
-  this.y = y;   // transition +y (chemin différent !)
-  this.x = x;   // transition +x → Map M4 (pas M2 !)
-}
-
-const a = new PointA(1, 2);  // Map M2
-const b = new PointB(1, 2);  // Map M4
-// a et b ont les MÊMES propriétés (x et y) avec les MÊMES valeurs
-// mais des Maps DIFFÉRENTES car l'ordre d'ajout diffère.
-```
-
-### 8. Slack Tracking : pré-allocation de slots
-
-Quand V8 voit un constructeur ou un object literal pour la première fois, il ne sait pas combien de propriétés seront ajoutées. Le **slack tracking** est le mécanisme par lequel V8 pré-alloue des slots in-object supplémentaires en anticipation.
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  SLACK TRACKING                                                    │
-  │                                                                   │
-  │  class Point {                                                    │
-  │    constructor(x, y) {                                            │
-  │      this.x = x;                                                  │
-  │      this.y = y;                                                  │
-  │    }                                                              │
-  │  }                                                                │
-  │                                                                   │
-  │  Première instance : new Point(1, 2)                              │
-  │  V8 alloue l'objet avec ~8 slots in-object (slack = 6)           │
-  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ...               │
-  │  │ x: 1 │ │ y: 2 │ │(vide)│ │(vide)│ │(vide)│                   │
-  │  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘                   │
-  │                                                                   │
-  │  V8 crée ~8 instances en observant le pattern.                    │
-  │                                                                   │
-  │  Si après 8 instances, seuls x et y sont utilisés :               │
-  │  → V8 réduit la taille à 2 slots + un petit slack (ex: 2)        │
-  │  → Les instances suivantes sont plus compactes                    │
-  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐                             │
-  │  │ x: 1 │ │ y: 2 │ │(vide)│ │(vide)│  ← slack réduit à 2       │
-  │  └──────┘ └──────┘ └──────┘ └──────┘                             │
-  │                                                                   │
-  │  Le slack tracking se stabilise après ~8 instances du même        │
-  │  constructeur (le nombre exact est un paramètre interne V8).      │
-  │                                                                   │
-  │  Implication : si vous ajoutez des propriétés après le            │
-  │  constructeur et que le slack est déjà réduit, ces propriétés     │
-  │  iront dans le backing store (plus lent).                         │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
-### 9. Map Deprecation : quand V8 déprécie une Map
-
-Quand une propriété change de **représentation** (ex : d'un Smi vers un Double, ou d'un Double vers un HeapObject), V8 ne peut pas simplement modifier la Map existante car d'autres objets l'utilisent peut-être encore avec l'ancien type. V8 **déprécie** l'ancienne Map et en crée une nouvelle.
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  MAP DEPRECATION                                                   │
-  │                                                                   │
-  │  const a = { x: 1, y: 2 };    // Map M2 : x=Smi, y=Smi          │
-  │  const b = { x: 1, y: 2 };    // Map M2 (même)                   │
-  │                                                                   │
-  │  a.x = 1.5;  // x passe de Smi à Double !                        │
-  │                                                                   │
-  │  V8 ne peut pas modifier M2 (b l'utilise encore avec x=Smi)      │
-  │  → V8 crée M2' avec x=Double, y=Smi                              │
-  │  → V8 marque M2 comme "deprecated"                                │
-  │                                                                   │
-  │  M2 (deprecated)        M2' (nouvelle)                            │
-  │  x: Smi, y: Smi        x: Double, y: Smi                         │
-  │       ↑                      ↑                                    │
-  │       │                      │                                    │
-  │       b                      a                                    │
-  │                                                                   │
-  │  Quand b sera accédé la prochaine fois, V8 migrera               │
-  │  automatiquement b vers M2' (migration transparente).             │
-  │                                                                   │
-  │  Ce qui déclenche la dépréciation :                               │
-  │  - Changement de représentation (Smi → Double → HeapObject)      │
-  │  - Changement d'attributs (writable → readonly)                   │
-  │  - Reconfiguration via Object.defineProperty()                    │
-  │                                                                   │
-  │  Coût : la migration est O(nombre de propriétés) par objet.      │
-  │  Si des milliers d'objets partagent la Map dépréciée,            │
-  │  la migration peut être coûteuse (mais se fait paresseusement).  │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
-### 10. Property Type Tracking
-
-V8 ne se contente pas de stocker les propriétés — il traque aussi leur **type** (représentation) dans les Descriptor Arrays de la Map.
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  PROPERTY TYPE TRACKING                                            │
-  │                                                                   │
-  │  Trois représentations possibles par champ :                      │
-  │                                                                   │
-  │  Smi        : entier qui tient sur 31 bits (x64)                  │
-  │               Stocké directement (pas de pointeur)                │
-  │               Le plus rapide                                      │
-  │                                                                   │
-  │  Double     : nombre à virgule flottante (64 bits)                │
-  │               Stocké inline (mutable double box) en in-object     │
-  │               Pas d'allocation séparée pour les propriétés doubles │
-  │               Depuis V8 9.0+ (avant : HeapNumber, allocation)     │
-  │                                                                   │
-  │  HeapObject : tout le reste (String, Object, Array, null, etc.)   │
-  │               Stocké comme un pointeur (tagged pointer)           │
-  │                                                                   │
-  │  La transition Smi → Double → HeapObject est irréversible :       │
-  │                                                                   │
-  │  Smi ──────→ Double ──────→ HeapObject                            │
-  │  (le plus     (pas de        (le plus                              │
-  │   restrictif)  retour en      générique)                           │
-  │               arrière !)                                           │
-  │                                                                   │
-  │  Exemple :                                                        │
-  │  const p = { x: 1 };     // x tracké comme Smi                   │
-  │  p.x = 1.5;              // x migre vers Double (Map dépréciée)  │
-  │  p.x = 1;                // x RESTE Double (pas de retour)       │
-  │  p.x = "hello";          // x migre vers HeapObject              │
-  │                                                                   │
-  │  Conseil : être consistant avec les types dès le départ.          │
-  │  Si un champ peut être un double, initialiser avec 0.0 (pas 0).  │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
-### 11. Dictionary Mode (Slow Properties)
-
-Quand un objet devient trop "dynamique", V8 abandonne les Maps et bascule l'objet en **dictionary mode** (aussi appelé **slow properties**). L'objet utilise alors un vrai hash table pour ses propriétés.
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  DICTIONARY MODE — Ce qui le déclenche                             │
-  │                                                                   │
-  │  1. delete obj.prop                                               │
-  │     Supprimer une propriété bascule l'objet en dictionary mode.   │
-  │     C'est le déclencheur le plus courant.                         │
-  │                                                                   │
-  │  2. Trop de propriétés dynamiques                                 │
-  │     Si un objet reçoit des propriétés avec des noms dynamiques    │
-  │     (ex: obj[dynamicKey] = value), V8 peut basculer.             │
-  │                                                                   │
-  │  3. Trop de propriétés nommées (> ~820-1020 fast properties)      │
-  │     Le seuil exact dépend de la version de V8 et de la taille    │
-  │     des descriptor arrays. En pratique, c'est rare.               │
-  │                                                                   │
-  │  4. Trop de transitions depuis une même Map                       │
-  │     Si une Map a trop de branches enfants, V8 peut décider        │
-  │     de stopper les transitions et basculer.                       │
-  │                                                                   │
-  │  Peut-on récupérer du dictionary mode ?                           │
-  │  ────────────────────────────────────────                         │
-  │  NON, en général. Une fois en dictionary mode, l'objet y reste.   │
-  │  La seule façon de "récupérer" est de créer un NOUVEL objet       │
-  │  avec les mêmes propriétés. V8 ne re-migre pas automatiquement   │
-  │  un objet du dictionary mode vers le fast mode.                   │
-  │                                                                   │
-  │  Performance :                                                    │
-  │  Fast mode   │=================================│  ~1-2 ns/accès   │
-  │  Dictionary  │=========│                          ~10-20 ns/accès │
-  │                                                                   │
-  │  Le dictionary mode désactive aussi l'Inline Caching             │
-  │  pour cet objet spécifique.                                       │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
----
-
-### 12. Inline Caching (IC) : l'explication définitive
-
-L'Inline Caching est le mécanisme qui rend l'accès aux propriétés rapide en mémorisant la Map observée et l'offset correspondant au site d'appel.
-
-#### Le problème que résout l'IC
-
-Sans IC, chaque accès `obj.x` nécessite :
-1. Lire la Map de l'objet
-2. Chercher "x" dans les descriptors de la Map
-3. Calculer l'offset de la propriété
-4. Lire la valeur à cet offset
-
-Les étapes 2 et 3 sont coûteuses. L'IC les court-circuite en se souvenant du résultat.
-
-#### Les 4 états de l'Inline Cache
-
-```
-  UNINITIALIZED (jamais exécuté)
-       │
-       │ Premier appel : observe Map M1
-       ▼
-  MONOMORPHIC (1 seule Map)  ───────────────────── OPTIMAL
-       │
-       │ Appel avec Map M2 (différente de M1)
-       ▼
-  POLYMORPHIC (2-4 Maps)  ─────────────────────── ACCEPTABLE
-       │
-       │ 5e Map différente observée
-       ▼
-  MEGAMORPHIC (5+ Maps)  ──────────────────────── LENT
-
-  Notes sur les seuils :
-  - Le seuil polymorphique → mégamorphique est de ~4-5 Maps
-    (ce chiffre est un paramètre interne de V8 et a varié
-    entre les versions : 4 dans certaines, 5 dans d'autres)
-  - La transition est irréversible dans la même invocation
-  - Un IC mégamorphique n'empêche pas TurboFan de compiler,
-    mais le code généré sera générique (pas de spécialisation)
-```
-
-#### Comment chaque état fonctionne
-
-> **Comment lire les blocs assembleur** — Les blocs ci-dessous montrent le code machine généré par TurboFan pour chaque état d'IC. Tu n'as **pas besoin de lire l'assembleur**. Concentre-toi sur le **nombre d'instructions** :
-> - **Monomorphique** : 2-3 instructions → accès quasi-instantané
-> - **Polymorphique** : une chaîne de comparaisons → plus lent
-> - **Mégamorphique** : un appel de fonction générique → beaucoup plus lent
->
-> Plus il y a d'instructions, plus c'est lent. C'est la seule chose à retenir.
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  ÉTAT : MONOMORPHIC (1 Map)                                       │
-  │                                                                   │
-  │  function getX(obj) { return obj.x; }                             │
-  │                                                                   │
-  │  L'IC a vu : Map M2, propriété "x" à offset 0                    │
-  │                                                                   │
-  │  Code généré par TurboFan :                                       │
-  │  ┌──────────────────────────────────────────────────────┐         │
-  │  │ cmp [obj + 0], M2      ; la Map de obj == M2 ?       │         │
-  │  │ jne deopt               ; non → déoptimiser           │         │
-  │  │ mov rax, [obj + 16]    ; oui → lire offset 0 direct  │         │
-  │  │ ret                                                    │         │
-  │  └──────────────────────────────────────────────────────┘         │
-  │                                                                   │
-  │  → 2-3 instructions machine. Le plus rapide possible.             │
-  └───────────────────────────────────────────────────────────────────┘
-
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  ÉTAT : POLYMORPHIC (2-4 Maps)                                    │
-  │                                                                   │
-  │  L'IC a vu : M2 (offset 0), M5 (offset 0), M7 (offset 8)        │
-  │                                                                   │
-  │  Code généré :                                                    │
-  │  ┌──────────────────────────────────────────────────────┐         │
-  │  │ cmp [obj + 0], M2      ; Map == M2 ?                  │         │
-  │  │ je  .load_offset_0      ; oui → offset 0              │         │
-  │  │ cmp [obj + 0], M5      ; Map == M5 ?                  │         │
-  │  │ je  .load_offset_0      ; oui → offset 0              │         │
-  │  │ cmp [obj + 0], M7      ; Map == M7 ?                  │         │
-  │  │ je  .load_offset_8      ; oui → offset 8              │         │
-  │  │ jmp .slow_path          ; aucune → lookup générique    │         │
-  │  └──────────────────────────────────────────────────────┘         │
-  │                                                                   │
-  │  → Chaîne de comparaisons. Encore rapide, mais le nombre          │
-  │  de comparaisons croît avec le nombre de Maps.                    │
-  └───────────────────────────────────────────────────────────────────┘
-
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  ÉTAT : MEGAMORPHIC (5+ Maps)                                     │
-  │                                                                   │
-  │  Trop de Maps différentes → V8 abandonne la spécialisation.       │
-  │                                                                   │
-  │  Code généré :                                                    │
-  │  ┌──────────────────────────────────────────────────────┐         │
-  │  │ ; Lookup dans le megamorphic stub cache               │         │
-  │  │ mov rdi, [obj + 0]     ; charger la Map               │         │
-  │  │ call MegamorphicLookup  ; lookup générique            │         │
-  │  │ ; résultat dans rax                                    │         │
-  │  └──────────────────────────────────────────────────────┘         │
-  │                                                                   │
-  │  → Appel de fonction pour chaque accès. Nettement plus lent       │
-  │  que monomorphique (~5-10x) mais utilise un cache global          │
-  │  (megamorphic stub cache) qui est meilleur qu'un hash table.      │
-  └───────────────────────────────────────────────────────────────────┘
-
-  Performance relative (accès propriété, approximatif) :
-
-  Monomorphic  |█████████████████████████████████| 1x     (~1-2 ns)
-  Polymorphic  |█████████████████████|             ~2-3x  (~3-5 ns)
-  Megamorphic  |████████████|                      ~5-10x (~8-15 ns)
-  Dictionary   |██████|                            ~10-20x (~15-30 ns)
-```
-
----
-
-### 13. Éléments Kinds : le système de types des tableaux
-
-V8 classifie les tableaux selon le type de leurs éléments. Les transitions sont **irréversibles** (lattice à sens unique) :
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  ELEMENTS KINDS — LATTICE IRRÉVERSIBLE                             │
-  │                                                                   │
-  │  PACKED_SMI_ELEMENTS                                               │
-  │    │         │                                                    │
-  │    │(double) │(trou)                                              │
-  │    ▼         ▼                                                    │
-  │  PACKED_DOUBLE_ELEMENTS    HOLEY_SMI_ELEMENTS                     │
-  │    │         │               │         │                          │
-  │    │(objet)  │(trou)         │(double) │(trou)                    │
-  │    ▼         ▼               ▼         ▼                          │
-  │  PACKED_ELEMENTS      HOLEY_DOUBLE_ELEMENTS                       │
-  │    │                    │                                         │
-  │    │(trou)              │(objet)                                  │
-  │    ▼                    ▼                                         │
-  │  HOLEY_ELEMENTS  ◄──── HOLEY_ELEMENTS                            │
-  │                                                                   │
-  │  Direction : on ne remonte JAMAIS dans le lattice.                │
-  │  Un tableau HOLEY ne redevient jamais PACKED.                     │
-  │  Un tableau DOUBLE ne redevient jamais SMI.                       │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
-**PACKED_SMI_ELEMENTS** est le plus rapide : V8 n'a pas besoin de vérifier les trous ni de faire de conversion de type, et les Smi sont stockés directement (pas de boxing).
-
-```js
-// PACKED_SMI_ELEMENTS — optimal
-const a = [1, 2, 3, 4, 5];
-
-// PACKED_DOUBLE_ELEMENTS — un peu moins rapide (double boxing)
-const b = [1.1, 2.2, 3.3];
-
-// PACKED_ELEMENTS — pas de spécialisation de type
-const d = [1, "two", { three: 3 }];
-
-// HOLEY_SMI_ELEMENTS — pénalisé par les vérifications de trous
-const c = new Array(10);  // 10 trous !
-c[0] = 1;
-
-// HOLEY_ELEMENTS — le pire cas (trous + types mélangés)
-const e = [1, , "hello", , { x: 1 }];
-```
-
-```
-  Pourquoi HOLEY est plus lent que PACKED :
-
-  PACKED : arr[i] → lire directement la valeur à l'index i
-  HOLEY  : arr[i] → vérifier si l'index existe (pas un trou)
-                   → si trou : remonter la prototype chain
-                   → si pas trou : lire la valeur
-
-  Le check de trou ajoute une branche à CHAQUE accès indexé.
-```
-
-**Règles pour les tableaux** :
-- Préférer `[]` ou `[1, 2, 3]` plutôt que `new Array(n)` (qui crée un tableau HOLEY)
-- Éviter les trous : ne pas faire `arr[1000] = x` sur un petit tableau
-- Ne pas mélanger les types dans un même tableau si possible
-- `Array.from({length: n}, () => 0)` est préférable à `new Array(n)` (PACKED_SMI vs HOLEY)
-- `push()` est préférable à l'assignation directe par index quand possible
-
----
-
-### 14. Object.freeze() et Object.seal() : effets sur les Maps
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  Object.freeze() et Object.seal()                                 │
-  │                                                                   │
-  │  Object.seal(obj) :                                               │
-  │  - Les propriétés existantes deviennent non-configurables          │
-  │  - Mais restent modifiables (writable)                             │
-  │  - On ne peut plus ajouter de nouvelles propriétés                │
-  │  - Crée une NOUVELLE Map avec les attributs modifiés              │
-  │  - Les ICs fonctionnent normalement (c'est toujours fast mode)    │
-  │                                                                   │
-  │  Object.freeze(obj) :                                             │
-  │  - Les propriétés deviennent non-writable ET non-configurables    │
-  │  - On ne peut plus ajouter de nouvelles propriétés                │
-  │  - Crée une NOUVELLE Map                                          │
-  │  - Les ICs fonctionnent normalement                               │
-  │  - BONUS : V8 sait que les valeurs ne changeront plus             │
-  │    → TurboFan peut inliner les valeurs des propriétés comme       │
-  │    des constantes (constant folding amélioré)                     │
-  │                                                                   │
-  │  Attention : freeze/seal crée une Map différente pour CHAQUE      │
-  │  objet, même si les objets avaient la même Map avant.             │
-  │                                                                   │
-  │  const a = { x: 1, y: 2 };                                       │
-  │  const b = { x: 3, y: 4 };                                       │
-  │  // a et b partagent la même Map                                  │
-  │                                                                   │
-  │  Object.freeze(a);                                                │
-  │  // a a maintenant une Map différente de b                        │
-  │  // Mais si on freeze b aussi, V8 réutilise la Map frozen         │
-  │  Object.freeze(b);                                                │
-  │  // a et b partagent à nouveau la même Map (frozen)               │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
----
-
-### 15. Comparaison : classes vs object literals vs Object.create
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  STABILITÉ DES MAPS SELON LE PATTERN DE CRÉATION                   │
-  │                                                                   │
-  │  ┌─────────────────────────────────────────────────────────────┐  │
-  │  │ CLASSES (recommandé pour les hot paths)                      │  │
-  │  │                                                              │  │
-  │  │ class Point {                                                │  │
-  │  │   constructor(x, y) { this.x = x; this.y = y; }            │  │
-  │  │ }                                                            │  │
-  │  │                                                              │  │
-  │  │ + Toutes les instances partagent la même Map                 │  │
-  │  │ + V8 optimise le slack tracking pour les classes              │  │
-  │  │ + L'ordre des propriétés est garanti par le constructeur     │  │
-  │  │ + Le prototype est partagé et stable                         │  │
-  │  │ + Score : ★★★★★ pour la stabilité des Maps                  │  │
-  │  └─────────────────────────────────────────────────────────────┘  │
-  │                                                                   │
-  │  ┌─────────────────────────────────────────────────────────────┐  │
-  │  │ OBJECT LITERALS (bon si utilisé de manière cohérente)        │  │
-  │  │                                                              │  │
-  │  │ function makePoint(x, y) { return { x, y }; }              │  │
-  │  │                                                              │  │
-  │  │ + Toutes les instances partagent la même Map                 │  │
-  │  │   (V8 utilise le bytecode CreateObjectLiteral qui            │  │
-  │  │   prépare la Map dès la première exécution)                  │  │
-  │  │ + Simple et lisible                                          │  │
-  │  │ - Si on ajoute des propriétés conditionnellement après :     │  │
-  │  │   Maps divergentes                                           │  │
-  │  │ + Score : ★★★★ pour la stabilité des Maps                   │  │
-  │  └─────────────────────────────────────────────────────────────┘  │
-  │                                                                   │
-  │  ┌─────────────────────────────────────────────────────────────┐  │
-  │  │ Object.create(proto) (cas spéciaux uniquement)               │  │
-  │  │                                                              │  │
-  │  │ const p = Object.create(pointProto);                        │  │
-  │  │ p.x = x; p.y = y;                                          │  │
-  │  │                                                              │  │
-  │  │ + Permet de personnaliser le prototype                       │  │
-  │  │ - Les propriétés sont ajoutées une par une (transition       │  │
-  │  │   chain plus longue qu'un literal)                           │  │
-  │  │ - Object.create(null) crée un objet sans prototype           │  │
-  │  │   → Map spéciale, mais ICs fonctionnent normalement          │  │
-  │  │ + Score : ★★★ pour la stabilité des Maps                    │  │
-  │  └─────────────────────────────────────────────────────────────┘  │
-  │                                                                   │
-  │  ┌─────────────────────────────────────────────────────────────┐  │
-  │  │ Ajout dynamique de propriétés (éviter en hot path)           │  │
-  │  │                                                              │  │
-  │  │ const obj = {};                                              │  │
-  │  │ for (const [k, v] of entries) { obj[k] = v; }              │  │
-  │  │                                                              │  │
-  │  │ - Chaque combinaison de clés crée une Map unique             │  │
-  │  │ - Si les clés varient → ICs mégamorphiques                   │  │
-  │  │ - Préférer new Map(entries) pour les dictionnaires           │  │
-  │  │ + Score : ★ pour la stabilité des Maps                      │  │
-  │  └─────────────────────────────────────────────────────────────┘  │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
----
-
-### 16. Intrinsics V8 pour le diagnostic
-
-V8 expose des fonctions internes accessibles avec `--allow-natives-syntax`. Voici les plus utiles pour diagnostiquer les Maps et les ICs.
-
-#### %HaveSameMap(a, b)
-
-Retourne `true` si deux objets partagent exactement la même Map.
-
-```js
-// node --allow-natives-syntax
-const a = { x: 1, y: 2 };
-const b = { x: 10, y: 20 };
-console.log(%HaveSameMap(a, b)); // true
-
-const c = { y: 1, x: 2 };      // ordre différent !
-console.log(%HaveSameMap(a, c)); // false
-
-const d = { x: 1, y: 2 };
-d.z = 3;                        // propriété ajoutée après
-console.log(%HaveSameMap(a, d)); // false
-```
-
-#### %DebugPrint(obj)
-
-Affiche les informations internes détaillées d'un objet : sa Map, ses propriétés, le éléments kind (pour les tableaux), le type de chaque champ, etc.
-
-```js
-// node --allow-natives-syntax
-const arr = [1, 2, 3];
-%DebugPrint(arr);
-// Sortie (extraits) :
-// - map: 0x... [FastProperties]
-// - elements: PACKED_SMI_ELEMENTS
-// - length: 3
-// - elements[0]: 1 (Smi)
-// - elements[1]: 2 (Smi)
-// - elements[2]: 3 (Smi)
-
-arr.push(1.5);
-%DebugPrint(arr);
-// - elements: PACKED_DOUBLE_ELEMENTS  ← transition !
-```
-
-#### %GetOptimizationStatus(fn)
-
-Retourne un bitmask indiquant l'état d'optimisation d'une fonction.
-
-```js
-// node --allow-natives-syntax
-function add(a, b) { return a + b; }
-
-// Chauffer
-for (let i = 0; i < 100_000; i++) add(i, i);
-
-const status = %GetOptimizationStatus(add);
-// Les bits pertinents :
-// bit 0 (1)  : la fonction est une fonction
-// bit 1 (2)  : jamais optimisée
-// bit 2 (4)  : toujours optimisée (pas de feedback nécessaire)
-// bit 3 (8)  : peut-être déoptimisée
-// bit 4 (16) : optimisée par TurboFan
-// bit 5 (32) : optimisée par Maglev
-// bit 6 (64) : interprétée par Ignition
-// bit 7 (128): compilée par Sparkplug (baseline)
-
-// Helpers utiles :
-function isOptimized(fn) {
-  const s = %GetOptimizationStatus(fn);
-  return (s & 16) !== 0; // TurboFan
-}
-
-function isMaglev(fn) {
-  const s = %GetOptimizationStatus(fn);
-  return (s & 32) !== 0; // Maglev
-}
-```
-
-#### Forcer l'optimisation pour les tests
-
-```js
-// node --allow-natives-syntax
-function myFunc(x) { return x * 2; }
-
-// Appeler une fois pour générer le feedback
-myFunc(42);
-
-// Dire à V8 de préparer la fonction pour l'optimisation
-%PrepareFunctionForOptimization(myFunc);
-
-// Appeler encore pour fournir du feedback
-myFunc(42);
-
-// Forcer l'optimisation par TurboFan
-%OptimizeFunctionOnNextCall(myFunc);
-
-// Cet appel sera exécuté en code optimisé
-myFunc(42);
-
-// Vérifier
-console.log('Optimisée ?', (%GetOptimizationStatus(myFunc) & 16) !== 0);
-```
-
----
-
-### 17. Les règles d'or pour le code de production
-
-```
-  ┌───────────────────────────────────────────────────────────────────┐
-  │  RÈGLES D'OR — HIDDEN CLASSES & INLINE CACHING                    │
-  │                                                                   │
-  │  1. INITIALISER TOUTES LES PROPRIÉTÉS DANS LE CONSTRUCTEUR        │
-  │     class User {                                                  │
-  │       constructor(name, age) {                                    │
-  │         this.name = name;                                         │
-  │         this.age = age;                                           │
-  │         this.email = null;   // même si pas encore connu          │
-  │         this.score = 0;      // valeur par défaut                 │
-  │       }                                                           │
-  │     }                                                             │
-  │                                                                   │
-  │  2. TOUJOURS LE MÊME ORDRE DE PROPRIÉTÉS                          │
-  │     // BIEN : factory cohérente                                   │
-  │     function createPoint(x, y) { return { x, y }; }              │
-  │                                                                   │
-  │     // MAL : ordre conditionnel                                   │
-  │     function createBadPoint(x, y) {                               │
-  │       const p = {};                                               │
-  │       if (cond) { p.x = x; p.y = y; }                            │
-  │       else { p.y = y; p.x = x; }                                 │
-  │       return p;                                                   │
-  │     }                                                             │
-  │                                                                   │
-  │  3. NE PAS AJOUTER DE PROPRIÉTÉS CONDITIONNELLEMENT               │
-  │     // MAL                                                        │
-  │     const result = { id: 1, value: 42 };                          │
-  │     if (hasBonus) result.bonus = 10;  // → 2 Maps possibles      │
-  │                                                                   │
-  │     // BIEN                                                       │
-  │     const result = { id: 1, value: 42, bonus: hasBonus ? 10 : 0 };│
-  │                                                                   │
-  │  4. NE JAMAIS UTILISER delete                                     │
-  │     // MAL                                                        │
-  │     delete user.tempData;  // → dictionary mode                   │
-  │     // BIEN                                                       │
-  │     user.tempData = undefined;                                    │
-  │     // ENCORE MIEUX : ne pas ajouter tempData au départ           │
-  │                                                                   │
-  │  5. NE PAS CHANGER LE TYPE D'UNE PROPRIÉTÉ                        │
-  │     // MAL                                                        │
-  │     const p = { x: 1, y: 2 };  // x est Smi                     │
-  │     p.x = 1.5;                  // x → Double : Map dépréciée    │
-  │     p.x = "hello";              // x → HeapObject : re-dépréciation│
-  │                                                                   │
-  │     // BIEN : être consistant dès le départ                       │
-  │     const p = { x: 1.0, y: 2.0 };  // toujours Double           │
-  │                                                                   │
-  │  6. PRÉFÉRER LES CLASSES POUR LES OBJETS STRUCTURELS              │
-  │     Les classes garantissent un constructeur unique avec un        │
-  │     ordre de propriétés fixe et un prototype stable.              │
-  │                                                                   │
-  │  7. POUR LES DICTIONNAIRES, UTILISER Map() PAS LES OBJETS         │
-  │     // Pour les clés dynamiques, Map est fait pour ça :           │
-  │     const config = new Map(entries);                              │
-  │     // Pas : const config = {}; config[key] = value;              │
-  │                                                                   │
-  │  8. TABLEAUX : GARDER LES TYPES HOMOGÈNES ET SANS TROUS           │
-  │     const nums = [1, 2, 3, 4];          // PACKED_SMI — optimal  │
-  │     // Éviter : new Array(1000), arr[999] = x, [1,,3]            │
-  └───────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Démonstration
-
-### Demo 1 : Monomorphique vs Polymorphique vs Mégamorphique
-
-```js
-// demo-ic-states.mjs
-// node --allow-natives-syntax demo-ic-states.mjs
-
-// --- Utilitaire de mesure ---
-function bench(label, fn, iterations = 1_000_000) {
-  for (let i = 0; i < 1000; i++) fn(); // warmup
-  const start = performance.now();
-  for (let i = 0; i < iterations; i++) fn();
-  const elapsed = performance.now() - start;
-  console.log(`${label}: ${elapsed.toFixed(2)} ms (${iterations} it.)`);
-}
-
-// --- Accès monomorphique ---
-function getX_mono(obj) { return obj.x; }
-
-const mono1 = { x: 1, y: 2 };
-const mono2 = { x: 10, y: 20 };
-console.log("Même Map?", %HaveSameMap(mono1, mono2)); // true
-
-bench("Monomorphique", () => {
-  getX_mono(mono1);
-  getX_mono(mono2);
-});
-
-// --- Accès polymorphique (4 shapes) ---
-function getX_poly(obj) { return obj.x; }
-
-const poly1 = { x: 1 };
-const poly2 = { x: 1, y: 2 };
-const poly3 = { x: 1, y: 2, z: 3 };
-const poly4 = { x: 1, y: 2, z: 3, w: 4 };
-
-bench("Polymorphique (4 shapes)", () => {
-  getX_poly(poly1);
-  getX_poly(poly2);
-  getX_poly(poly3);
-  getX_poly(poly4);
-});
-
-// --- Accès mégamorphique (8+ shapes) ---
-function getX_mega(obj) { return obj.x; }
-
-const shapes = [];
-for (let i = 0; i < 8; i++) {
-  const obj = { x: i };
-  for (let j = 0; j < i; j++) {
-    obj["prop" + j] = j;
+// members.service.js — AVANT (forme instable)
+function buildMember(row) {
+  const m = {};
+  m.id = row.id;
+  m.name = row.name;
+
+  // Ajouts conditionnels : chaque combinaison crée une forme différente
+  if (row.email) m.email = row.email;
+  if (row.role === 'admin') m.isAdmin = true;
+  if (row.avatarUrl) m.avatar = row.avatarUrl;
+
+  // Ordre variable selon la source de données
+  if (row.legacy) {
+    m.familyId = row.familyId;
+    m.joinedAt = row.joinedAt;
+  } else {
+    m.joinedAt = row.joinedAt;
+    m.familyId = row.familyId;
   }
-  shapes.push(obj);
+
+  // Nettoyage "propre" en apparence — en réalité catastrophique
+  if (!row.email) delete m.email;
+
+  return m;
 }
 
-bench("Megamorphique (8 shapes)", () => {
-  for (const s of shapes) getX_mega(s);
-});
-```
-
-### Demo 2 : Observer les transitions IC avec --trace-ic
-
-```bash
-# Générer le fichier de trace
-node --trace-ic demo-ic-states.mjs 2> ic-trace.log
-
-# Analyser (chercher les lignes contenant le nom de la fonction)
-grep "getX_mega" ic-trace.log | head -20
-```
-
-Sortie typique :
-```
-[...] LoadIC [...] getX_mega [...] . -> 1 (monomorphic)
-[...] LoadIC [...] getX_mega [...] 1 -> P (polymorphic)
-[...] LoadIC [...] getX_mega [...] P -> N (megamorphic)
-```
-
-### Demo 3 : Transitions d'Éléments Kinds
-
-```js
-// demo-array-kinds.mjs
-// node --allow-natives-syntax demo-array-kinds.mjs
-
-console.log("=== PACKED_SMI_ELEMENTS ===");
-const a = [1, 2, 3];
-%DebugPrint(a);
-
-console.log("\n=== Ajout d'un double → PACKED_DOUBLE_ELEMENTS ===");
-a.push(1.5);
-%DebugPrint(a);
-
-console.log("\n=== Ajout d'un string → PACKED_ELEMENTS ===");
-a.push("hello");
-%DebugPrint(a);
-
-console.log("\n=== Création d'un trou → HOLEY_ELEMENTS ===");
-a[100] = "far";
-%DebugPrint(a);
-
-console.log("\n=== new Array(5) → HOLEY dès le départ ===");
-const b = new Array(5);
-b[0] = 1;
-%DebugPrint(b);
-
-console.log("\n=== Array.from → PACKED (recommandé) ===");
-const c = Array.from({ length: 5 }, () => 0);
-%DebugPrint(c);
-```
-
-### Demo 4 : Map déprécation en action
-
-```js
-// demo-map-deprecation.mjs
-// node --allow-natives-syntax demo-map-deprecation.mjs
-
-class Config {
-  constructor() {
-    this.width = 100;    // Smi
-    this.height = 200;   // Smi
-    this.scale = 1;      // Smi
-  }
-}
-
-const c1 = new Config();
-const c2 = new Config();
-console.log("Avant : même Map?", %HaveSameMap(c1, c2)); // true
-
-// Changer le type de scale : Smi → Double
-c1.scale = 1.5;
-console.log("Après c1.scale = 1.5 : même Map?", %HaveSameMap(c1, c2));
-// false — c1 a une nouvelle Map (scale = Double)
-// c2 est sur la Map dépréciée (sera migré à la prochaine utilisation)
-
-// Forcer la migration de c2
-const _ = c2.scale;  // cet accès déclenche la migration
-console.log("Après accès à c2.scale : même Map?", %HaveSameMap(c1, c2));
-// true — c2 a été migré vers la même Map que c1
-```
-
-### Demo 5 : Dictionary mode et ses conséquences
-
-```js
-// demo-dictionary-mode.mjs
-// node --allow-natives-syntax demo-dictionary-mode.mjs
-
-function readXY(obj) {
-  return obj.x + obj.y;
-}
-
-// Créer des objets en fast mode
-const fast = { x: 1, y: 2, z: 3 };
-const slow = { x: 1, y: 2, z: 3 };
-
-// Vérifier : les deux ont la même Map
-console.log("Même Map avant delete?", %HaveSameMap(fast, slow)); // true
-
-// Basculer slow en dictionary mode
-delete slow.z;
-
-// Vérifier
-console.log("Même Map après delete?", %HaveSameMap(fast, slow)); // false
-
-// Benchmark
-function benchAccess(label, obj, iterations = 10_000_000) {
-  const start = performance.now();
-  let sum = 0;
-  for (let i = 0; i < iterations; i++) {
-    sum += obj.x + obj.y;
-  }
-  const elapsed = performance.now() - start;
-  console.log(`${label}: ${elapsed.toFixed(2)} ms`);
-  return sum;
-}
-
-benchAccess("Fast mode ", fast);
-benchAccess("Dictionary", slow);
-// Le dictionary mode sera significativement plus lent
-```
-
-### Demo 6 : Slack tracking observable
-
-```js
-// demo-slack-tracking.mjs
-// node --allow-natives-syntax demo-slack-tracking.mjs
-
-class Animal {
-  constructor(name) {
-    this.name = name;
-    this.sound = "...";
-  }
-}
-
-// Créer les premières instances (slack tracking actif)
-const animals = [];
-for (let i = 0; i < 20; i++) {
-  animals.push(new Animal(`animal-${i}`));
-}
-
-// Afficher l'instance #0 (créée avec slack) et #19 (créée après stabilisation)
-console.log("=== Instance #0 (peut avoir des slots slack) ===");
-%DebugPrint(animals[0]);
-
-console.log("\n=== Instance #19 (après stabilisation du slack) ===");
-%DebugPrint(animals[19]);
-
-// Observer la différence de taille dans le DebugPrint :
-// Les premières instances peuvent avoir des slots supplémentaires
-// alloués (slack) que les suivantes n'ont pas.
-```
-
----
-
-### V8 vs SpiderMonkey (Firefox)
-
-Le concept de « Hidden Class » est **présent dans tous les moteurs JS modernes** — seul le nom change. C'est LE concept fondamental qui permet à JavaScript (langage dynamique) d'atteindre des performances proches des langages statiques.
-
-**Terminologie comparée :**
-
-| Concept | V8 | SpiderMonkey (Firefox) | JavaScriptCore (Safari) |
-|---|---|---|---|
-| Hidden Class | **Map** | **Shape** | **Structure** |
-| Arbre de transitions | Map transition tree | Shape tree | Structure transition table |
-| Accès par offset | In-object properties + backing store | Slots + backing store | Direct properties + butterfly |
-| Inline Cache polymorphique | Polymorphic IC stubs | **ShapeTable** (table de shapes pour accès polymorphique) | Polymorphic IC |
-| Mode dictionnaire | Dictionary mode (slow properties) | Dictionary mode | Non-cacheable dictionary |
-
-```
-  Même objet { x: 1, y: 2 } vu par chaque moteur :
-
-  V8 :           Map (pointe vers descriptor array avec offsets de x et y)
-  SpiderMonkey : Shape (chaîne de shapes décrivant x puis y)
-  JSC :          Structure (table de transitions avec offsets)
-```
-
-**Les règles d'or sont universelles :**
-
-Quel que soit le moteur (V8, SpiderMonkey, JSC), les mêmes bonnes pratiques s'appliquent :
-
-1. **Initialiser toutes les propriétés dans le même ordre** → un seul Map/Shape/Structure pour tous les objets similaires.
-2. **Ne pas utiliser `delete`** → éviter le passage en mode dictionnaire (lent dans tous les moteurs).
-3. **Ne pas ajouter de propriétés après la construction** → chaque ajout crée une nouvelle transition dans l'arbre.
-4. **Garder des shapes monomorphiques** dans les chemins chauds → les inline caches sont rapides partout quand il n'y a qu'une seule shape.
-
-> **À retenir** : V8 appelle ça « Maps », SpiderMonkey appelle ça « Shapes », JSC appelle ça « Structures ». C'est **exactement le même concept** avec des noms différents. Les règles d'optimisation sont identiques dans les trois moteurs.
-
----
-
-## Points clés
-
-1. **Hidden Class (Map)** : structure interne qui décrit la forme d'un objet et permet à V8 d'accéder aux propriétés par offset plutôt que par lookup dans un hash table.
-
-2. **In-object properties** : les premières propriétés sont stockées directement dans l'objet (un seul déréférencement). Les suivantes vont dans un backing store FixedArray (deux déréférencements).
-
-3. **Chaîne/arbre de transitions** : les Maps sont partagées via un arbre de transitions. Deux objets construits de la même façon partagent les mêmes Maps et donc les mêmes optimisations.
-
-4. **Slack tracking** : V8 pré-alloue des slots in-object supplémentaires pour les premiers objets d'un constructeur, puis réduit la taille après ~8 instances.
-
-5. **Map déprécation** : quand le type d'une propriété change (Smi → Double → HeapObject), la Map est dépréciée et les objets sont migrés paresseusement vers une nouvelle Map.
-
-6. **Property type tracking** : V8 traque le type de chaque propriété (Smi/Double/HeapObject) dans les descriptors. La transition de type est irréversible.
-
-7. **Dictionary mode** : déclenché par `delete`, trop de propriétés dynamiques, ou trop de transitions. L'objet utilise un hash table — c'est la situation la plus pénalisante. La récupération est impossible.
-
-8. **Inline Caching** — les 4 états : UNINITIALIZED → MONOMORPHIC (1 Map, optimal) → POLYMORPHIC (2-4 Maps, acceptable) → MEGAMORPHIC (5+ Maps, lent). Les seuils sont des paramètres internes V8.
-
-9. **Éléments Kinds** : les tableaux ont un lattice irréversible de PACKED_SMI → PACKED_DOUBLE → PACKED_ELEMENTS → HOLEY. Garder les tableaux PACKED et homogènes.
-
-10. **`%HaveSameMap()`**, **`%DebugPrint()`**, **`%GetOptimizationStatus()`** sont les intrinsics V8 essentiels pour le diagnostic.
-
-11. **Règles d'or** : initialiser toutes les propriétés dans le constructeur, même ordre, pas de `delete`, pas de changement de type, préférer les classes pour les objets structurels, utiliser `Map()` pour les dictionnaires.
-
----
-
----
-
-## Pour aller plus loin
-
-- [V8 Blog — Fast properties in V8 (Maps)](https://v8.dev/blog/fast-properties)
-- [V8 Blog — Éléments kinds in V8](https://v8.dev/blog/elements-kinds)
-- [V8 Blog — What's up with monomorphism?](https://mrale.ph/blog/2015/01/11/whats-up-with-monomorphism.html)
-- [Mathias Bynens — V8 Internals for JavaScript Developers (vidéo)](https://www.youtube.com/watch?v=m9cTaYI95Zc)
-- [Benedikt Meurer — Speculative Optimization in V8](https://benediktmeurer.de/2017/12/13/an-introduction-to-speculative-optimization-in-v8/)
-- [V8 Source — map.h](https://chromium.googlesource.com/v8/v8/+/main/src/objects/map.h)
-- [V8 Source — map-inl.h](https://chromium.googlesource.com/v8/v8/+/main/src/objects/map-inl.h)
-- [V8 Source — feedback-vector.h](https://chromium.googlesource.com/v8/v8/+/main/src/objects/feedback-vector.h)
-- [V8 Blog — Slack tracking](https://v8.dev/blog/slack-tracking)
-
----
-
-## Défi
-
-**Défi : Le cache-breaker**
-
-On vous donne la fonction suivante :
-
-```js
-function processItems(items) {
+// Chemin chaud : appelé sur chaque membre à chaque requête
+function totalSeniority(members) {
   let total = 0;
-  for (const item of items) {
-    total += item.value * item.weight;
-    if (item.bonus) total += item.bonus;
+  for (const m of members) {
+    total += Date.now() - m.joinedAt; // accès m.joinedAt lu des milliers de fois
   }
   return total;
 }
 ```
 
-Elle est appelée avec un tableau de 100 000 objets générés ainsi :
+**Trois problèmes invisibles à l'œil nu :**
+1. `email`, `isAdmin`, `avatar` sont ajoutés **conditionnellement** — 8 combinaisons possibles = jusqu'à 8 formes d'objet différentes.
+2. L'ordre `familyId` / `joinedAt` **change** selon `row.legacy` — deux formes de plus, même avec les mêmes propriétés.
+3. Le `delete m.email` fait **basculer l'objet en mode dictionnaire** — le pire cas.
 
-```js
-const items = [];
-for (let i = 0; i < 100_000; i++) {
-  const item = { value: i, weight: Math.random() };
-  if (i % 7 === 0) item.bonus = 10;
-  if (i % 13 === 0) item.category = "special";
-  if (i % 23 === 0) delete item.weight;
-  items.push(item);
-}
-```
-
-**Votre mission** :
-1. Analysez combien de Maps différentes existent dans le tableau. Utilisez `%HaveSameMap` et `%DebugPrint` pour vérifier.
-2. Identifiez chaque source de divergence de Maps :
-   - L'ajout conditionnel de `bonus`
-   - L'ajout conditionnel de `category`
-   - Le `delete item.weight` (le plus destructeur — pourquoi ?)
-3. Réécrivez la génération du tableau pour que TOUS les objets partagent la même Map.
-4. Mesurez l'amélioration de performance sur `processItems`.
-5. Expliquez pourquoi le `delete item.weight` est particulièrement destructeur (indication : dictionary mode, voir section 11 de ce module).
-
-**Indice pour la correction** :
-
-```js
-const items = [];
-for (let i = 0; i < 100_000; i++) {
-  items.push({
-    value: i,
-    weight: i % 23 === 0 ? 0 : Math.random(), // pas de delete !
-    bonus: i % 7 === 0 ? 10 : 0,              // toujours présent
-    category: i % 13 === 0 ? "special" : null, // toujours présent
-  });
-}
-```
-
-Objectif : amélioration d'au moins 50% du temps d'exécution.
+Résultat : la boucle `totalSeniority` voit des dizaines de formes différentes pour `m.joinedAt`. Son inline cache passe de **monomorphe** (rapide) à **mégamorphe** (lent). Ce module explique pourquoi, et comment normaliser la forme pour restaurer la vitesse.
 
 ---
 
-<!-- parcours-recommande -->
+## 2. Théorie complète, concise
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 11 hidden classes](../screencasts/screencast-11-hidden-classes.md)
-2. **Lab** : [lab-11-hidden-classes](../labs/lab-11-hidden-classes/README)
-3. **Visualisation** : [Hidden Classes](../visualizations/hidden-classes.html)
-4. **Quiz** : [quiz 11 hidden classes](../quizzes/quiz-11-hidden-classes.html)
-:::
+### 2.1 Le problème que V8 doit résoudre
+
+En C++ ou Java, le compilateur connaît la structure exacte d'un objet : il sait que `point.x` est à l'offset mémoire 0, `point.y` à l'offset 8. L'accès est une seule instruction machine (~1 ns).
+
+En JavaScript, un objet est un dictionnaire ouvert : on peut ajouter, supprimer, changer le type de n'importe quelle propriété à tout moment.
+
+```js
+const p = { x: 1, y: 2 };
+p.z = 3;        // ajout à la volée
+delete p.y;     // suppression
+p.x = "hello";  // changement de type
+```
+
+Si V8 cherchait chaque propriété dans une table de hachage à chaque accès (~100 ns), JavaScript serait inutilisable pour du calcul. La solution : les **hidden classes**.
+
+### 2.2 Hidden class = la forme d'un objet
+
+Chaque objet JS pointe vers une **hidden class** (nommée **Map** dans V8, **Shape** dans Firefox, **Structure** dans Safari — même concept). La hidden class décrit la **forme** de l'objet, indépendamment de ses valeurs :
+
+- la liste des propriétés et l'**offset** de chacune,
+- le **type** de chaque propriété (entier, double, pointeur),
+- le prototype,
+- les **transitions** possibles vers d'autres formes.
+
+Deux objets qui ont exactement les mêmes propriétés, dans le même ordre, avec les mêmes types, **partagent la même hidden class**. C'est ça qui permet à V8 de traiter `m.joinedAt` par un offset fixe au lieu d'un lookup.
+
+```js
+// node --allow-natives-syntax
+const a = { x: 1, y: 2 };
+const b = { x: 10, y: 20 };
+console.log(%HaveSameMap(a, b)); // true — même forme, valeurs différentes
+```
+
+### 2.3 Les transitions de forme
+
+Quand on part d'un objet vide et qu'on ajoute des propriétés, V8 crée une **chaîne de transitions** entre formes :
+
+```js
+const obj = {};   // forme F0 (vide)
+obj.x = 1;        // transition F0 -> F1 (a "x")
+obj.y = 2;        // transition F1 -> F2 (a "x", "y")
+```
+
+Point crucial : si un autre objet ajoute les **mêmes** propriétés dans le **même** ordre, il réemprunte les mêmes formes. Les transitions sont partagées.
+
+```js
+const a = {}; a.x = 1; a.y = 2;   // parcourt F0 -> F1 -> F2
+const b = {}; b.x = 9; b.y = 8;   // réutilise F0 -> F1 -> F2
+// a et b finissent sur F2 — même hidden class
+```
+
+### 2.4 Pourquoi l'ordre des propriétés compte
+
+Les propriétés ajoutées dans un ordre différent produisent des **chemins de transition différents**, donc des hidden classes différentes — **même si les propriétés finales sont identiques**.
+
+```js
+function PointA(x, y) { this.x = x; this.y = y; } // chemin +x puis +y -> F2
+function PointB(x, y) { this.y = y; this.x = x; } // chemin +y puis +x -> F4
+
+const a = new PointA(1, 2); // forme F2
+const b = new PointB(1, 2); // forme F4
+// a.x === b.x et a.y === b.y, mais formes DIFFÉRENTES
+console.log(%HaveSameMap(a, b)); // false
+```
+
+Une fonction qui lit `p.x` et reçoit tantôt des `PointA`, tantôt des `PointB`, voit deux formes → son cache d'accès se dégrade. D'où la règle : **toujours affecter les propriétés dans le même ordre.**
+
+### 2.5 Initialiser toutes les propriétés dans le constructeur
+
+Corollaire direct : si une propriété est parfois présente, parfois absente, tu crées deux formes. La solution est d'initialiser **toutes** les propriétés dès la construction, même à `null` ou `0` :
+
+```js
+// MAL — 2 formes selon la présence de bonus
+const r1 = { id: 1, value: 42 };
+if (hasBonus) r1.bonus = 10;
+
+// BIEN — 1 seule forme, toujours
+const r2 = { id: 1, value: 42, bonus: hasBonus ? 10 : 0 };
+```
+
+```js
+// Classe : le constructeur garantit forme unique + ordre fixe
+class Member {
+  constructor(id, name, joinedAt) {
+    this.id = id;
+    this.name = name;
+    this.joinedAt = joinedAt;
+    this.email = null;   // même si inconnu pour l'instant
+    this.avatar = null;  // réservé dans la forme
+    this.isAdmin = false;
+  }
+}
+// Toutes les instances partagent une seule hidden class.
+```
+
+### 2.6 Le type des propriétés compte aussi
+
+V8 traque la **représentation** de chaque champ : entier court (Smi), double, ou pointeur (HeapObject). Changer le type d'un champ après coup fait **déprécier** la forme et migrer les objets — un coût caché.
+
+```js
+const p = { x: 1 };  // x tracké comme entier
+p.x = 1.5;           // x migre vers Double : forme dépréciée
+p.x = "hi";          // x migre vers pointeur : re-dépréciation
+```
+
+Règle : garder chaque champ d'un **type stable**. Si un champ peut être fractionnaire, l'initialiser avec `0.0`, pas `0`.
+
+### 2.7 `delete` et le mode dictionnaire
+
+`delete obj.prop` est le déclencheur n°1 du **mode dictionnaire** (slow properties) : l'objet abandonne sa hidden class et repasse à une vraie table de hachage. Les accès deviennent 10-20x plus lents **et l'inline caching est désactivé pour cet objet**. Pire : la récupération est quasi impossible, l'objet reste en mode dictionnaire.
+
+```js
+// MAL
+delete user.tempData;      // -> mode dictionnaire, irréversible
+
+// BIEN
+user.tempData = undefined; // garde la forme intacte
+// ENCORE MIEUX : ne jamais ajouter tempData si elle doit disparaître
+```
+
+### 2.8 Inline Caching (IC) : le cache des accès de propriété
+
+Un **inline cache** est un cache attaché à **chaque site d'accès** de propriété dans le code (chaque `obj.x` écrit dans le source). Il mémorise « pour la forme F, la propriété x est à l'offset N ». Le prochain accès qui présente la même forme court-circuite tout le lookup.
+
+Ce cache a quatre états, selon le **nombre de formes** vues à ce site :
+
+```
+  UNINITIALIZED  (jamais exécuté)
+       |  1re forme observée
+       v
+  MONOMORPHE   (1 forme)      -> OPTIMAL   : 2-3 instructions machine
+       |  2e forme différente
+       v
+  POLYMORPHE   (2 à 4 formes) -> ACCEPTABLE: chaîne de comparaisons
+       |  ~5e forme différente
+       v
+  MÉGAMORPHE   (5+ formes)    -> LENT      : lookup générique par appel
+```
+
+- **Monomorphe** : le site n'a vu qu'une forme. V8 génère un accès direct par offset. C'est la cible.
+- **Polymorphe** : 2 à 4 formes. V8 génère une petite chaîne de « si forme == F1 → offset a ; sinon si F2 → offset b ». Encore correct, mais coûte plus à chaque forme ajoutée.
+- **Mégamorphe** : au-delà de ~4-5 formes, V8 abandonne la spécialisation et retombe sur un lookup générique (cache global partagé). Nettement plus lent (~5-10x le monomorphe).
+
+Le seuil poly → méga est un paramètre interne V8 (4 ou 5 selon les versions).
+
+### 2.9 Le lien avec le JIT (module 10)
+
+Ce module et le module 10 décrivent **deux faces du même feedback**. Le type feedback que TurboFan consomme pour spéculer contient, pour chaque accès de propriété, **la ou les hidden classes observées et l'état de l'IC**.
+
+- IC **monomorphe** → TurboFan inline l'accès en un chargement par offset, et peut enchaîner d'autres optimisations (module 10 : inlining, escape analysis).
+- IC **mégamorphe** → TurboFan ne peut pas spécialiser : il génère un accès générique. La fonction reste compilée, mais lente.
+- Un **changement de forme** après optimisation (nouvelle propriété, `delete`, changement de type) invalide la spéculation → **déoptimisation** (module 10, deopt lazy « wrong map »).
+
+Autrement dit : **des formes instables sabotent le JIT.** Garder des hidden classes stables est le prérequis concret pour que tout ce que fait TurboFan tienne.
+
+### 2.10 Récapitulatif des règles pratiques
+
+1. Initialiser **toutes** les propriétés dans le constructeur / literal.
+2. Toujours le **même ordre** d'affectation.
+3. Ne **jamais** ajouter de propriété conditionnellement à la volée sur un chemin chaud.
+4. Ne **jamais** utiliser `delete` (préférer `= undefined`, ou ne pas ajouter).
+5. Garder chaque champ d'un **type stable**.
+6. Préférer les **classes** pour les objets structurels réutilisés.
+7. Pour un dictionnaire à clés dynamiques, utiliser `new Map()`, pas un objet littéral.
+
+---
+
+## 3. Worked examples
+
+### Exemple 1 — Restaurer une forme stable dans le service TribuZen
+
+Reprenons `buildMember` du cas concret et corrigeons-le pas à pas.
+
+**Étape 1 — repérer les sources de divergence.** Trois : ajouts conditionnels (`email`, `isAdmin`, `avatar`), ordre variable (`familyId` / `joinedAt`), et le `delete m.email`.
+
+**Étape 2 — figer la forme dans une classe** avec toutes les propriétés initialisées, dans un ordre unique :
+
+```js
+// members.service.js — APRÈS (forme stable)
+class Member {
+  constructor(row) {
+    // Ordre FIXE, toutes les propriétés TOUJOURS présentes
+    this.id = row.id;
+    this.name = row.name;
+    this.email = row.email ?? null;          // jamais absent, jamais delete
+    this.avatar = row.avatarUrl ?? null;     // null si inconnu
+    this.isAdmin = row.role === 'admin';     // booléen stable, jamais absent
+    this.familyId = row.familyId;            // ordre garanti par le constructeur
+    this.joinedAt = row.joinedAt;            // toujours après familyId
+  }
+}
+
+function buildMember(row) {
+  return new Member(row);
+}
+
+// Chemin chaud inchangé — mais maintenant m.joinedAt est monomorphe
+function totalSeniority(members) {
+  let total = 0;
+  for (const m of members) {
+    total += Date.now() - m.joinedAt;
+  }
+  return total;
+}
+```
+
+**Étape 3 — vérifier que toutes les instances partagent la forme :**
+
+```js
+// node --allow-natives-syntax
+const a = buildMember({ id: 1, name: 'A', role: 'admin', familyId: 7, joinedAt: 1000 });
+const b = buildMember({ id: 2, name: 'B', role: 'member', familyId: 7, joinedAt: 2000 });
+const c = buildMember({ id: 3, name: 'C', email: 'c@x.fr', familyId: 9, joinedAt: 3000 });
+
+console.log(%HaveSameMap(a, b)); // true
+console.log(%HaveSameMap(a, c)); // true — même avec email présent, la forme est identique
+```
+
+**Résultat :** l'IC de `m.joinedAt` dans `totalSeniority` ne voit plus qu'**une** forme → monomorphe → accès direct par offset. Les ~8 formes précédentes s'effondrent en une seule.
+
+### Exemple 2 — Reproduire mono → poly → méga et le mesurer
+
+On isole un site d'accès `obj.x` et on le nourrit avec un nombre croissant de formes.
+
+```js
+// ic-states.mjs
+// node --allow-natives-syntax ic-states.mjs
+function bench(label, fn, iter = 2_000_000) {
+  for (let i = 0; i < 1000; i++) fn(); // warmup pour laisser l'IC se stabiliser
+  const t = performance.now();
+  for (let i = 0; i < iter; i++) fn();
+  console.log(`${label}: ${(performance.now() - t).toFixed(1)} ms`);
+}
+
+function getX(obj) { return obj.x; } // UN seul site d'accès, réutilisé partout
+
+// Monomorphe : une seule forme
+const m1 = { x: 1, y: 2 };
+const m2 = { x: 3, y: 4 };
+console.log('mono même forme?', %HaveSameMap(m1, m2)); // true
+bench('monomorphe', () => { getX(m1); getX(m2); });
+
+// Polymorphe : 4 formes distinctes (nombre de props croissant)
+const p1 = { x: 1 };
+const p2 = { x: 1, y: 2 };
+const p3 = { x: 1, y: 2, z: 3 };
+const p4 = { x: 1, y: 2, z: 3, w: 4 };
+bench('polymorphe (4)', () => { getX(p1); getX(p2); getX(p3); getX(p4); });
+
+// Mégamorphe : 8 formes distinctes
+const shapes = [];
+for (let i = 0; i < 8; i++) {
+  const o = { x: i };
+  for (let j = 0; j < i; j++) o['p' + j] = j; // formes toutes différentes
+  shapes.push(o);
+}
+bench('mégamorphe (8)', () => { for (const s of shapes) getX(s); });
+```
+
+Sortie typique (ordres de grandeur, machine-dépendante) :
+
+```
+monomorphe: 12.4 ms
+polymorphe (4): 21.8 ms
+mégamorphe (8): 74.1 ms
+```
+
+**Lecture :** le même code source `return obj.x` est ~6x plus lent quand le site voit 8 formes au lieu d'une. Ce n'est pas la logique qui coûte — c'est le nombre de formes présentées au site d'accès. Exactement le symptôme du cas concret.
+
+---
+
+## 4. Pièges & misconceptions
+
+### PIÈGE #1 — Croire que « mêmes propriétés » suffit
+
+```js
+const a = { x: 1, y: 2 };
+const b = { y: 2, x: 1 }; // mêmes clés, mêmes valeurs... ordre différent
+console.log(%HaveSameMap(a, b)); // false
+```
+
+**Pourquoi c'est faux :** la hidden class encode le **chemin de transition**, pas juste l'ensemble des clés. `{x,y}` et `{y,x}` sont deux formes. **Le correct :** normaliser l'ordre de construction (factory unique ou classe).
+
+### PIÈGE #2 — `delete` pour « nettoyer » un objet
+
+```js
+// ❌ paraît propre, casse tout
+if (!member.email) delete member.email; // -> mode dictionnaire, irréversible
+```
+
+**Pourquoi c'est faux :** `delete` fait basculer l'objet en mode dictionnaire (hash table), désactive son IC et rend la récupération impossible. **Le correct :** `member.email = null`, ou ne jamais créer un objet dont on devra retirer un champ.
+
+### PIÈGE #3 — Ajouter une propriété « juste au cas où »
+
+```js
+// ❌ 2 formes selon la branche
+const r = { id, value };
+if (isSpecial) r.tag = 'x';
+```
+
+**Pourquoi c'est faux :** deux formes divergent au premier accès polymorphe en aval. **Le correct :** `const r = { id, value, tag: isSpecial ? 'x' : null };` — une seule forme.
+
+### PIÈGE #4 — Confondre polymorphe et mégamorphe
+
+Un site **polymorphe** (2-4 formes) reste raisonnablement rapide : V8 garde une petite chaîne de comparaisons. Le vrai décrochage est **mégamorphe** (5+ formes), où V8 abandonne la spécialisation. **La discrimination utile :** viser le monomorphe sur les chemins chauds, tolérer le polymorphe ailleurs, traquer et éliminer le mégamorphe. Ne pas paniquer sur 2 formes ; paniquer sur 8.
+
+### PIÈGE #5 — Changer le type d'un champ
+
+```js
+const p = { ratio: 1 }; // entier
+p.ratio = 0.5;          // -> Double : forme dépréciée + migration
+```
+
+**Pourquoi c'est faux :** même nom, même ordre, mais la représentation change → la forme est dépréciée. **Le correct :** initialiser avec le type cible (`{ ratio: 1.0 }`) et rester cohérent.
+
+---
+
+## 5. Ancrage TribuZen
+
+L'API TribuZen (NestJS) sérialise en permanence des objets `Member` et `Family` sur les chemins chauds : listes de membres, agrégats de familles, tri, calculs de séniorité. Ces objets sont construits à partir de lignes SQL / documents, souvent par des mappers écrits au fil de l'eau — terrain idéal pour les formes instables.
+
+**Objets `Member`** (`src/members/member.entity.ts` + mapper) — la source du cas concret. Propriétés conditionnelles (`email`, `avatar`, `isAdmin`), ordre variable selon la source legacy, `delete` de nettoyage. Normalisés en une classe `Member` à forme unique, toutes propriétés initialisées, ordre fixe.
+
+**Objets `Family`** (`src/families/family.mapper.ts`) — même traitement : `members`, `tags`, `settings` toujours présents (tableau ou objet vide plutôt qu'absent), pas d'ajout conditionnel de `premiumUntil` (initialisé à `null`).
+
+**Chemins chauds concernés :**
+- `MembersService.totalSeniority()` — boucle qui lit `m.joinedAt` sur chaque membre.
+- `FamiliesService.aggregateStats()` — lit `f.members.length`, `f.tags` sur chaque famille.
+- Les DTO annotées `class-transformer` — garder l'ordre des champs cohérent pour ne pas multiplier les formes de sortie.
+
+**Méthode de validation :** un script de bench dans `scripts/perf/` construit 100 000 membres via l'ancien mapper puis via la classe normalisée, compare `%HaveSameMap` sur un échantillon et le temps de `totalSeniority`. Objectif : passer d'un IC mégamorphe (dizaines de formes) à monomorphe (1 forme), avec un gain mesurable sur la boucle.
+
+Fichiers cibles dans `smaurier/tribuzen` :
+```
+tribuzen/src/
+  members/
+    member.entity.ts       // classe Member, forme stable
+    member.mapper.ts        // buildMember normalisé
+    members.service.ts      // totalSeniority (chemin chaud)
+  families/
+    family.mapper.ts        // Family à forme stable
+    families.service.ts     // aggregateStats
+  scripts/perf/
+    bench-member-shape.mjs  // mesure avant/après (--allow-natives-syntax)
+```
+
+---
+
+## 6. Points clés
+
+1. Une **hidden class** (Map V8 / Shape / Structure) décrit la **forme** d'un objet : propriétés, offsets, types, prototype — pas ses valeurs.
+2. Deux objets partagent la même hidden class **seulement** s'ils ont les mêmes propriétés, dans le **même ordre**, avec les mêmes types.
+3. Ajouter des propriétés génère des **transitions de forme** partagées ; l'**ordre d'ajout** détermine le chemin, donc la forme finale.
+4. Initialiser **toutes** les propriétés dans le constructeur (même à `null`/`0`) garantit une forme unique et stable.
+5. Un **inline cache** vit sur chaque site d'accès `obj.x` : **monomorphe** (1 forme, rapide) → **polymorphe** (2-4 formes) → **mégamorphe** (5+ formes, lent).
+6. `delete` fait basculer l'objet en **mode dictionnaire** (10-20x plus lent, IC désactivé, irréversible) — utiliser `= undefined`.
+7. Changer le **type** d'un champ déprécie la forme et migre les objets — garder les types stables.
+8. Hidden classes stables = prérequis du **JIT** : IC monomorphe → TurboFan spécialise ; forme instable → déoptimisation.
+9. Pour un dictionnaire à clés dynamiques, utiliser `new Map()`, jamais un objet littéral muté.
+
+---
+
+## 7. Seeds Anki
+
+```
+Qu'est-ce qu'une hidden class (Map V8) et que décrit-elle ?|Une structure interne qui décrit la FORME d'un objet — liste des propriétés, offset de chacune, type de chaque champ, prototype et transitions — indépendamment des valeurs. Elle permet à V8 d'accéder aux propriétés par offset fixe au lieu d'un lookup en table de hachage.
+Deux objets { x:1, y:2 } et { y:2, x:1 } partagent-ils la même hidden class ?|Non. La hidden class encode le chemin de transition (l'ordre d'ajout des propriétés), pas seulement l'ensemble des clés. Ordre différent = forme différente, même avec les mêmes clés et valeurs.
+Pourquoi faut-il initialiser toutes les propriétés dans le constructeur ?|Une propriété parfois présente / parfois absente crée deux formes d'objet distinctes. Tout initialiser (même à null ou 0) garantit une forme unique et stable, donc des inline caches monomorphes en aval.
+Quels sont les 4 états d'un inline cache et lequel viser ?|UNINITIALIZED, MONOMORPHE (1 forme, optimal), POLYMORPHE (2-4 formes, acceptable), MÉGAMORPHE (5+ formes, lent). Sur les chemins chauds on vise le monomorphe ; on tolère le polymorphe ; on élimine le mégamorphe.
+Pourquoi ne jamais utiliser delete sur un objet chaud ?|delete fait basculer l'objet en mode dictionnaire (vraie table de hachage) : accès 10-20x plus lents, inline caching désactivé, et récupération quasi impossible. Préférer obj.prop = undefined, ou ne pas ajouter la propriété.
+Quel est le lien entre hidden classes et le JIT (TurboFan) ?|Le type feedback contient les hidden classes observées et l'état de l'IC par site d'accès. IC monomorphe -> TurboFan inline l'accès par offset et spécialise ; IC mégamorphe -> accès générique non spécialisé ; changement de forme après optimisation -> déoptimisation (wrong map).
+Que se passe-t-il si on change le type d'un champ (entier -> double) après coup ?|V8 traque la représentation de chaque champ. Un changement de type déprécie la forme existante et migre les objets vers une nouvelle forme — un coût caché. Garder chaque champ d'un type stable (initialiser 0.0 si le champ peut être fractionnaire).
+Quel intrinsic V8 permet de vérifier que deux objets ont la même forme ?|%HaveSameMap(a, b), disponible sous node --allow-natives-syntax. Retourne true si a et b partagent exactement la même hidden class. %DebugPrint(obj) affiche la forme, les types de champs et l'elements kind.
+```
+
+---
+
+## Pont vers le lab
+
+> Lab associé : `01-js-runtime/labs/lab-11-hidden-classes/README.md`. Comparer objets de forme stable vs instable avec `%HaveSameMap`, mesurer la dégradation mono → poly → méga, puis normaliser un mapper `Member` de TribuZen pour restaurer un IC monomorphe.

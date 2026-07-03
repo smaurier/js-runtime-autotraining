@@ -1,461 +1,331 @@
-# Module 00 — Prérequis et vue d'ensemble
-
-<!-- nav-cours-précédent -->
-> **Cours précédent** : [TypeScript](../../01-typescript/modules/19-projet-final.md). Si tu arrives ici sans avoir fait les cours précédents, consulte le [guide de démarrage](../../GUIDE-DEMARRAGE.md).
-
-
-> **Objectif** : Poser les fondations. Comprendre ce qu'est un moteur JavaScript, avoir les bons réflexes, et savoir où tu vas dans ce cours.
-
-> **Difficulté** : ⭐ (Débutant) — Si tu sais écrire du JavaScript, tu peux lire ce module.
-
+---
+titre: Prérequis et vue d'ensemble du moteur JavaScript
+cours: 01-js-runtime
+notions: [moteur JavaScript, V8 SpiderMonkey JavaScriptCore, moteur vs runtime, Node navigateur Deno Bun, ECMAScript et TC39, pipeline parse-AST-bytecode-JIT, pourquoi comprendre le runtime, carte du cours]
+outcomes: [distinguer moteur et runtime, situer V8 dans Node et le navigateur, décrire le pipeline parse vers AST vers bytecode vers JIT, relier chaque symptôme runtime au module qui l'explique]
+prerequis: []
+next: 01-call-stack-execution-context
+libs: []
+tribuzen: comprendre pourquoi l'API Node et l'admin React de TribuZen rament, fuient ou ordonnent mal leurs async — le runtime comme terrain d'observation
+last-reviewed: 2026-07
 ---
 
-## 1. Ce que ce cours va t'apprendre (et ce qu'il ne t'apprendra pas)
+# Prérequis et vue d'ensemble du moteur JavaScript
 
-### Ce qu'on fait ici
+> **Outcomes — tu sauras FAIRE :** distinguer un moteur JS de son runtime, situer V8 dans Node et le navigateur, décrire le pipeline parse → AST → bytecode → JIT, et relier un symptôme (lenteur, bug async, fuite mémoire) au module qui l'explique.
+> **Difficulté :** :star:
 
-Tu sais écrire du JavaScript. Tu sais déclarer des variables, appeler des fonctions, utiliser des Promises. **Ce cours ne t'apprend pas à coder en JS.** Ce cours t'apprend **comment le moteur JavaScript exécute ton code** — ce qui se passe quand tu appuies sur "Run".
+## 1. Cas concret d'abord
+
+L'admin React de TribuZen affiche la liste des familles. En dev tout va bien. En prod, trois plaintes tombent la même semaine :
+
+```
+1. « La page Familles gèle une demi-seconde quand on scrolle une grosse liste. »
+2. « Le badge "en ligne" s'affiche AVANT l'avatar alors que je les charge dans l'ordre. »
+3. « L'onglet TribuZen bouffe 900 Mo de RAM après une heure ouverte. »
+```
+
+Côté serveur, l'API Node a ses propres symptômes :
+
+```
+4. « L'endpoint /families répond en 40 ms la 1re fois, 3 ms ensuite. Pourquoi ? »
+5. « Un setTimeout(fn, 0) s'exécute APRÈS un await, jamais avant. »
+```
+
+Aucun de ces cinq points n'est un bug de logique métier. Ton code est correct. Ce qui te manque, c'est **le modèle mental de ce qui se passe quand tu appuies sur "Run"** : qui exécute ton code, dans quel ordre, avec quelle mémoire, et avec quelles optimisations dans ton dos.
+
+Ce module ne résout aucun de ces cas — il te donne la **carte** pour savoir dans quel module chaque symptôme est démonté :
+
+| Symptôme observé | Cause runtime | Module qui l'explique |
+|---|---|---|
+| Page qui gèle au scroll | thread unique bloqué, tâche trop longue | 03 Event Loop, 12 Perf |
+| Badge avant l'avatar | microtask (Promise) avant macrotask (setTimeout) | 04 Microtasks vs Macrotasks |
+| RAM qui grimpe sans redescendre | référence retenue, GC ne peut pas libérer | 07 GC, 08 Memory Leaks |
+| 1er appel lent, suivants rapides | JIT compile le code "chaud" en natif | 10 JIT, 11 Hidden Classes |
+| `setTimeout(fn,0)` après `await` | files de priorités différentes | 04 Microtasks vs Macrotasks |
 
 On va **ouvrir le capot**.
 
-> **Analogie** : Tu sais conduire une voiture. Tu connais le volant, les pédales, le clignotant. Ce cours t'apprend comment fonctionne le moteur sous le capot — la combustion, la transmission, le refroidissement. Tu n'as pas besoin de savoir ça pour conduire. Mais si tu veux comprendre pourquoi ta voiture cale, pourquoi elle consomme trop, ou comment la rendre plus rapide… tu dois comprendre le moteur.
-
-### Ce que tu sauras faire après ce cours
-
-- **Diagnostiquer** des problèmes de performance dans une application JavaScript
-- **Comprendre** l'asynchrone en profondeur (event loop, microtasks, scheduling)
-- **Lire** une trace V8, un heap snapshot, un profil de performance
-- **Expliquer** pourquoi un code est lent et comment le corriger
-- **Raisonner** sur la mémoire (fuites, garbage collection, rétention)
-- **Naviguer** la spécification ECMAScript (ECMA-262)
-
-### Ce que ce cours n'est PAS
-
-| Ce cours n'est PAS… | Pourquoi |
-|----------------------|----------|
-| Un cours de syntaxe JavaScript | On suppose que tu connais déjà ES2020+ |
-| Un cours de framework (React, Vue, Angular) | On parle du moteur, pas des outils construits dessus |
-| Un cours d'algorithmique | On ne parle pas de tri, de graphes ou de complexité O(n) |
-| Un cours de Node.js | On utilise Node.js comme outil, mais le sujet c'est le moteur |
+> **Analogie.** Tu sais conduire : volant, pédales, clignotant. Tu n'as pas besoin de connaître la combustion pour rouler. Mais pour comprendre pourquoi la voiture cale, consomme trop, ou comment la rendre plus rapide — il faut regarder le moteur. Ce cours regarde le moteur JS.
 
 ---
 
-## 2. Les moteurs JavaScript — qui fait quoi
+## 2. Théorie complète, concise
 
-### Qu'est-ce qu'un moteur JavaScript ?
+### 2.1 Qu'est-ce qu'un moteur JavaScript
 
-Un **moteur JavaScript** est un programme (écrit en C++ généralement) dont le travail est de **lire ton code JavaScript** et de **l'exécuter**. C'est lui qui transforme tes lignes de texte en instructions que ton processeur peut comprendre.
+Un **moteur JavaScript** est un programme (écrit en C++ le plus souvent) dont l'unique travail est de **lire ton code JS** (du texte brut) et de **l'exécuter**, c'est-à-dire de le transformer en instructions que le processeur comprend.
 
-Quand tu ouvres une page web, le navigateur donne ton code JS à son moteur. Quand tu lances `node script.js`, Node.js donne ton code à V8. Le principe est le même : le moteur reçoit du texte, et il l'exécute.
+Le moteur ne connaît **que le langage** : variables, fonctions, objets, closures, Promises. Il ne sait rien de `fetch`, du DOM, de `setTimeout`, ni du système de fichiers. Ces choses-là viennent d'ailleurs (§2.3).
 
-### Les trois grands moteurs
+### 2.2 Les trois grands moteurs
 
-| Moteur | Créé par | Utilisé dans | Note |
-|--------|----------|-------------|------|
-| **V8** | Google | Chrome, Node.js, Deno, Edge, Opera | Le plus utilisé aujourd'hui. **Focus principal de ce cours.** |
-| **SpiderMonkey** | Mozilla | Firefox | Le plus ancien moteur JS — créé par Brendan Eich en 1995 avec le langage lui-même. |
-| **JavaScriptCore (JSC)** | Apple | Safari, Bun | Aussi appelé "Nitro". Le moteur d'Apple. |
+| Moteur | Créé par | Tourne dans | Note |
+|---|---|---|---|
+| **V8** | Google | Chrome, Edge, Opera, **Node.js**, Deno | Le plus répandu. **Focus principal du cours.** |
+| **SpiderMonkey** | Mozilla | Firefox | Le plus ancien — écrit par Brendan Eich en 1995 avec le langage. |
+| **JavaScriptCore (JSC)** | Apple | Safari, **Bun** | Alias "Nitro". Cité quand ses choix éclairent V8 par contraste. |
 
-### Pourquoi ce cours couvre principalement V8 (et un peu SpiderMonkey)
+Tous respectent la même spécification : **ECMAScript** (norme ECMA-262), maintenue par le comité **TC39**. La spec dit ce que le langage **doit** faire (résultat observable) ; chaque moteur choisit **comment** il le fait (implémentation). D'où : même comportement visible, internals très différents.
 
-- **V8** propulse Chrome (~65% du marché des navigateurs) ET Node.js/Deno (côté serveur). C'est le moteur que tu rencontres le plus souvent.
-- **SpiderMonkey** est intéressant parce qu'il fait les choses différemment — comparer les deux t'aide à comprendre que les choix d'implémentation ne sont pas universels.
-- **JSC** est couvert ponctuellement quand ses choix de conception sont instructifs.
+> **Analogie.** ECMAScript = le code de la route. V8, SpiderMonkey et JSC = trois constructeurs. Tous respectent le code de la route, chacun bâtit son moteur à sa façon.
 
-### Le point commun : ECMAScript
+### 2.3 Moteur vs runtime — la distinction qui débloque tout
 
-Malgré des implémentations très différentes, tous ces moteurs respectent la même spécification : **ECMAScript** (ECMA-262). C'est le document officiel qui définit ce que le langage JavaScript **doit** faire. Les moteurs sont libres de choisir **comment** ils le font — mais le résultat observable doit être le même.
-
-> **Analogie** : ECMAScript, c'est le code de la route. Tous les constructeurs automobiles (V8, SpiderMonkey, JSC) doivent le respecter. Mais chacun construit son moteur à sa façon.
-
----
-
-## 3. Glossaire des termes clés
-
-Ce glossaire contient les termes que tu vas rencontrer tout au long du cours. Tu n'as pas besoin de tout mémoriser maintenant — **reviens ici** chaque fois qu'un terme te semble flou.
-
-Chaque terme est accompagné d'une analogie pour te donner une intuition.
-
-### Exécution
-
-| Terme | Définition | Analogie |
-|-------|------------|----------|
-| **Runtime** | L'environnement complet d'exécution : le moteur + les APIs disponibles (DOM, setTimeout, fetch…). | Le moteur de la voiture + tout l'habitacle. |
-| **Call Stack** | La pile d'appels. Quand une fonction est appelée, elle est empilée. Quand elle retourne, elle est dépilée. LIFO (Last In, First Out). | Une pile d'assiettes : tu poses dessus, tu retires par le dessus. |
-| **Stack Frame** | Un cadre dans la pile d'appels. Contient les infos d'une fonction en cours d'exécution. | Une assiette dans la pile, avec une étiquette dessus. |
-| **Exécution Context** | L'environnement créé par le moteur pour chaque fonction en cours : ses variables, son `this`, sa portée. | La fiche d'identité d'une fonction en train de s'exécuter. |
-| **Thread** | Un fil d'exécution. JavaScript n'en a qu'un seul principal (mono-threadé). | Un seul cuisinier en cuisine : il ne peut faire qu'une chose à la fois. |
-| **Web Workers** | Des threads supplémentaires que tu peux créer pour exécuter du code en parallèle, sans bloquer le thread principal. | Des commis qui travaillent à côté du cuisinier principal. |
-
-### Portée et variables
-
-| Terme | Définition | Analogie |
-|-------|------------|----------|
-| **Scope** | La portée d'une variable : depuis quel endroit du code elle est accessible. | Les murs d'une pièce — tu ne vois que ce qui est dans ta pièce (et dans les pièces autour). |
-| **Closure** | Une fonction qui "se souvient" des variables de son scope parent, même après que celui-ci a terminé. | Une fonction avec un sac à dos rempli de variables qu'elle emporte partout. |
-| **Référence** | Un lien (un pointeur) vers un objet en mémoire. La variable ne contient pas l'objet, elle contient l'adresse. | Un post-it avec l'adresse d'une maison, pas la maison elle-même. |
-
-### Asynchrone
-
-| Terme | Définition | Analogie |
-|-------|------------|----------|
-| **Event Loop** | Le mécanisme qui surveille la call stack et les files d'attente, et qui décide quoi exécuter ensuite. | Le serveur dans un restaurant : il regarde si le cuisinier est libre, puis lui passe la prochaine commande. |
-| **Callback** | Une fonction passée en argument à une autre fonction, pour être appelée plus tard (souvent quand une opération async est terminée). | "Rappelle-moi quand c'est prêt." |
-| **Promise** | Un objet qui représente une valeur future. Trois états : pending (en attente), fulfilled (résolue), rejected (rejetée). | Un ticket de pressing : tu le déposes, tu repars, et tu reviens le chercher quand c'est prêt. |
-| **Microtask** | Une tâche de haute priorité dans l'event loop (Promises, queueMicrotask). Traitée avant les macrotasks. | La file prioritaire à l'aéroport. |
-| **Macrotask** | Une tâche de priorité normale dans l'event loop (setTimeout, setInterval, I/O). | La file normale à l'aéroport. |
-
-### Mémoire
-
-| Terme | Définition | Analogie |
-|-------|------------|----------|
-| **Heap** | La zone mémoire ou sont stockés les objets et les données dynamiques. Non ordonnée. | Un grand parking : les voitures sont garées un peu partout, chacune à une place numérotée. |
-| **Garbage Collector (GC)** | Le mécanisme automatique qui libère la mémoire des objets qui ne sont plus utilisés. | Le service de nettoyage qui débarrasse les tables abandonnées au restaurant. |
-| **Memory Leak** | Une fuite mémoire : de la mémoire qui devrait être libérée mais qui ne l'est pas, parce qu'une référence traîne. | Un robinet qui goutte. Tu ne t'en rends pas compte tout de suite, mais la facture d'eau explose. |
-| **Heap Snapshot** | Une photo de la mémoire à un instant T. Utilisée pour diagnostiquer les fuites. | Une photo aérienne du parking pour voir quelles voitures sont encore là. |
-
-### Moteur et compilation
-
-| Terme | Définition | Analogie |
-|-------|------------|----------|
-| **Parser** | Le composant qui lit ton code source et le transforme en arbre syntaxique (AST). | Le correcteur qui lit ta rédaction et en fait un plan structuré. |
-| **AST (Abstract Syntax Tree)** | La représentation en arbre de la structure de ton code, produite par le parser. | Le plan structuré de ta rédaction : introduction, paragraphes, conclusion. |
-| **Bytecode** | Le code intermédiaire entre ton code JS et le langage machine. Plus rapide à exécuter que le JS brut, mais pas encore du code natif. | Une partition musicale simplifiée : pas la musique finale, mais assez pour jouer le morceau. |
-| **JIT (Just-In-Time)** | Compilation à la volée : le moteur compile le code pendant l'exécution, pas avant. | Un traducteur simultané : il traduit en temps réel pendant que tu parles. |
-| **Interpréteur** | Exécute le bytecode ligne par ligne, sans compiler en code natif. Plus lent mais démarre vite. | Lire une recette pas à pas en cuisinant. |
-| **Compilateur optimisant** | Compile le code "chaud" (exécuté souvent) en code machine natif ultra-rapide. | Un chef qui a fait la recette 100 fois et n'a plus besoin de la lire. |
-| **Deoptimization** | Quand le moteur annule une optimisation parce qu'une hypothèse s'est révélée fausse. | Le chef découvre que l'ingrédient a changé — il doit relire la recette. |
-
-### Optimisation interne
-
-| Terme | Définition | Analogie |
-|-------|------------|----------|
-| **Hidden Class / Map / Shape** | La structure interne que le moteur crée pour décrire la forme d'un objet (quelles propriétés, dans quel ordre). | Le plan d'architecte d'une maison : toutes les maisons identiques partagent le même plan. |
-| **Inline Cache (IC)** | Un cache qui retient ou trouver une propriété d'un objet, pour ne pas chercher à chaque fois. | Un marque-page dans un dictionnaire : tu sais déjà à quelle page chercher. |
-| **Profiling** | Mesurer les performances d'un programme : temps d'exécution, mémoire utilisée, fréquence d'appel. | Chronométrer un coureur pour savoir où il perd du temps. |
-
-### Spécification
-
-| Terme | Définition | Analogie |
-|-------|------------|----------|
-| **ECMAScript (ECMA-262)** | Le document officiel qui définit le langage JavaScript. Maintenu par le TC39. | Le code de la route pour JavaScript. |
-| **TC39** | Le comité technique qui fait évoluer la spécification ECMAScript. | Le parlement qui vote les nouvelles lois du langage. |
-| **Proposal** | Une proposition de nouvelle fonctionnalité pour le langage, en cours de discussion au TC39. | Un projet de loi avant le vote. |
-
----
-
-## 4. Le modèle mental — comment un moteur JS fonctionne (vue d'ensemble)
-
-Voici le schéma que tu vas avoir en tête pendant tout le cours. C'est ta **carte**. Chaque module va zoomer sur une partie de cette carte.
+Le **moteur** exécute le langage. Le **runtime** = le moteur **+ les APIs fournies par l'environnement**. C'est le runtime que tu utilises réellement, jamais le moteur nu.
 
 ```
-  Ton code JS (.js)
-      │
-      ▼
-  ┌─────────────────────────────────────────────┐
-  │           MOTEUR JavaScript (V8)            │
-  │                                             │
-  │  ┌──────────┐    ┌───────────────────────┐  │
-  │  │  Parser  │───►│  Bytecode             │  │
-  │  │          │    │  (Ignition /           │  │
-  │  │ Analyse  │    │   Baseline Compiler)   │  │
-  │  │ le texte │    │                       │  │
-  │  └──────────┘    └───────────┬───────────┘  │
-  │                              │              │
-  │                    Ce code est "chaud" ?     │
-  │                    (exécuté souvent)         │
-  │                              │ oui          │
-  │                  ┌───────────▼───────────┐  │
-  │                  │  Code optimisé        │  │
-  │                  │  (TurboFan /          │  │
-  │                  │   Maglev /            │  │
-  │                  │   Warp)               │  │
-  │                  │                       │  │
-  │                  │  Code machine natif   │  │
-  │                  │  ultra-rapide         │  │
-  │                  └───────────────────────┘  │
-  │                                             │
-  │  ┌──────────────┐  ┌────────────────────┐   │
-  │  │  Call Stack   │  │  Heap (mémoire)    │   │
-  │  │              │  │                    │   │
-  │  │  Pile des    │  │  Tous les objets,  │   │
-  │  │  fonctions   │  │  tableaux, strings │   │
-  │  │  en cours    │  │  vivent ici        │   │
-  │  └──────────────┘  └────────┬───────────┘   │
-  │                             │               │
-  │                  ┌──────────▼───────────┐   │
-  │                  │  Garbage Collector   │   │
-  │                  │                      │   │
-  │                  │  Nettoie la mémoire  │   │
-  │                  │  inutilisée          │   │
-  │                  └──────────────────────┘   │
-  └──────────────────────┬──────────────────────┘
-                         │
-          ┌──────────────┼──────────────┐
-          │              │              │
-          ▼              ▼              ▼
-  ┌──────────────┐ ┌──────────┐ ┌──────────────────┐
-  │  Event Loop  │ │  APIs    │ │  Files d'attente  │
-  │              │ │          │ │                    │
-  │  Orchestre   │ │ setTimeout│ │  Microtask queue  │
-  │  tout le     │ │ fetch    │ │  Macrotask queue  │
-  │  système     │ │ DOM      │ │                    │
-  │  async       │ │ I/O      │ │  (callbacks en     │
-  │              │ │          │ │   attente)         │
-  └──────────────┘ └──────────┘ └──────────────────┘
+   RUNTIME (ce que tu utilises)
+   ┌────────────────────────────────────────────┐
+   │  APIs de l'environnement                    │
+   │  navigateur : DOM, fetch, setTimeout, ...   │
+   │  Node.js    : fs, http, setTimeout, Buffer  │
+   │                                             │
+   │   ┌──────────────────────────────────┐      │
+   │   │  MOTEUR (V8) — le langage seul   │      │
+   │   │  parse, exécute, call stack,     │      │
+   │   │  heap, garbage collector         │      │
+   │   └──────────────────────────────────┘      │
+   │                                             │
+   │  Event loop (fourni par le runtime,         │
+   │  PAS par le moteur)                          │
+   └────────────────────────────────────────────┘
 ```
 
-### Explication de chaque bloc
+Points cruciaux :
 
-**Parser** — Le moteur commence par **lire** ton code JavaScript (qui est du texte brut). Le parser analyse ce texte et le transforme en une structure compréhensible (un arbre syntaxique, ou AST). C'est comme lire une phrase et en identifier le sujet, le verbe et le complément.
-→ *Module 09 : Architecture V8*
+- **`setTimeout`, `fetch`, le DOM, `fs` ne sont PAS du JavaScript.** Ce sont des APIs de l'environnement. Le moteur ne les connaît pas.
+- **L'event loop est fourni par le runtime, pas par le moteur.** V8 seul n'a pas de boucle d'événements ; c'est Node (via libuv) ou le navigateur qui l'apporte.
+- **Même moteur, runtimes différents.** V8 propulse à la fois Chrome et Node. Le langage est identique ; les APIs autour changent (pas de DOM dans Node, pas de `fs` dans le navigateur).
 
-**Bytecode (Ignition / Baseline)** — L'AST est ensuite transformé en **bytecode** : un code intermédiaire que le moteur peut exécuter rapidement. Ce n'est pas encore du code machine natif, mais c'est bien plus rapide que de réinterpréter le texte JS à chaque fois.
-→ *Module 09 : Architecture V8*
+| Runtime | Moteur | APIs typiques | Où ça tourne |
+|---|---|---|---|
+| Navigateur (Chrome) | V8 | DOM, `fetch`, `localStorage` | client |
+| **Node.js** | V8 | `fs`, `http`, `process`, `Buffer` | serveur |
+| Deno | V8 | web-standard + permissions | serveur |
+| Bun | JSC | Node-compat + web-standard | serveur |
 
-**Code optimisé (TurboFan / Maglev / Warp)** — Quand le moteur détecte qu'un morceau de code est exécuté très souvent ("hot code"), il le compile en **code machine natif** — du code ultra-rapide, spécialisé pour ton cas d'utilisation. Si les hypothèses du compilateur s'avèrent fausses, il fait une **deoptimization** et revient au bytecode.
-→ *Module 10 : JIT Compilation & Optimisation*
+Pour TribuZen : l'**admin React tourne sur le runtime navigateur** (V8 + DOM), l'**API tourne sur Node** (V8 + libuv). Même langage, deux runtimes — c'est pour ça qu'un `console.log` de timing se comporte différemment des deux côtés.
 
-**Call Stack** — La pile d'appels. Chaque fois que tu appelles une fonction, elle est **empilée**. Quand elle retourne, elle est **dépilée**. Le moteur exécute toujours la fonction au sommet de la pile.
-→ *Module 01 : Call Stack & Contextes d'exécution*
+### 2.4 Le pipeline d'exécution : parse → AST → bytecode → JIT
 
-**Heap** — La zone de mémoire dynamique. Tous les objets, tableaux, strings et closures que ton programme crée sont stockés ici. Contrairement à la call stack (ordonnée), le heap est un grand espace non structuré.
-→ *Module 02 : Scope, Closures & Mémoire* | *Module 07 : Garbage Collector*
+Quand le moteur reçoit ton fichier `.js`, il ne l'exécute pas ligne par ligne comme du texte. Il le fait passer par un pipeline :
 
-**Garbage Collector** — Le mécanisme automatique qui parcourt le heap et **libère la mémoire** des objets qui ne sont plus accessibles. Tu n'as pas à gérer la mémoire manuellement en JS, mais comprendre le GC t'aide à éviter les fuites.
-→ *Module 07 : Garbage Collector* | *Module 08 : Memory Leaks*
+```
+  code.js (texte)
+     │
+     ▼  ── PARSER ──────────► lit le texte, vérifie la syntaxe
+     │
+     ▼  AST (Abstract Syntax Tree) : arbre décrivant la structure
+     │
+     ▼  ── INTERPRÉTEUR (Ignition) ──► produit du BYTECODE
+     │                                 (intermédiaire, portable, rapide à lancer)
+     │
+     ▼  exécution du bytecode
+     │
+     │   ce bout de code est-il "chaud" (exécuté souvent) ?
+     │        │ oui
+     ▼        ▼  ── COMPILATEUR JIT (Maglev / TurboFan) ──►
+              code machine natif ULTRA-rapide, spécialisé
+                     │
+                     │  une hypothèse s'avère fausse ?
+                     ▼  DÉOPTIMISATION → retour au bytecode
+```
 
-**Event Loop** — Le chef d'orchestre de l'asynchrone. Il surveille la call stack et les files d'attente. Quand la stack est vide, il prend la prochaine tâche dans la file et la pousse sur la stack.
-→ *Module 03 : Event Loop*
+Étape par étape :
 
-**APIs** — Les fonctions fournies par l'environnement (navigateur ou Node.js), pas par le moteur lui-même. `setTimeout`, `fetch`, `DOM`, `fs`… Ces APIs délèguent le travail hors du thread principal et placent un callback dans une file d'attente quand c'est terminé.
-→ *Module 03 : Event Loop* | *Module 04 : Microtasks vs Macrotasks*
+1. **Parser** — lit le texte, valide la syntaxe, construit l'**AST** (l'arbre : sujet/verbe/complément de ton code).
+2. **Interpréteur (Ignition dans V8)** — transforme l'AST en **bytecode**, un code intermédiaire bien plus rapide à exécuter que de re-lire le texte, et le lance tout de suite. Démarrage rapide.
+3. **JIT (Just-In-Time)** — le moteur observe l'exécution. Un code exécuté des milliers de fois est **"chaud"** ; le compilateur optimisant (Maglev, puis TurboFan) le recompile en **code machine natif**, spécialisé pour les types réellement observés.
+4. **Déoptimisation** — le JIT parie sur des hypothèses (« cette fonction reçoit toujours des nombres »). Si l'hypothèse casse (un jour on passe une string), il **jette** le code optimisé et revient au bytecode.
 
-**Files d'attente (Microtask / Macrotask)** — Les callbacks en attente sont rangés dans des files. Les **microtasks** (Promises) sont toujours traitées avant les **macrotasks** (setTimeout). C'est pour ça que l'ordre d'exécution async peut surprendre.
-→ *Module 04 : Microtasks vs Macrotasks*
+C'est **exactement** le mystère du cas concret n°4 : le 1er appel à `/families` tourne en bytecode (lent), les suivants en code natif JIT (rapide). Détaillé aux modules 09-11.
+
+> Le terme "JIT" oppose la compilation **à la volée** (pendant l'exécution) à la compilation **AOT** (Ahead-Of-Time, avant, comme en C). JS fait du JIT : il compile pendant qu'il tourne.
+
+### 2.5 Le modèle mental complet — ta carte
+
+Garde ce schéma en tête tout le cours. Chaque module zoome sur une case.
+
+```
+  Ton code JS
+     │
+     ▼
+  ┌───────────────── MOTEUR (V8) ─────────────────┐
+  │  Parser → AST → Bytecode → (JIT si chaud)     │  ← modules 09, 10, 11
+  │                                               │
+  │  ┌─────────────┐        ┌──────────────────┐  │
+  │  │ Call Stack  │        │ Heap (mémoire)   │  │  ← 01 (stack) / 02, 07 (heap)
+  │  │ pile des    │        │ objets, tableaux │  │
+  │  │ fonctions   │        │ strings, closures│  │
+  │  └─────────────┘        └────────┬─────────┘  │
+  │                          Garbage Collector    │  ← 07, 08
+  └───────────────────────────┬───────────────────┘
+                              │
+        ┌────────────────────┼────────────────────┐
+        ▼                    ▼                     ▼
+   ┌───────────┐      ┌────────────┐      ┌──────────────────┐
+   │ Event Loop│      │ APIs runtime│     │ Files d'attente  │
+   │ orchestre │      │ setTimeout  │     │ microtasks (Promise)│
+   │ l'async   │      │ fetch, DOM  │     │ macrotasks (timer) │
+   └───────────┘      │ fs (Node)   │     └──────────────────┘
+      ↑ 03            └────────────┘         ↑ 04
+```
+
+### 2.6 Pourquoi comprendre le runtime (le ROI)
+
+Tu sais déjà écrire du JS. Comprendre le runtime paie sur trois fronts que le code seul ne t'apprend pas :
+
+- **Performance.** Savoir pourquoi un code est lent (thread bloqué, déopt JIT, allocation excessive) et le corriger — pas au pif.
+- **Bugs asynchrones.** L'ordre d'exécution async (microtask avant macrotask) ne s'improvise pas ; il se déduit du modèle event loop.
+- **Fuites mémoire.** Une RAM qui monte sans redescendre = une référence qui traîne et bloque le GC. Invisible sans comprendre le heap.
+
+Ce que tu sauras faire à la fin du cours : **diagnostiquer** une lenteur, **lire** une trace V8 / un heap snapshot / un profil de perf, **expliquer** pourquoi un code rame, **raisonner** sur la mémoire, **naviguer** la spec ECMAScript.
+
+### 2.7 Ce que le cours n'est PAS
+
+| N'est PAS… | Parce que… |
+|---|---|
+| Un cours de syntaxe JS | on suppose ES2020+ acquis |
+| Un cours de framework (React, Vue) | on parle du moteur *sous* les frameworks |
+| Un cours d'algorithmique | pas de tri, graphes, complexité O(n) |
+| Un cours de Node.js | Node est un **outil d'observation**, pas le sujet |
 
 ---
 
-## 5. Les outils que tu vas utiliser
+## 3. Worked examples
 
-Tu n'as pas besoin de tout installer maintenant. Chaque module te dira exactement quels outils utiliser. Mais voici la liste complète pour que tu saches à quoi t'attendre.
+### Exemple 1 — Prouver « moteur vs runtime » en 4 lignes
 
-### Node.js 22 LTS
-
-On utilise Node.js pour exécuter les labs en ligne de commande. Vérifie ta version :
-
-```bash
-node --version
-# Doit afficher v22.x.x ou supérieur
-```
-
-Si tu n'as pas Node.js : [https://nodejs.org](https://nodejs.org) (télécharge la version LTS).
-
-En mars 2026, la version LTS courante est Node.js 22 (Jod). Verifie toujours la version LTS active sur https://nodejs.org/en/about/previous-releases.
-
-### Chrome DevTools
-
-Les DevTools de Chrome sont ton outil principal pour l'analyse de performance et de mémoire.
-
-| Onglet | À quoi il sert | Module(s) concerné(s) |
-|--------|----------------|-----------------------|
-| **Sources** | Debugger, breakpoints, step-through | 01, 02, 03 |
-| **Performance** | Profiling, flame chart, timeline | 12, 15 |
-| **Memory** | Heap snapshots, allocation timeline | 07, 08 |
-| **Console** | Exécution de code, logs | Tous |
-
-**Comment ouvrir les DevTools :**
-
-| Raccourci | Action |
-|-----------|--------|
-| `F12` | Ouvrir/fermer les DevTools |
-| `Ctrl + Shift + I` (Windows/Linux) | Ouvrir/fermer les DevTools |
-| `Cmd + Option + I` (Mac) | Ouvrir/fermer les DevTools |
-| `Ctrl + Shift + J` | Ouvrir directement la Console |
-
-### Firefox DevTools
-
-Firefox (SpiderMonkey) offre des outils complémentaires, parfois plus détaillés pour certaines analyses.
-
-| Onglet | Équivalent Chrome |
-|--------|--------------------|
-| **Debugger** | Sources |
-| **Performance** | Performance |
-| **Memory** | Memory |
-
-### Les flags Node.js spéciaux
-
-Certains modules utilisent des flags spéciaux pour accéder aux internals de V8 :
-
-```bash
-# Exposer le garbage collector pour l'appeler manuellement
-node --expose-gc script.js
-
-# Voir les optimisations JIT en temps réel
-node --trace-opt script.js
-
-# Voir les deoptimizations
-node --trace-deopt script.js
-
-# Afficher le bytecode généré par Ignition
-node --print-bytecode script.js
-
-# Utiliser les fonctions internes V8 (%OptimizeFunctionOnNextCall, etc.)
-node --allow-natives-syntax script.js
-
-# Combiner plusieurs flags
-node --trace-opt --trace-deopt --allow-natives-syntax script.js
-```
-
-> **Tu n'as pas besoin de retenir tout ça maintenant.** Chaque module te donnera la commande exacte à utiliser. Reviens ici si tu as besoin d'un rappel.
-
----
-
-## 6. Parcours recommandé
-
-### Vue d'ensemble
-
-| # | Module | Thème | Difficulté | Temps estimé |
-|---|--------|-------|------------|-------------|
-| 00 | Prérequis et vue d'ensemble | Introduction | ⭐ | ~1h |
-| 01 | Call Stack & Contextes d'exécution | Exécution | ⭐⭐ | ~3h |
-| 02 | Scope, Closures & Mémoire | Mémoire | ⭐⭐ | ~3h |
-| 03 | Event Loop | Asynchrone | ⭐⭐ | ~3h |
-| 04 | Microtasks vs Macrotasks | Asynchrone | ⭐⭐⭐ | ~3h |
-| 05 | Promises — Implémentation interne | Asynchrone | ⭐⭐⭐ | ~3h |
-| 06 | Async/Await sous le capot | Asynchrone | ⭐⭐⭐ | ~3h |
-| 07 | Garbage Collector | Mémoire | ⭐⭐⭐ | ~3h |
-| 08 | Memory Leaks | Mémoire | ⭐⭐⭐ | ~3h |
-| 09 | Architecture V8 | Moteur | ⭐⭐⭐⭐ | ~3h |
-| 10 | JIT Compilation & Optimisation | Moteur | ⭐⭐⭐⭐ | ~3h |
-| 11 | Hidden Classes & Inline Caching | Moteur | ⭐⭐⭐⭐ | ~3h |
-| 12 | Performance Patterns | Performance | ⭐⭐⭐ | ~3h |
-| 13 | Scheduling & Concurrence | Concurrence | ⭐⭐⭐⭐ | ~3h |
-| 14 | Projet Final | Synthèse | ⭐⭐⭐⭐⭐ | ~4h |
-| 15 | Session de debugging réelle | Diagnostic | ⭐⭐⭐⭐⭐ | ~4h |
-
-### Conseil de progression
-
-**Si tu es débutant, fais les modules dans l'ordre. Ne saute pas.**
-
-La progression est pensée pour construire ta compréhension brique par brique :
-
-1. **Modules 01-06 — Les fondamentaux** : commence par là. Tu apprendras comment le code s'exécute (call stack), comment les variables vivent (scope, closures), et comment l'asynchrone fonctionne réellement (event loop, promises, async/await).
-
-2. **Modules 07-08 — La mémoire** : tu comprendras comment le garbage collector fonctionne et comment diagnostiquer des fuites mémoire.
-
-3. **Modules 09-11 — Le moteur V8** : c'est le coeur technique. Tu verras comment V8 compile et optimise ton code (JIT, hidden classes, inline caching).
-
-4. **Modules 12-15 — Performance et pratique** : tu appliqueras tout ce que tu as appris sur des cas réels.
-
-> **Prends ton temps.** Mieux vaut bien comprendre un module que d'en survoler trois. Si un concept te semble flou, relis-le, teste-le dans la console, et passe au suivant seulement quand tu es à l'aise.
-
----
-
-## 7. Rappels JavaScript essentiels
-
-Cette section n'est **pas** un cours de JavaScript. Ce sont des rappels rapides des concepts JS que tu dois maîtriser pour suivre ce cours. Si quelque chose ici ne te parle pas, prends le temps de réviser les bases avant de continuer.
-
-### Fonctions : trois façons de les écrire
+Objectif : montrer que le moteur ne connaît pas `setTimeout`, mais que les deux runtimes (navigateur et Node) le fournissent.
 
 ```js
-// Déclaration de fonction (hoisted)
-function addition(a, b) {
-  return a + b;
+// Ce code tourne à l'identique dans la console Chrome ET dans `node fichier.js`
+console.log("A");                       // fourni par le runtime (console)
+setTimeout(() => console.log("B"), 0);  // setTimeout = API du runtime, PAS du moteur
+Promise.resolve().then(() => console.log("C")); // Promise = langage (moteur)
+console.log("D");
+```
+
+Raisonnement pas à pas :
+
+1. `console.log("A")` s'exécute immédiatement sur la call stack → **A**.
+2. `setTimeout(..., 0)` : le runtime enregistre le callback et le range en **macrotask**. Rien ne s'affiche encore.
+3. `Promise.resolve().then(...)` : le `.then` est rangé en **microtask**.
+4. `console.log("D")` s'exécute immédiatement → **D**.
+5. La call stack est vide. L'event loop vide **d'abord les microtasks** → **C**.
+6. Puis la macrotask → **B**.
+
+Sortie : `A  D  C  B`. Deux enseignements : `setTimeout` vient du **runtime** (le moteur seul ne l'aurait pas), et une Promise (microtask) passe **avant** un timer (macrotask). C'est la mécanique exacte des cas concrets n°2 et n°5. Démonté au module 04.
+
+### Exemple 2 — Observer le JIT chauffer (cas concret n°4)
+
+Objectif : reproduire « 1er appel lent, suivants rapides » de façon isolée.
+
+```js
+// somme d'un tableau, appelée en boucle : V8 va la compiler en natif
+function somme(arr) {
+  let total = 0;
+  for (let i = 0; i < arr.length; i++) total += arr[i];
+  return total;
 }
 
-// Expression de fonction (pas hoisted)
-const soustraction = function(a, b) {
-  return a - b;
-};
+const data = Array.from({ length: 10_000 }, (_, i) => i);
 
-// Arrow function (pas de `this` propre, pas hoisted)
-const multiplication = (a, b) => a * b;
+console.time("froid");        // 1re exécution : bytecode (Ignition)
+somme(data);
+console.timeEnd("froid");
+
+for (let i = 0; i < 100_000; i++) somme(data); // on "chauffe" : V8 déclenche le JIT
+
+console.time("chaud");        // maintenant : code machine natif (TurboFan)
+somme(data);
+console.timeEnd("chaud");
 ```
 
-Les trois font la même chose, mais elles se comportent différemment vis-à-vis du **hoisting** et du **`this`**. On verra ça en détail dans le Module 01.
+Ce qu'on observe : `chaud` est nettement plus rapide que `froid`, sans avoir changé une ligne de `somme`. Le moteur a détecté que la fonction était **chaude** et l'a recompilée en natif — dans ton dos. C'est le mécanisme derrière l'endpoint `/families` de TribuZen. Tu apprendras à *voir* ça avec `node --trace-opt` au module 10.
 
-### Callbacks : passer une fonction en argument
-
-```js
-function faireApres(callback) {
-  console.log("Avant");
-  callback();
-  console.log("Après");
-}
-
-faireApres(() => {
-  console.log("Pendant !");
-});
-// Affiche : Avant → Pendant ! → Après
-```
-
-Un **callback** est simplement une fonction qu'on passe en paramètre à une autre fonction. C'est le mécanisme de base de l'asynchrone en JavaScript.
-
-### Promises : représenter une valeur future
-
-```js
-const promesse = new Promise((resolve, reject) => {
-  setTimeout(() => {
-    resolve("Données reçues !");
-  }, 1000);
-});
-
-promesse
-  .then((resultat) => console.log(resultat))  // "Données reçues !" (après 1s)
-  .catch((erreur) => console.error(erreur));
-```
-
-Une **Promise** est un objet qui dit "je n'ai pas encore la valeur, mais je te la donnerai quand elle sera prête — ou je te dirai si ça a échoué." On décortiquera son fonctionnement interne dans le Module 05.
-
-### async/await : du sucre syntaxique sur les Promises
-
-```js
-async function chargerDonnees() {
-  const resultat = await fetch("https://api.example.com/data");
-  const data = await resultat.json();
-  return data;
-}
-```
-
-`async/await` rend le code asynchrone lisible comme du code synchrone. Mais sous le capot, ce sont toujours des Promises. Le Module 06 t'expliquera exactement ce que le moteur fait avec ce sucre syntaxique.
-
-### Closures : une fonction qui "se souvient"
-
-```js
-function creerCompteur() {
-  let count = 0;              // Variable locale
-  return function incrementer() {
-    count++;                  // Accès à la variable du scope parent
-    console.log(count);
-  };
-}
-
-const compteur = creerCompteur();
-compteur(); // 1
-compteur(); // 2
-compteur(); // 3
-```
-
-La fonction `incrementer` a accès à `count` même après que `creerCompteur` a fini de s'exécuter. C'est une **closure** : la fonction "emporte" les variables de son scope parent dans son sac à dos. Le Module 02 expliquera comment ça fonctionne en mémoire.
-
-### Ce qui est attendu
-
-Si ces cinq rappels te semblent clairs, tu es prêt pour le Module 01. Si l'un d'eux te pose problème, prends le temps de revoir les bases JavaScript avant de continuer. Ce cours suppose que tu maîtrises la syntaxe — on se concentre sur le **comment** et le **pourquoi** du moteur, pas sur le **quoi** du langage.
+> Note : les vrais chiffres varient selon la machine et la version de Node. Ce qui compte n'est pas le nombre, c'est l'**écart** froid/chaud et sa cause.
 
 ---
 
-## Prêt ?
+## 4. Pièges & misconceptions
 
-Tu as le glossaire, le modèle mental, les outils. Place au Module 01 — on commence par la base : la pile d'appels.
+### PIÈGE #1 — Croire que `setTimeout` / `fetch` font partie du langage
 
-→ [Module 01 — Call Stack & Contextes d'exécution](./01-call-stack-execution-context.md)
+**Faux.** Ce sont des APIs du **runtime**, pas du moteur. Preuve : un moteur nu (V8 embarqué sans environnement) n'a ni `setTimeout` ni `fetch`. Conséquence pratique : le comportement de `setTimeout` peut différer entre navigateur et Node (clamp à 4 ms, phases de timers libuv) car ce sont **deux implémentations distinctes** de la même API.
+
+### PIÈGE #2 — Confondre moteur et runtime
+
+**Faux raccourci :** « Node.js est un moteur. » Non : **Node est un runtime** qui *embarque* le moteur V8 et y ajoute libuv (event loop + I/O), les modules `fs`/`http`, etc. De même, « le navigateur est un moteur » est faux : le navigateur *contient* un moteur (V8 pour Chrome). Le bon vocabulaire : moteur = V8 ; runtime = Node ou navigateur.
+
+### PIÈGE #3 — Penser que JS est « interprété » (point final)
+
+**Incomplet.** JS moderne n'est pas *seulement* interprété. Le pipeline est **hybride** : interprété en bytecode au départ (démarrage rapide), puis **compilé en natif** (JIT) pour le code chaud. Dire « JS est lent car interprété » ignore que le code chaud tourne en code machine. Et dire « JS est compilé comme le C » ignore le démarrage en bytecode et les déopts.
+
+### PIÈGE #4 — Croire que l'ordre async suit l'ordre du code
+
+**Faux.** Dans l'exemple 1, `B` est écrit avant `D` dans le source mais s'affiche en dernier. L'ordre d'exécution suit les **files de l'event loop** (microtask > macrotask), pas l'ordre des lignes. Raisonner « ligne par ligne du haut vers le bas » sur du code async mène droit au bug du cas concret n°2.
+
+### PIÈGE #5 — Croire que « le GC gère tout, je n'ai rien à faire »
+
+**Dangereux.** Le GC libère ce qui n'est **plus référencé**. Si une référence traîne (un listener non retiré, une closure qui capture un gros objet, une Map qui grossit sans borne), l'objet reste « vivant » aux yeux du GC et n'est **jamais** libéré → fuite. Automatique ≠ magique. Cas concret n°3, module 08.
 
 ---
 
-<!-- parcours-recommande -->
+## 5. Ancrage TribuZen
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 00 prérequis](../screencasts/screencast-00-prerequis.md)
-2. **Quiz** : [quiz 00 prérequis](../quizzes/quiz-00-prerequis.html)
-:::
+TribuZen est le fil rouge de tout le cours. Il fournit **deux runtimes réels** à observer, correspondant aux deux moitiés de la carte du §2.5 :
+
+- **L'admin React** (`tribuzen/apps/admin`) tourne sur le **runtime navigateur** (V8 + DOM). C'est là qu'on observe : le gel de l'UI quand une tâche bloque le thread unique (module 03), l'ordre d'affichage surprenant des composants async (module 04), et la RAM qui grimpe quand un composant fuit ses listeners (module 08). Outil : Chrome DevTools (onglets Performance et Memory).
+
+- **L'API Node** (`tribuzen/apps/api`) tourne sur le **runtime Node** (V8 + libuv). C'est là qu'on observe : le JIT qui chauffe un endpoint appelé en boucle (modules 10-11), les phases de l'event loop côté serveur (module 03), et le profiling des handlers lents (module 12). Outil : flags `node --trace-opt`, `--prof`, `--inspect`.
+
+Le cours n'invente aucun symptôme : chaque plainte du cas concret (§1) correspond à un fichier ou un endpoint réel de TribuZen, revisité dans le module qui l'explique. Ce module 00 est la **table des matières diagnostique** — tu y reviendras pour savoir « ce bug-là, c'est quel module ? ».
+
+**Carte du cours (où va chaque brique) :**
+
+| # | Module | Thème | Brique de la carte |
+|---|---|---|---|
+| 01 | Call Stack & contextes d'exécution | exécution | Call Stack |
+| 02 | Scope, Closures & mémoire | mémoire | Heap |
+| 03 | Event Loop | async | Event Loop |
+| 04 | Microtasks vs Macrotasks | async | Files d'attente |
+| 05 | Promises — implémentation | async | Files d'attente |
+| 06 | Async/Await sous le capot | async | Files d'attente |
+| 07 | Garbage Collector | mémoire | GC |
+| 08 | Memory Leaks | mémoire | GC / Heap |
+| 09 | Architecture V8 | moteur | Parser → Bytecode |
+| 10 | JIT & optimisation | moteur | JIT |
+| 11 | Hidden Classes & Inline Caching | moteur | JIT |
+| 12 | Performance Patterns | perf | tout |
+| 13 | Scheduling & concurrence | concurrence | Event Loop |
+| 14-15 | Projet final + debug réel | synthèse | tout |
+
+---
+
+## 6. Points clés
+
+1. Un **moteur JS** (V8, SpiderMonkey, JSC) lit et exécute le **langage** ; il ne connaît ni `setTimeout`, ni `fetch`, ni le DOM.
+2. Le **runtime** = moteur **+ APIs de l'environnement** (Node, navigateur, Deno, Bun) ; c'est lui que tu utilises, jamais le moteur nu.
+3. **L'event loop est fourni par le runtime**, pas par le moteur — V8 seul n'a pas de boucle d'événements.
+4. Un même moteur sert plusieurs runtimes : **V8 propulse Chrome ET Node**, avec des APIs différentes autour.
+5. Tous les moteurs respectent **ECMAScript (ECMA-262)**, normé par **TC39** : même comportement observable, implémentations libres.
+6. Le pipeline est **parse → AST → bytecode (interpréteur) → JIT natif si code chaud**, avec **déoptimisation** si une hypothèse casse.
+7. Comprendre le runtime paie sur trois axes que le code seul n'apprend pas : **performance, bugs async, fuites mémoire**.
+8. Ce module 00 est la **carte diagnostique** : chaque symptôme (lenteur, ordre async, RAM) pointe vers le module qui le démonte.
+
+---
+
+## 7. Seeds Anki
+
+```
+Quelle est la différence entre un moteur JS et un runtime ?|Le moteur (V8, SpiderMonkey, JSC) exécute le langage seul. Le runtime = moteur + APIs de l'environnement (setTimeout, fetch, DOM, fs). On utilise toujours un runtime, jamais le moteur nu.
+setTimeout et fetch font-ils partie du langage JavaScript ?|Non. Ce sont des APIs fournies par le runtime (navigateur ou Node), pas par le moteur. Un moteur nu ne les connaît pas.
+Quel moteur propulse Node.js et Chrome ?|Les deux utilisent V8 (Google). Même moteur, runtimes différents : Node ajoute libuv/fs/http, le navigateur ajoute le DOM/fetch.
+Qui fournit l'event loop : le moteur ou le runtime ?|Le runtime. V8 seul n'a pas de boucle d'événements ; c'est Node (via libuv) ou le navigateur qui l'apporte.
+Cite les étapes du pipeline d'exécution de V8.|parse → AST → bytecode (interpréteur Ignition) → compilation JIT en code natif (Maglev/TurboFan) si le code est "chaud", avec déoptimisation si une hypothèse s'avère fausse.
+Qu'est-ce que le code "chaud" et que lui fait le moteur ?|Du code exécuté très souvent. Le compilateur JIT le recompile de bytecode en code machine natif spécialisé, ce qui explique qu'un 1er appel soit lent et les suivants rapides.
+Qu'est-ce qu'ECMAScript et TC39 ?|ECMAScript (ECMA-262) est la spec officielle qui définit ce que le langage doit faire. TC39 est le comité qui la fait évoluer. Les moteurs choisissent librement le "comment".
+Pourquoi une RAM qui monte sans redescendre n'est pas forcément corrigée par le GC ?|Le GC ne libère que ce qui n'est plus référencé. Une référence qui traîne (listener non retiré, closure, Map non bornée) garde l'objet vivant → fuite mémoire. Automatique ≠ magique.
+```

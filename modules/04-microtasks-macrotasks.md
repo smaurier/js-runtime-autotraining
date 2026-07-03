@@ -1,933 +1,356 @@
-# Module 04 — Microtâches vs Macrotâches
-
-> **Objectif** : Maîtriser la distinction précise entre microtâches et macrotâches, comprendre leur ordonnancement interne, et être capable de résoudre n'importe quel puzzle d'ordre d'exécution asynchrone.
-
-> **Difficulté** : ⭐⭐⭐ (Avancé) — Les puzzles sont volontairement difficiles.
-
-> **Pas de panique !** Les puzzles de ce module sont difficiles par design. Si tu n'arrives pas à prédire l'ordre d'exécution du premier coup, c'est **normal** — même les développeurs seniors se trompent. L'objectif n'est pas d'avoir tout juste, mais de construire un raisonnement systématique. Chaque erreur t'apprend quelque chose.
-
+---
+titre: Microtasks vs Macrotasks
+cours: 01-js-runtime
+notions: [microtask queue vidée entièrement après chaque macrotask, macrotasks (setTimeout/setInterval/IO/setImmediate), phases de l'event loop Node (timers/pending/poll/check/close), process.nextTick prioritaire sur les microtasks Promise, différence navigateur vs Node, prédiction d'ordre d'un mélange async]
+outcomes: [prédire l'ordre exact d'un code mêlant setTimeout/Promise/nextTick/setImmediate, situer process.nextTick avant les microtasks Promise, distinguer l'ordonnancement navigateur de celui de Node]
+prerequis: [03-event-loop]
+next: 05-promises-implementation
+libs: []
+tribuzen: ordonnancement asynchrone de l'API TribuZen — flush des microtasks de log avant l'envoi de la réponse, protection contre la starvation de la file macrotask
+last-reviewed: 2026-07
 ---
 
-## Prérequis
+# Microtasks vs Macrotasks
 
-- Compréhension complète de l'event loop et de ses phases (Module 03)
-- Connaissance de la pile d'appels et du modèle d'exécution (Module 01)
-- Maîtrise des Promises, `async/await` et des callbacks
-- Notions sur `process.nextTick` et `setImmediate` (Module 03)
+> **Outcomes — tu sauras FAIRE :** prédire l'ordre exact d'un code mêlant `setTimeout`/`Promise`/`process.nextTick`/`setImmediate`, situer `process.nextTick` avant les microtasks Promise, distinguer l'ordonnancement du navigateur de celui de Node.
+> **Difficulté :** :star::star::star:
 
----
+## 1. Cas concret d'abord
 
-## Théorie
+Tu débugges un handler de l'API TribuZen. Un membre poste un message ; on veut logger l'événement AVANT de renvoyer la réponse HTTP. Le code semble correct :
 
-> 🎯 **Analogie** : Imagine deux files d'attente à la poste : une file prioritaire (microtasks) et une file normale (macrotasks). Règle : on sert TOUTE la file prioritaire avant de servir UN SEUL client de la file normale. Si des clients prioritaires arrivent pendant qu'on sert la file prioritaire, ils passent aussi avant la file normale.
+```ts
+// tribuzen/src/api/postMessage.ts — AVANT correction
+async function postMessage(req: Request, res: Response) {
+  const message = await saveMessage(req.body); // await → reprise en microtask
 
-### 1. Définition précise
+  // On "log" via une microtask (Promise) au lieu d'attendre
+  Promise.resolve().then(() => {
+    auditLog.record('message.created', message.id); // microtask
+  });
 
-La spécification HTML et ECMA-262 distinguent deux catégories de tâches asynchrones. Les termes "microtâche" et "macrotâche" ne sont pas exactement ceux de la spec (qui parle de "task" et "microtask"), mais l'usage courant s'est imposé.
+  // Et on programme une purge de cache "plus tard"
+  setTimeout(() => cache.invalidate(message.roomId), 0); // macrotask
 
-**Macrotâche (task)** : une unité de travail discrète planifiée dans la file de tâches principale. Après chaque macrotâche, l'event loop vérifie s'il faut effectuer un rendu, puis passe à la macrotâche suivante.
-
-**Microtâche (microtask)** : une unité de travail légère qui s'exécute **immédiatement après** la tâche courante (où la microtâche courante), avant que le contrôle ne soit rendu à l'event loop. Toutes les microtâches en attente sont vidées d'un coup.
-
-```
-  Modèle d'exécution :
-
-  ┌──────────────────────────────────────────────────────┐
-  │                                                      │
-  │  Macrotâche 1                                        │
-  │  └──> Vider TOUTES les microtâches                   │
-  │       ├── microtask A                                │
-  │       ├── microtask B (créée par A)                  │
-  │       └── microtask C (créée par B)                  │
-  │                                                      │
-  │  [Rendering si nécessaire]                           │
-  │                                                      │
-  │  Macrotâche 2                                        │
-  │  └──> Vider TOUTES les microtâches                   │
-  │       └── microtask D                                │
-  │                                                      │
-  │  [Rendering si nécessaire]                           │
-  │                                                      │
-  │  Macrotâche 3                                        │
-  │  └──> (pas de microtâches)                           │
-  │                                                      │
-  │  ...                                                 │
-  └──────────────────────────────────────────────────────┘
-```
-
-### 2. Quelles APIs créent des microtâches
-
-| API | Type | Contexte |
-|-----|------|----------|
-| `Promise.then()` / `catch()` / `finally()` | Microtâche | Navigateur + Node.js |
-| `queueMicrotask(fn)` | Microtâche | Navigateur + Node.js |
-| `MutationObserver` | Microtâche | Navigateur uniquement |
-| `await` (reprise après) | Microtâche | Navigateur + Node.js |
-
-Quand une Promise est résolue, son handler `.then()` ne s'exécute pas immédiatement. Il est placé dans la **file de microtâches** et sera exécuté quand la pile d'appels sera vide (mais avant toute macrotâche).
-
-```typescript
-// await est du sucre syntaxique pour Promise.then
-// Donc la reprise après un await est une microtâche
-
-async function example(): Promise<void> {
-  console.log('A');        // synchrone
-  await Promise.resolve(); // place la reprise en microtâche
-  console.log('B');        // microtâche (reprise après await)
+  res.json({ id: message.id }); // synchrone — part MAINTENANT
 }
-
-example();
-console.log('C');
-
-// Sortie : A, C, B
 ```
 
-### 3. Quelles APIs créent des macrotâches
+**Le bug observé en prod :** dans les logs d'audit, certains messages apparaissent APRÈS que la réponse est déjà partie — et si le process crash entre les deux, le message est renvoyé au client mais **jamais audité**. Pourquoi ? Parce que `res.json(...)` est **synchrone** : il s'exécute immédiatement, avant que la moindre microtask (`.then` de l'audit) ait tourné. Le `.then()` est mis en file et n'est vidé qu'une fois la pile d'appels vide — donc après le `return` du handler.
 
-| API | Type | Contexte |
-|-----|------|----------|
-| `setTimeout(fn, delay)` | Macrotâche | Navigateur + Node.js |
-| `setInterval(fn, delay)` | Macrotâche | Navigateur + Node.js |
-| `setImmediate(fn)` | Macrotâche | Node.js uniquement |
-| Callbacks I/O (`fs`, `net`, etc.) | Macrotâche | Node.js |
-| `MessageChannel.port.onmessage` | Macrotâche | Navigateur + Node.js |
-| Événements DOM (click, input, etc.) | Macrotâche | Navigateur |
-| `requestAnimationFrame` | Macrotâche* | Navigateur |
+Et le `setTimeout` de purge de cache ? C'est une **macrotask** : elle ne s'exécute même pas dans le même tour que les microtasks. Si le handler enchaîne 100 000 microtasks (une boucle de `.then`), le `setTimeout` peut être retardé de plusieurs centaines de ms — c'est de la **starvation**.
 
-*Note : `requestAnimationFrame` est techniquement dans sa propre catégorie (rendering task), pas dans la file de macrotâches standard.
+Ce module te donne l'ordre EXACT dans lequel ces files se vident, pour que tu saches (a) ce qui a déjà tourné quand `res.json` part, et (b) comment ne pas affamer tes macrotasks.
 
-```typescript
-// MessageChannel crée une macrotâche — utile pour céder le contrôle
-const channel = new MessageChannel();
-channel.port1.onmessage = () => {
-  console.log('MessageChannel: macrotâche');
-};
-channel.port2.postMessage(undefined);
+---
 
-Promise.resolve().then(() => {
-  console.log('Promise: microtâche');
-});
+## 2. Théorie complète, concise
 
-// Sortie : Promise: microtâche, MessageChannel: macrotâche
-```
+### 2.1 Deux files, une règle d'or
 
-### 4. L'algorithme de vidage : microtâches entre chaque macrotâche
+Le runtime JS distingue deux catégories de callbacks asynchrones :
 
-Voici l'algorithme précis tel que défini par la spécification HTML :
+- **Macrotask** (la spec HTML dit *task*) : une unité de travail planifiée dans la file de tâches. `setTimeout`, `setInterval`, `setImmediate` (Node), callbacks I/O, `MessageChannel`, événements DOM.
+- **Microtask** : un callback léger vidé **avant de rendre la main à l'event loop**. `Promise.then/catch/finally`, `queueMicrotask`, reprise après `await`, `MutationObserver` (navigateur).
+
+**Règle d'or :** après CHAQUE macrotask, on vide **la totalité** de la microtask queue avant de toucher à la macrotask suivante.
 
 ```
-  perform_a_microtask_checkpoint():
-      tant que (la file de microtâches n'est PAS vide):
-          microtask = file_microtaches.dequeue()
-          executer(microtask)
-          // Si microtask a créé d'autres microtâches,
-          // elles sont dans la file et seront traitées
-          // dans cette MÊME boucle while
+1 macrotask
+  └─→ vider TOUTE la microtask queue   (while, pas if)
+      ├─ micro A
+      ├─ micro B (créée par A → traitée dans le MÊME vidage)
+      └─ micro C
+[rendu éventuel — navigateur]
+1 macrotask suivante
+  └─→ vider TOUTE la microtask queue
+...
 ```
 
-```
-  event_loop():
-      boucle infinie:
-          // 1. Prendre UNE macrotâche
-          task = task_queue.dequeue()
-          executer(task)
+Le point critique : c'est un `while`, pas un `if`. Si une microtask en planifie une autre, la nouvelle est traitée **dans le même vidage**, avant toute macrotask. C'est ce qui rend la starvation possible.
 
-          // 2. Vider TOUTES les microtâches
-          perform_a_microtask_checkpoint()
+### 2.2 Ce qui crée quoi
 
-          // 3. Rendering (si nécessaire)
-          si (besoin_de_rendu):
-              executer_rAF_callbacks()
-              render()
-```
+| API | Catégorie | Contexte |
+|-----|-----------|----------|
+| `Promise.then/catch/finally` | microtask | navigateur + Node |
+| `queueMicrotask(fn)` | microtask | navigateur + Node |
+| reprise après `await` | microtask | navigateur + Node |
+| `MutationObserver` | microtask | navigateur seulement |
+| `process.nextTick(fn)` | file dédiée (**avant** microtasks) | Node seulement |
+| `setTimeout` / `setInterval` | macrotask | navigateur + Node |
+| `setImmediate(fn)` | macrotask (phase check) | Node seulement |
+| callbacks I/O (`fs`, `net`…) | macrotask (phase poll) | Node |
+| `MessageChannel` | macrotask | navigateur + Node |
 
-**Point crucial** : l'étape 2 est un `while`, pas un `if`. Cela signifie que si une microtâche en crée une autre, cette nouvelle microtâche sera traitée dans le **même cycle** de vidage, avant toute nouvelle macrotâche.
+Une Promise déjà résolue n'exécute **jamais** son `.then` de façon synchrone : il passe toujours par la microtask queue.
 
-### 5. `process.nextTick` n'est PAS une microtâche
+### 2.3 `process.nextTick` n'est PAS une microtask Promise
 
-C'est une confusion très courante. `process.nextTick` a sa propre file d'attente, distincte de la file des microtâches. Et elle est **prioritaire** :
+Confusion la plus fréquente. Dans Node, `process.nextTick` a sa **propre file**, distincte de la microtask queue, et elle est **prioritaire** : la nextTick queue est drainée **entièrement avant** la microtask queue Promise.
 
-```
-  Ordre de traitement entre deux phases Node.js :
-
-  ┌─────────────────────────────────────┐
-  │  Phase N terminée                   │
-  │                                     │
-  │  1. Vider process.nextTick queue    │ <-- TOUT vider
-  │     (si nextTick crée un nextTick,  │
-  │      il est traité ici aussi)       │
-  │                                     │
-  │  2. Vider microtask queue           │ <-- TOUT vider
-  │     (Promise.then, queueMicrotask)  │
-  │                                     │
-  │  3. Passer à Phase N+1             │
-  └─────────────────────────────────────┘
-```
-
-```typescript
-// Preuve que nextTick passe avant les microtâches
-
-process.nextTick(() => {
-  console.log('nextTick 1');
-});
-
-Promise.resolve().then(() => {
-  console.log('promise 1');
-});
-
-process.nextTick(() => {
-  console.log('nextTick 2');
-});
-
-Promise.resolve().then(() => {
-  console.log('promise 2');
-});
+```ts
+process.nextTick(() => console.log('nextTick 1'));
+Promise.resolve().then(() => console.log('promise 1'));
+process.nextTick(() => console.log('nextTick 2'));
+Promise.resolve().then(() => console.log('promise 2'));
 
 // Sortie :
 // nextTick 1
-// nextTick 2
+// nextTick 2   ← TOUS les nextTick d'abord
 // promise 1
 // promise 2
-//
-// Tous les nextTick AVANT toutes les Promises
 ```
 
-**Pourquoi cette distinction ?** Historiquement, `process.nextTick` existait avant les Promises en JavaScript. Il a été conservé avec sa priorité supérieure pour des raisons de rétrocompatibilité. La documentation Node.js recommande d'utiliser `queueMicrotask()` plutôt que `process.nextTick()` pour le nouveau code.
-
-### 6. L'ordre complet dans Node.js
+**Ordre de priorité Node, du plus prioritaire au moins :**
 
 ```
-  ╔═══════════════════════════════════════════════════╗
-  ║        Priorité d'exécution dans Node.js          ║
-  ╠═══════════════════════════════════════════════════╣
-  ║                                                   ║
-  ║  1. Code synchrone (call stack)                   ║
-  ║     │                                             ║
-  ║     v                                             ║
-  ║  2. process.nextTick (file dédiée)                ║
-  ║     │  - vidée intégralement                      ║
-  ║     │  - nextTick imbriqués traités ici aussi     ║
-  ║     v                                             ║
-  ║  3. Microtâches (Promise.then, queueMicrotask)    ║
-  ║     │  - vidées intégralement                     ║
-  ║     │  - microtâches imbriquées traitées ici      ║
-  ║     v                                             ║
-  ║  4. Macrotâches (selon la phase courante)         ║
-  ║     ├── timers (setTimeout, setInterval)          ║
-  ║     ├── pending callbacks                         ║
-  ║     ├── poll (I/O)                                ║
-  ║     ├── check (setImmediate)                      ║
-  ║     └── close callbacks                           ║
-  ║                                                   ║
-  ║  Entre chaque callback de macrotâche :            ║
-  ║     -> retour à 2 (nextTick) puis 3 (micro)      ║
-  ╚═══════════════════════════════════════════════════╝
+1. code synchrone (call stack)
+2. process.nextTick queue      (vidée entièrement, nextTick imbriqués inclus)
+3. microtask queue Promise     (vidée entièrement, microtasks imbriquées incluses)
+4. macrotasks selon la phase courante
 ```
 
-### 7. Le problème de famine (starvation) en détail
+Raison historique : `process.nextTick` existait avant les Promises ; sa priorité a été gardée pour rétrocompatibilité. La doc Node recommande `queueMicrotask()` pour le nouveau code.
 
-La famine survient lorsqu'une catégorie de tâches accapare l'event loop et empêche les autres de s'exécuter.
+### 2.4 Les phases de l'event loop Node
 
-**Scénario 1 : Famine par microtâches récursives**
+Une macrotask n'est pas « juste une file ». libuv organise chaque tour en **phases**, exécutées dans cet ordre fixe :
 
-```typescript
-// Les microtâches affament les macrotâches
-function eternalMicrotask(): void {
-  queueMicrotask(eternalMicrotask);
+```
+   ┌─────────────┐
+┌─▶│   timers    │  callbacks de setTimeout / setInterval échus
+│  ├─────────────┤
+│  │   pending   │  certains callbacks I/O différés (erreurs TCP…)
+│  ├─────────────┤
+│  │ idle,prepare│  usage interne
+│  ├─────────────┤
+│  │    poll     │  récupère les I/O (fs, net) ; peut bloquer ici
+│  ├─────────────┤
+│  │    check    │  callbacks de setImmediate
+│  ├─────────────┤
+│  │  close cbs  │  'close' (socket.on('close')…)
+│  └─────────────┘
+└──────── tour suivant
+```
+
+**Entre chaque callback** (et entre chaque phase), Node vide la nextTick queue **puis** la microtask queue. Donc `nextTick` et `Promise.then` s'intercalent entre deux `setTimeout`, pas seulement à la fin du tour (comportement Node 11+).
+
+Conséquence pratique sur `setTimeout(fn, 0)` vs `setImmediate` :
+- **Au top-level**, l'ordre des deux est **non déterministe** (dépend du temps de démarrage vs le seuil de 1 ms du timer).
+- **À l'intérieur d'un callback I/O** (phase poll), `setImmediate` (phase check, juste après) s'exécute **toujours avant** `setTimeout` (qui attend le prochain tour, phase timers). Là, c'est déterministe.
+
+### 2.5 Navigateur vs Node
+
+| | Navigateur | Node |
+|---|---|---|
+| Modèle | 1 macrotask → toutes microtasks → **rendu** | phases libuv, pas de rendu |
+| `process.nextTick` | n'existe pas | file prioritaire dédiée |
+| `setImmediate` | n'existe pas (non standard) | phase check |
+| `requestAnimationFrame` | avant le rendu | n'existe pas |
+| microtasks | vidées après chaque macrotask + avant rendu | vidées après nextTick, entre chaque callback |
+
+Au navigateur, le point clé additionnel est le **rendu** : il n'a lieu qu'après avoir vidé les microtasks. Une boucle de microtasks bloque donc l'affichage. Pour porter du code Node vers le navigateur : remplace `process.nextTick(fn)` par `queueMicrotask(fn)` (comportement quasi identique, sauf la priorité vis-à-vis des Promises), et `setImmediate` par `setTimeout(fn, 0)` ou `MessageChannel`.
+
+### 2.6 Chaînes `.then()` : elles s'entrelacent
+
+Seul le **premier** `.then` d'une chaîne est en file au départ. Le suivant n'est ajouté qu'une fois le précédent résolu — d'où l'entrelacement entre chaînes parallèles.
+
+```ts
+Promise.resolve().then(() => console.log('1')).then(() => console.log('2'));
+Promise.resolve().then(() => console.log('A')).then(() => console.log('B'));
+// Sortie : 1, A, 2, B  (pas 1, 2, A, B)
+```
+
+### 2.7 Starvation : les microtasks affament les macrotasks
+
+Puisque la microtask queue est vidée **entièrement** (`while`) avant toute macrotask, une microtask qui se re-planifie en boucle bloque indéfiniment `setTimeout`, l'I/O, `setImmediate` :
+
+```ts
+function boucle() {
+  queueMicrotask(boucle); // se re-planifie → la file ne se vide jamais
 }
-eternalMicrotask();
-// setTimeout, setInterval, I/O, setImmediate : tous bloqués
+boucle();
+setTimeout(() => console.log('jamais atteint tant que la boucle tourne'), 0);
 ```
 
-**Scénario 2 : Famine par process.nextTick récursif**
-
-```typescript
-// nextTick affame TOUT (même les Promises)
-function eternalNextTick(): void {
-  process.nextTick(eternalNextTick);
-}
-eternalNextTick();
-// Promises, setTimeout, I/O : tous bloqués
-```
-
-**Scénario 3 : Famine par code synchrone**
-
-```typescript
-// Un calcul synchrone bloque tout
-while (true) {
-  // Même les microtâches ne s'exécutent pas
-  // car la pile d'appels n'est jamais vide
-}
-```
-
-```
-  Impact de la famine selon le niveau :
-
-  Code synchrone bloquant :
-  X process.nextTick
-  X Microtâches
-  X Macrotâches
-  X Rendering
-
-  process.nextTick récursif :
-  + Autres process.nextTick (même file)
-  X Microtâches
-  X Macrotâches
-  X Rendering
-
-  Microtâches récursives :
-  + process.nextTick
-  + Autres microtâches (même file)
-  X Macrotâches
-  X Rendering
-```
-
-### 8. `queueMicrotask()` vs `Promise.resolve().then()`
-
-Ces deux approches créent des microtâches, mais avec des différences subtiles :
-
-```typescript
-// Approche 1 : queueMicrotask (recommandé)
-queueMicrotask(() => {
-  console.log('queueMicrotask');
-});
-
-// Approche 2 : Promise.resolve().then()
-Promise.resolve().then(() => {
-  console.log('Promise.resolve().then()');
-});
-```
-
-**Différences** :
-
-| Aspect | `queueMicrotask()` | `Promise.resolve().then()` |
-|--------|--------------------|-----------------------------|
-| Objet créé | Aucun | Crée 2 objets Promise |
-| Performance | Plus rapide | Légèrement plus lent |
-| Gestion d'erreurs | L'erreur remonte comme uncaught | L'erreur devient un rejet non géré |
-| Sémantique | Explicite : "planifier une microtâche" | Détourne l'API Promise |
-| Ordre | Identique (même file) | Identique (même file) |
-
-```typescript
-// Différence de gestion d'erreurs
-queueMicrotask(() => {
-  throw new Error('boom');
-  // -> uncaughtException (peut être attrapé par le gestionnaire global)
-});
-
-Promise.resolve().then(() => {
-  throw new Error('boom');
-  // -> unhandledRejection (événement différent !)
-});
-```
-
-### 9. Cas spéciaux et pièges courants
-
-**Piège 1 : `async/await` et les ticks supplémentaires**
-
-```typescript
-async function foo(): Promise<string> {
-  return 'foo'; // équivalent à return Promise.resolve('foo')
-}
-
-async function bar(): Promise<string> {
-  return Promise.resolve('bar'); // unwrap du thenable = tick supplémentaire !
-}
-
-foo().then(console.log);
-bar().then(console.log);
-
-// Sortie : foo, bar
-// bar a un tick de retard à cause du thenable unwrapping
-// (voir Module 05 pour les détails)
-```
-
-**Piège 2 : Les Promises déjà résolues ne sont pas synchrones**
-
-```typescript
-const p = Promise.resolve(42);
-
-p.then(v => console.log('then:', v));
-console.log('sync');
-
-// Sortie : sync, then: 42
-// Même si p est déjà résolue, .then() est TOUJOURS une microtâche
-// Il n'y a JAMAIS d'exécution synchrone d'un .then()
-```
-
-**Piège 3 : `.then()` chaîné crée des microtâches séquentielles**
-
-```typescript
-Promise.resolve()
-  .then(() => console.log('then 1'))
-  .then(() => console.log('then 2'))
-  .then(() => console.log('then 3'));
-
-Promise.resolve()
-  .then(() => console.log('then A'))
-  .then(() => console.log('then B'))
-  .then(() => console.log('then C'));
-
-// Sortie : then 1, then A, then 2, then B, then 3, then C
-// Les .then() chaînés NE créent PAS leurs microtâches d'un coup.
-// Seul le premier .then() de chaque chaîne est en file.
-// Le .then() suivant est ajouté quand le précédent se résout.
-```
-
-Visualisation de l'entrelacement :
-
-```
-  File de microtâches au fil du temps :
-
-  Étape 0 (après code sync) : [then1, thenA]
-
-  Exécuter then1 -> affiche "then 1"
-    -> résolution -> ajoute then2 en file
-  File : [thenA, then2]
-
-  Exécuter thenA -> affiche "then A"
-    -> résolution -> ajoute thenB en file
-  File : [then2, thenB]
-
-  Exécuter then2 -> affiche "then 2"
-    -> résolution -> ajoute then3 en file
-  File : [thenB, then3]
-
-  Exécuter thenB -> affiche "then B"
-    -> résolution -> ajoute thenC en file
-  File : [then3, thenC]
-
-  Exécuter then3 -> affiche "then 3"
-  File : [thenC]
-
-  Exécuter thenC -> affiche "then C"
-  File : []
-```
-
-### 10. MutationObserver : microtâche spéciale du navigateur
-
-`MutationObserver` observe les modifications du DOM et ses callbacks sont des **microtâches** :
-
-```typescript
-const observer = new MutationObserver((mutations: MutationRecord[]) => {
-  console.log('DOM muté - microtâche');
-});
-
-observer.observe(document.body, { childList: true });
-
-console.log('avant');
-document.body.appendChild(document.createElement('div'));
-console.log('après');
-
-// avant
-// après
-// DOM muté - microtâche
-```
-
-Cela garantit que le callback du MutationObserver s'exécute **avant** le prochain rendu, permettant de réagir aux mutations DOM avant que l'utilisateur ne voie le changement.
+`process.nextTick` récursif est pire encore : il affame même les microtasks Promise. Un `while (true)` synchrone affame tout, microtasks comprises (la pile n'est jamais vide).
 
 ---
 
-## Démonstration
+## 3. Worked examples
 
-### Demo 1 — Puzzle basique : micro vs macro
+### Exemple 1 — Mélange navigateur (déterministe)
 
-```typescript
-// demo1-basic-puzzle.js
-
+```js
 console.log('1');
-
-setTimeout(() => {
-  console.log('2');
-}, 0);
-
-Promise.resolve().then(() => {
-  console.log('3');
-});
-
-console.log('4');
-
-// Réponse : 1, 4, 3, 2
-// Explication :
-//   "1" et "4" : synchrone (pile d'appels)
-//   "3" : microtâche (Promise.then) -- prioritaire
-//   "2" : macrotâche (setTimeout) -- après les microtâches
+setTimeout(() => console.log('2'), 0);           // macrotask
+Promise.resolve().then(() => console.log('3'));  // microtask
+queueMicrotask(() => console.log('4'));          // microtask
+console.log('5');
 ```
 
-### Demo 2 — Entrelacement de chaînes Promise
+Raisonnement :
+1. **Synchrone** d'abord : `1`, puis `5`.
+2. Pile vide → on vide la microtask queue dans l'ordre d'enregistrement : `3` (le `.then` a été enregistré avant), puis `4`.
+3. Enfin la macrotask : `2`.
 
-```typescript
-// demo2-interleaving.js
+**Sortie : `1, 5, 3, 4, 2`**
 
-Promise.resolve()
-  .then(() => console.log('P1-A'))
-  .then(() => console.log('P1-B'))
-  .then(() => console.log('P1-C'));
+### Exemple 2 — Mélange Node (déterministe)
 
-Promise.resolve()
-  .then(() => console.log('P2-A'))
-  .then(() => console.log('P2-B'))
-  .then(() => console.log('P2-C'));
-
-queueMicrotask(() => console.log('QM-1'));
-queueMicrotask(() => console.log('QM-2'));
-
-// Réponse : P1-A, P2-A, QM-1, QM-2, P1-B, P2-B, P1-C, P2-C
-//
-// État initial de la file : [P1-A, P2-A, QM-1, QM-2]
-// P1-A s'exécute -> ajoute P1-B
-// P2-A s'exécute -> ajoute P2-B
-// QM-1 s'exécute
-// QM-2 s'exécute
-// File : [P1-B, P2-B]
-// P1-B s'exécute -> ajoute P1-C
-// P2-B s'exécute -> ajoute P2-C
-// File : [P1-C, P2-C]
-// P1-C s'exécute
-// P2-C s'exécute
-```
-
-### Demo 3 — nextTick vs microtask vs macrotask (Node.js)
-
-```typescript
-// demo3-full-priority.js
-// Exécuter avec : node demo3-full-priority.js
-
-setTimeout(() => {
-  console.log('macro: setTimeout');
-}, 0);
-
-setImmediate(() => {
-  console.log('macro: setImmediate');
-});
-
-process.nextTick(() => {
-  console.log('nextTick: 1');
-
-  process.nextTick(() => {
-    console.log('nextTick: 2 (imbriqué)');
-  });
-
-  Promise.resolve().then(() => {
-    console.log('micro: Promise dans nextTick');
-  });
-});
-
-queueMicrotask(() => {
-  console.log('micro: queueMicrotask');
-});
-
-Promise.resolve().then(() => {
-  console.log('micro: Promise.then');
-
-  process.nextTick(() => {
-    console.log('nextTick: 3 (dans Promise)');
-  });
-});
-
-console.log('sync');
-
-// Sortie :
-// sync
-// nextTick: 1
-// nextTick: 2 (imbriqué)
-// micro: queueMicrotask
-// micro: Promise.then
-// micro: Promise dans nextTick
-// nextTick: 3 (dans Promise)
-// macro: setTimeout      (ou setImmediate, non déterministe)
-// macro: setImmediate    (ou setTimeout, non déterministe)
-//
-// Explication :
-// 1. "sync" : code synchrone
-// 2. nextTick 1 et 2 : TOUS les nextTick avant les microtâches
-// 3. Microtâches dans l'ordre : queueMicrotask, Promise.then
-// 4. "Promise dans nextTick" : microtâche créée par nextTick 1
-// 5. "nextTick 3" : nextTick créé par la Promise — depuis Node 11+,
-//    quand un nextTick est planifié depuis une microtâche, il s'exécute
-//    après que le callback courant de la microtâche termine, mais AVANT
-//    la prochaine microtâche dans la file (car la file nextTick est
-//    toujours drainée en priorité par rapport aux microtâches Promise)
-// 6. Macrotâches : setTimeout et setImmediate
-```
-
-### Demo 4 — Puzzle avancé : async/await et microtâches
-
-```typescript
-// demo4-async-await.js
-
-async function alpha(): Promise<void> {
-  console.log('alpha-1');
-  await beta();
-  console.log('alpha-2'); // microtâche (reprise après await)
-}
-
-async function beta(): Promise<void> {
-  console.log('beta-1');
-  await gamma();
-  console.log('beta-2'); // microtâche
-}
-
-async function gamma(): Promise<void> {
-  console.log('gamma');
-}
-
-console.log('start');
-
-alpha();
-
-Promise.resolve()
-  .then(() => console.log('P1'))
-  .then(() => console.log('P2'))
-  .then(() => console.log('P3'));
-
-console.log('end');
-
-// Sortie :
-// start
-// alpha-1
-// beta-1
-// gamma
-// end
-// beta-2
-// P1
-// alpha-2
-// P2
-// P3
-//
-// Explication :
-// - start : synchrone
-// - alpha-1 : synchrone (avant le await)
-// - beta-1 : synchrone (alpha appelle beta avant de suspendre)
-// - gamma : synchrone (beta appelle gamma avant de suspendre)
-// - end : synchrone
-// - Microtâches : [reprise-gamma(=beta-2), P1]
-//   beta-2 s'exécute -> ajoute reprise-beta(=alpha-2)
-//   P1 s'exécute -> ajoute P2
-//   alpha-2 s'exécute
-//   P2 s'exécute -> ajoute P3
-//   P3 s'exécute
-```
-
-### Demo 5 — Famine : setTimeout bloqué par microtâches
-
-```typescript
-// demo5-starvation-proof.js
-
-const start = Date.now();
-let timerRan: boolean = false;
-let microCount: number = 0;
-
-// Planifier un timer à 0ms
-setTimeout(() => {
-  timerRan = true;
-  console.log(`setTimeout exécuté après ${Date.now() - start}ms`);
-  console.log(`Nombre de microtâches traitées avant : ${microCount}`);
-}, 0);
-
-// Créer 100 000 microtâches en chaîne
-function chainMicrotasks(n: number): Promise<void> {
-  if (n <= 0) return Promise.resolve();
-  return Promise.resolve().then(() => {
-    microCount++;
-    return chainMicrotasks(n - 1);
-  });
-}
-
-chainMicrotasks(100_000).then(() => {
-  console.log(`Chaîne de ${microCount} microtâches terminée`);
-  console.log(`Timer déjà exécuté ? ${timerRan}`);
-  console.log(`Temps écoulé : ${Date.now() - start}ms`);
-});
-
-// Résultat typique :
-// Chaîne de 100000 microtâches terminée
-// Timer déjà exécuté ? false        <-- le timer attend !
-// Temps écoulé : ~150ms
-// setTimeout exécuté après ~150ms
-// Nombre de microtâches traitées avant : 100000
-```
-
-### Demo 6 — Puzzle expert : mélange complet
-
-```typescript
-// demo6-expert-puzzle.js
-
+```js
 console.log('A');
 
 setTimeout(() => {
-  console.log('B');
-  Promise.resolve().then(() => console.log('C'));
+  console.log('T');
+  process.nextTick(() => console.log('T-nextTick'));
+  Promise.resolve().then(() => console.log('T-promise'));
 }, 0);
 
-new Promise((resolve) => {
-  console.log('D'); // le constructeur Promise est SYNCHRONE
-  resolve();
-}).then(() => {
-  console.log('E');
-  setTimeout(() => console.log('F'), 0);
-  return Promise.resolve();
-}).then(() => {
-  console.log('G');
-});
+process.nextTick(() => console.log('NT'));
+Promise.resolve().then(() => console.log('P'));
 
-setTimeout(() => {
-  console.log('H');
-}, 0);
-
-queueMicrotask(() => {
-  console.log('I');
-  queueMicrotask(() => console.log('J'));
-});
-
-console.log('K');
-
-// Réponse : A, D, K, E, I, G, J, B, C, H, F
-//
-// Détail pas à pas :
-// Sync : A, D (constructeur Promise), K
-// Microtâches file initiale : [E, I]
-//   E s'exécute -> planifie F (macro), retourne Promise.resolve()
-//     (PromiseResolveThenableJob pour le return -> ajoute un job interne)
-//   I s'exécute -> ajoute J (micro)
-//   File : [job-interne-de-E, J]
-//   job-interne s'exécute -> ajoute G en file
-//   J s'exécute
-//   File : [G]
-//   G s'exécute
-// Macrotâches dans l'ordre : B, H, F
-//   B s'exécute -> ajoute C (micro)
-//     C s'exécute (microtâche entre macrotâches)
-//   H s'exécute
-//   F s'exécute
-//
-// Note : G apparaît après I car return Promise.resolve() dans E
-// crée un PromiseResolveThenableJob (tick supplémentaire).
-// Voir Module 05 pour les détails.
+console.log('B');
 ```
-
-### Demo 7 — Puzzle Node.js : mélange complet avec phases
-
-```typescript
-// demo7-nodejs-full.js (Node.js uniquement)
-
-setTimeout(() => {
-  console.log('T1');
-  process.nextTick(() => console.log('NT1'));
-  Promise.resolve().then(() => console.log('P1'));
-}, 0);
-
-setTimeout(() => {
-  console.log('T2');
-  process.nextTick(() => console.log('NT2'));
-  Promise.resolve().then(() => console.log('P2'));
-}, 0);
-
-setImmediate(() => {
-  console.log('I1');
-  process.nextTick(() => console.log('NI1'));
-  Promise.resolve().then(() => console.log('PI1'));
-});
-
-setImmediate(() => {
-  console.log('I2');
-  process.nextTick(() => console.log('NI2'));
-});
-
-process.nextTick(() => console.log('NT-global'));
-Promise.resolve().then(() => console.log('P-global'));
-
-console.log('SYNC');
-
-// Sortie :
-// SYNC
-// NT-global
-// P-global
-// T1
-// NT1
-// P1
-// T2
-// NT2
-// P2
-// I1
-// NI1
-// PI1
-// I2
-// NI2
-//
-// Depuis Node.js 11+ : les microtâches sont vidées
-// entre chaque callback de la même phase.
-```
-
----
-
-### V8 vs SpiderMonkey (Firefox)
-
-> 📋 **Rappel** : La distinction microtâche/macrotâche est définie par les spécifications (HTML et ECMA-262), pas par un moteur en particulier. Le comportement est donc identique dans tous les navigateurs modernes.
-
-**La distinction microtâche/macrotâche est définie par la spec** — elle est identique dans Chrome (V8), Firefox (SpiderMonkey), Safari (JavaScriptCore) et tous les navigateurs conformes.
-
-**Implémentation interne de la file de microtâches** :
-
-| Aspect | V8 (Chrome/Node.js) | SpiderMonkey (Firefox) |
-|--------|---------------------|------------------------|
-| File de microtâches | `MicrotaskQueue` (C++) | **Job Queue** (concept ECMA-262, section 9.5) |
-| Planification | `EnqueueMicrotask()` | `EnqueueJob()` interne |
-| API exposée | `queueMicrotask()` | `queueMicrotask()` (identique) |
-| Vidage | `PerformMicrotaskCheckpoint()` | Vidage automatique après chaque « task » |
-
-**Ce que les frameworks font avec les microtâches** — et pourquoi c'est cross-engine :
-
-- **React** utilise `MessageChannel` (une macrotâche) pour planifier les mises à jour de rendu via son scheduler. Cela fonctionne de manière identique dans Chrome et Firefox car `MessageChannel` est standardisé.
-- **Vue.js** utilise `queueMicrotask()` (où `Promise.resolve().then()` en fallback) pour batching les mises à jour réactives. Même comportement dans tous les moteurs.
-- **Angular** (Zone.js) intercepte les APIs asynchrones pour détecter les changements. Le mécanisme repose sur les APIs standard, donc cross-engine.
-
-**`process.nextTick` est exclusif à Node.js** — il n'existe dans aucun navigateur (ni Chrome, ni Firefox, ni Safari). C'est une API propre au runtime Node.js, pas au moteur V8. Si tu portes du code Node.js vers Deno ou le navigateur, remplace `process.nextTick(fn)` par `queueMicrotask(fn)` (comportement presque identique, sauf la priorité par rapport aux Promises).
-
-**Conclusion** : quand tu résous un puzzle d'ordonnancement microtâche/macrotâche, la réponse est la même quel que soit le moteur JS. Les seules différences concernent des APIs non standard comme `process.nextTick` (Node.js only) ou `setImmediate` (Node.js + IE historique).
-
----
-
-## Points clés
-
-1. **Macrotâche = task** dans la spécification. Créées par `setTimeout`, `setInterval`, `setImmediate`, I/O, `MessageChannel`, événements DOM.
-
-2. **Microtâche = microtask**. Créées par `Promise.then/catch/finally`, `queueMicrotask`, `MutationObserver`, reprise après `await`.
-
-3. **Règle d'or** : TOUTES les microtâches en attente sont vidées entre chaque macrotâche. C'est un `while`, pas un `if`.
-
-4. **`process.nextTick` n'est pas une microtâche**. C'est une file séparée avec une priorité encore supérieure. Ordre : nextTick > microtasks > macrotasks.
-
-5. **Les chaînes `.then()` s'entrelacent** : seul le premier `.then()` est dans la file. Les suivants sont ajoutés quand le précédent se résout, permettant l'entrelacement avec d'autres chaînes.
-
-6. **Le constructeur `new Promise(fn)` est synchrone**. Seul le callback `.then()` est asynchrone (microtâche).
-
-7. **`queueMicrotask` est préférable** à `Promise.resolve().then()` pour planifier une microtâche : plus performant, sémantique plus claire, gestion d'erreurs différente.
-
-8. **La famine est un danger réel** : des microtâches récursives empêchent toute macrotâche de s'exécuter. `process.nextTick` récursif affame même les microtâches.
-
-9. **`async/await`** : tout le code avant le premier `await` est synchrone. La reprise après `await` est une microtâche. Attention aux ticks supplémentaires avec les thenables.
-
-10. **Pour debugger l'ordre** : dessinez la file de microtâches à chaque étape et simulez le vidage manuellement. C'est la seule méthode fiable.
-
----
-
----
-
-## Si tu es perdu
-
-Si les puzzles te semblent impossibles, retiens juste ces 5 règles :
-
-1. **Le code synchrone s'exécute toujours en premier** — tout ce qui n'est pas dans un callback s'exécute immédiatement.
-2. **`process.nextTick` passe avant tout le reste** — c'est le super-VIP de la file d'attente.
-3. **Les microtasks passent ensuite** — `Promise.then()`, `queueMicrotask()`, et les `.then()` ajoutés par `await`.
-4. **Les macrotasks passent en dernier** — `setTimeout`, `setInterval`, `setImmediate`.
-5. **Les microtasks sont drainées ENTIEREMENT** — si une microtask en ajoute une autre, elle s'exécute aussi avant la prochaine macrotask.
-
-L'ordre est : **synchrone -> nextTick -> microtasks -> macrotasks**. Si tu retiens ça, tu peux résoudre 80% des puzzles.
-
----
-
-## Pour aller plus loin
-
-- [HTML Standard — Microtask queuing](https://html.spec.whatwg.org/multipage/webappapis.html#microtask-queuing)
-- [ECMA-262 — Jobs and Host Operations to Enqueue Jobs](https://tc39.es/ecma262/#sec-jobs)
-- [MDN — queueMicrotask()](https://developer.mozilla.org/fr/docs/Web/API/queueMicrotask)
-- [MDN — Using microtasks in JavaScript](https://developer.mozilla.org/en-US/docs/Web/API/HTML_DOM_API/Microtask_guide)
-- [V8 Blog — Fast async](https://v8.dev/blog/fast-async)
-- [Node.js Docs — process.nextTick()](https://nodejs.org/api/process.html#processnexttickcallback-args)
-- [Jake Archibald — Tasks, microtasks, queues and schedules](https://jakearchibald.com/2015/tasks-microtasks-queues-and-schedules/)
-- [TC39 — Promise Objects](https://tc39.es/ecma262/#sec-promise-objects)
-
----
-
-## Défi
-
-Prédisez l'ordre exact de sortie du code suivant (Node.js v18+) :
-
-```typescript
-async function one(): Promise<void> {
-  console.log('1');
-  await two();
-  console.log('2');
-}
-
-async function two(): Promise<void> {
-  console.log('3');
-}
-
-console.log('A');
-
-setTimeout(() => {
-  console.log('B');
-  process.nextTick(() => console.log('C'));
-  Promise.resolve().then(() => console.log('D'));
-}, 0);
-
-one();
-
-process.nextTick(() => {
-  console.log('E');
-  queueMicrotask(() => console.log('F'));
-});
-
-new Promise((resolve) => {
-  console.log('G');
-  resolve();
-}).then(() => {
-  console.log('H');
-}).then(() => {
-  console.log('I');
-});
-
-console.log('J');
-```
-
-<details>
-<summary>Réponse</summary>
-
-**Sortie : `A, 1, 3, G, J, E, 2, H, F, I, B, C, D`**
 
 Raisonnement pas à pas :
+1. **Synchrone** : `A`, `B`. La pile programme un `setTimeout` (macrotask), un `nextTick`, un `.then`.
+2. Pile vide → **nextTick queue d'abord** : `NT`.
+3. Puis **microtask queue** : `P`.
+4. Phase timers → la macrotask `setTimeout` : `T`. Elle planifie un `nextTick` et un `.then`.
+5. **Juste après ce callback**, Node vide nextTick puis microtasks : `T-nextTick`, puis `T-promise`.
 
-**Code synchrone** (pile d'appels) :
-- `A` : console.log direct
-- `1` : dans `one()`, avant le `await`
-- `3` : dans `two()`, appelé par `one()` avant la suspension
-- `G` : le constructeur `new Promise(fn)` est synchrone
-- `J` : dernier console.log synchrone
+**Sortie : `A, B, NT, P, T, T-nextTick, T-promise`**
 
-**Files après le code synchrone** :
-- nextTick queue : `[E]`
-- microtask queue : `[reprise-two->one(=2), H]`
-- macrotask queue : `[setTimeout(B)]`
-
-**Vidage nextTick** :
-- `E` : exécution du nextTick
-  - crée `queueMicrotask(F)` -> ajouté à la file micro
-
-**Vidage microtâches** :
-- File : `[reprise(=2), H, F]`
-- `2` : reprise après `await two()` dans `one()`
-- `H` : premier `.then()` de la Promise G -> ajoute `I` en file
-- `F` : `queueMicrotask` créé par E
-- File : `[I]`
-- `I` : deuxième `.then()` chaîné
-
-**Macrotâches** :
-- `B` : exécution du `setTimeout`
-  - crée `nextTick(C)` et `Promise.then(D)`
-  - Vidage nextTick : `C`
-  - Vidage microtâches : `D`
-
-</details>
+Note : ici tout est déterministe parce qu'il n'y a qu'une seule macrotask. Le seul cas non déterministe classique — `setTimeout(…,0)` vs `setImmediate` au top-level — est traité en Piège #4.
 
 ---
 
-<!-- parcours-recommande -->
+## 4. Pièges & misconceptions
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 04 microtasks](../screencasts/screencast-04-microtasks.md)
-2. **Lab** : [lab-04-microtask-macrotask](../labs/lab-04-microtask-macrotask/README)
-3. **Quiz** : [quiz 04 microtasks](../quizzes/quiz-04-microtasks.html)
-:::
+### PIÈGE #1 — Croire que `process.nextTick` est une microtask Promise
+
+```ts
+// ❌ Attente : nextTick et Promise se mélangent dans l'ordre d'écriture
+Promise.resolve().then(() => console.log('promise'));
+process.nextTick(() => console.log('nextTick'));
+// Réalité de la sortie :
+// nextTick   ← file dédiée, TOUJOURS avant les microtasks Promise
+// promise
+```
+
+**Correct :** ordre Node = synchrone → **nextTick** → microtasks Promise → macrotasks. `nextTick` n'est ni une macrotask, ni une microtask Promise : c'est une file à part, plus prioritaire.
+
+### PIÈGE #2 — `res.json()` synchrone avant les logs en microtask
+
+```ts
+// ❌ Le log en .then part APRÈS la réponse
+Promise.resolve().then(() => auditLog.record(/* ... */)); // microtask
+res.json({ ok: true });                                    // synchrone → maintenant
+// La réponse est envoyée avant que auditLog ait tourné.
+
+// ✅ await le log si son achèvement doit précéder la réponse
+await auditLog.record(/* ... */); // la microtask de reprise est résolue avant la ligne suivante
+res.json({ ok: true });
+```
+
+**Correct :** tout code synchrone (dont `res.json`) s'exécute avant la première microtask. Si l'ordre compte, `await` la microtask — ne la « fire-and-forget » pas.
+
+### PIÈGE #3 — Croire que les chaînes `.then` se vident d'un bloc
+
+```ts
+// ❌ Attente : 1, 2, 3, A, B, C
+Promise.resolve().then(() => console.log(1)).then(() => console.log(2)).then(() => console.log(3));
+Promise.resolve().then(() => console.log('A')).then(() => console.log('B')).then(() => console.log('C'));
+// Réalité : 1, A, 2, B, 3, C
+```
+
+**Correct :** seul le premier `.then` de chaque chaîne est en file au départ ; le suivant n'y entre qu'à la résolution du précédent. Les chaînes s'entrelacent.
+
+### PIÈGE #4 — Attendre un ordre déterministe entre `setTimeout(0)` et `setImmediate` au top-level
+
+```ts
+// ❌ Au top-level, l'ordre n'est PAS garanti
+setTimeout(() => console.log('timeout'), 0);
+setImmediate(() => console.log('immediate'));
+// Sortie : parfois timeout puis immediate, parfois l'inverse.
+
+// ✅ Dans un callback I/O, l'ordre est garanti : immediate AVANT timeout
+const fs = require('node:fs');
+fs.readFile(__filename, () => {           // on est en phase poll
+  setTimeout(() => console.log('timeout'), 0);
+  setImmediate(() => console.log('immediate'));
+});
+// Sortie garantie : immediate, timeout
+```
+
+**Correct :** la phase check (`setImmediate`) suit immédiatement la phase poll ; les timers attendent le tour suivant. D'où l'ordre stable seulement à l'intérieur de l'I/O.
+
+### PIÈGE #5 — Croire que le constructeur `new Promise(fn)` est asynchrone
+
+```ts
+// ❌ Attente : 'exécuteur' après 'après'
+new Promise((resolve) => {
+  console.log('exécuteur'); // SYNCHRONE
+  resolve();
+}).then(() => console.log('then'));
+console.log('après');
+// Réalité : exécuteur, après, then
+```
+
+**Correct :** l'exécuteur passé à `new Promise` s'exécute **immédiatement, de façon synchrone**. Seuls les callbacks `.then/.catch/.finally` sont des microtasks.
+
+---
+
+## 5. Ancrage TribuZen
+
+Dans l'API TribuZen (backend Node), l'ordonnancement des files n'est pas une curiosité académique — il décide de la cohérence des données.
+
+**Handler `postMessage` (`tribuzen/src/api/postMessage.ts`)** — le cas concret du module. Règle appliquée : tout ce qui doit être garanti avant la réponse (audit log, invalidation de cache critique) est **`await`é** ; seul le vraiment optionnel (métriques best-effort) part en `.then` fire-and-forget. On ne compte jamais sur une microtask non attendue pour finir avant `res.json`.
+
+**Middleware de logs (`tribuzen/src/middleware/auditLog.ts`)** — on utilise `queueMicrotask` (et non `process.nextTick`) pour différer l'écriture des logs non bloquants : sémantique explicite, et pas de risque d'affamer les microtasks Promise du reste de la requête, ce que ferait un `nextTick` récursif.
+
+**Worker de purge de cache (`tribuzen/src/jobs/invalidate.ts`)** — les invalidations de cache passent par `setImmediate` (phase check) plutôt que par une microtask, pour **céder la main** à l'event loop entre deux lots. Objectif : ne pas geler les I/O réseau des autres requêtes. C'est la parade directe à la starvation vue en 2.7 — on planifie du travail en macrotask pour laisser respirer les phases poll/timers.
+
+Fichiers cibles dans `smaurier/tribuzen` :
+```
+tribuzen/src/
+  api/postMessage.ts          # await des microtasks critiques avant res.json
+  middleware/auditLog.ts      # queueMicrotask pour logs différés non bloquants
+  jobs/invalidate.ts          # setImmediate pour céder l'event loop (anti-starvation)
+```
+
+---
+
+## 6. Points clés
+
+1. Après CHAQUE macrotask, la microtask queue est vidée **entièrement** (`while`, pas `if`) — les microtasks imbriquées sont traitées dans le même vidage.
+2. Ordre Node : synchrone → `process.nextTick` → microtasks Promise → macrotasks. `nextTick` est une file dédiée, prioritaire sur les Promises.
+3. Les phases Node dans l'ordre : timers → pending → poll → check (`setImmediate`) → close ; nextTick + microtasks se vident entre chaque callback.
+4. `setTimeout(0)` vs `setImmediate` : non déterministe au top-level, mais `setImmediate` avant `setTimeout` à l'intérieur d'un callback I/O.
+5. Navigateur : 1 macrotask → toutes microtasks → rendu. Pas de `nextTick`, pas de `setImmediate`.
+6. Les chaînes `.then` s'entrelacent : seul le premier maillon est en file au départ.
+7. Le constructeur `new Promise(fn)` est synchrone ; seuls les `.then/.catch/.finally` sont des microtasks.
+8. Une boucle de microtasks (ou de `nextTick`) affame les macrotasks / l'I/O ; pour céder la main, planifie en macrotask (`setImmediate`, `setTimeout`).
+
+---
+
+## 7. Seeds Anki
+
+```
+Quand la microtask queue est-elle vidée, et jusqu'où ?|Après chaque macrotask (et, en Node, entre chaque callback), elle est vidée ENTIÈREMENT — c'est un while : les microtasks créées pendant le vidage sont traitées dans le même vidage, avant toute macrotask.
+Où se place process.nextTick dans l'ordre d'exécution Node ?|Dans sa propre file, drainée APRÈS le code synchrone mais AVANT la microtask queue Promise. Ordre : synchrone → nextTick → microtasks Promise → macrotasks.
+Quelles sont les phases de l'event loop Node, dans l'ordre ?|timers (setTimeout/setInterval) → pending callbacks → poll (I/O) → check (setImmediate) → close callbacks. nextTick + microtasks se vident entre chaque callback.
+setTimeout(fn,0) vs setImmediate : lequel s'exécute en premier ?|Au top-level : non déterministe. À l'intérieur d'un callback I/O (phase poll) : setImmediate d'abord (phase check suit poll), setTimeout attend le tour suivant.
+En quoi l'ordonnancement du navigateur diffère-t-il de Node ?|Navigateur : 1 macrotask → toutes les microtasks → rendu ; pas de process.nextTick ni setImmediate. Node : phases libuv, pas de rendu, nextTick queue prioritaire dédiée.
+Pourquoi un .then de log peut-il s'exécuter après res.json() ?|res.json() est synchrone : tout le code synchrone tourne avant la première microtask. Le .then fire-and-forget n'est vidé qu'une fois la pile vide, donc après le handler. Il faut l'await si l'ordre compte.
+Les chaînes .then() se vident-elles d'un bloc ?|Non. Seul le premier .then de chaque chaîne est en file au départ ; le maillon suivant n'y entre qu'à la résolution du précédent, d'où l'entrelacement entre chaînes parallèles.
+Comment une microtask peut-elle affamer les macrotasks, et comment l'éviter ?|Une microtask qui se re-planifie en boucle (queueMicrotask/nextTick récursif) bloque le vidage : setTimeout/I/O ne tournent jamais. Parade : planifier le travail en macrotask (setImmediate/setTimeout) pour céder l'event loop.
+```
+
+---
+
+## Pont vers le lab
+
+> Lab associé : `01-js-runtime/labs/lab-04-microtask-macrotask/README.md`. Prédire à la main l'ordre exact d'un mélange `setTimeout`/`Promise`/`nextTick`/`setImmediate`, puis vérifier en exécutant sous Node — corrigé pas à pas fourni.

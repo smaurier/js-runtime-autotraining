@@ -1,1189 +1,426 @@
-# Module 12 — Performance Patterns
-
-> **Objectif** : Acquérir la méthodologie et les outils pour identifier, mesurer et corriger les goulots d'étranglement de performance dans un programme JavaScript, en comprenant les mécanismes internes du moteur V8 qui sous-tendent chaque optimisation.
-
-> **Difficulté** : ⭐⭐⭐ (Avancé) — Très pratique, moins théorique.
-
+---
+titre: Performance patterns — mesurer d'abord, optimiser ensuite
+cours: 01-js-runtime
+notions: [profiling avant optimisation, benchmark correct (warm-up JIT, dead-code elimination, performance.now), Map vs objet, Set, typed arrays, éviter les allocations en hot path, churn GC, packed vs holey arrays, string building, megamorphic sites]
+outcomes: [profiler un programme Node avant d'optimiser, écrire un micro-benchmark fiable, choisir la structure de données adaptée à un hot path, supprimer les allocations qui pressurisent le GC]
+prerequis: [11-hidden-classes-inline-caching]
+next: 13-scheduling-concurrence
+libs: []
+tribuzen: "profilage d'un endpoint chaud de l'API TribuZen — hot path, typed array et Map pour supprimer le churn GC"
+last-reviewed: 2026-07
 ---
 
-## Prérequis
+# Performance patterns — mesurer d'abord, optimiser ensuite
 
-- Module 09 — V8 Engine Architecture (pipeline de compilation, TurboFan, déoptimisations)
-- Module 11 — Hidden Classes & Inline Caching (classes cachées, transitions, polymorphisme)
-- Module 07 — Garbage Collector (allocation, GC générationnel, pression mémoire)
-- Module 03 — Event Loop (boucle d'événements, macrotâches, microtâches)
-- Connaissance pratique de Chrome DevTools et de Node.js CLI
+> **Outcomes — tu sauras FAIRE :** profiler un programme Node avant de toucher au code, écrire un micro-benchmark qui ne ment pas (warm-up JIT, anti dead-code elimination), choisir la structure de données adaptée à un hot path, et supprimer les allocations qui pressurisent le GC.
+> **Difficulté :** :star::star::star:
 
----
+## 1. Cas concret d'abord
 
-## Théorie
+L'endpoint `GET /families/:id/stats` de l'API TribuZen agrège les scores de bien-être de tous les membres d'une famille. En prod il tient 120 ms p95, et le dashboard des familles nombreuses rame. Un collègue a « optimisé au feeling » en remplaçant un `.map()` par une boucle `for`. Aucun gain. Voici le handler :
 
-> **Analogie pour débuter** : Le profiling, c'est comme un médecin qui fait un bilan de santé. On ne prescrit pas de traitement sans diagnostic. Mesurer d'abord, optimiser ensuite.
-
-### 1. Le mindset performance : mesurer d'abord, optimiser ensuite
-
-L'erreur la plus courante en optimisation est de deviner ou se trouve le problème.
-Le cerveau humain est un très mauvais profileur.
-
-```
-  Workflow correct
-  ================
-
-  1. Reproduire le scénario lent
-          |
-          v
-  2. MESURER avec un profiler
-          |
-          v
-  3. Identifier le hotspot (>= 80% du temps)
-          |
-          v
-  4. Comprendre POURQUOI c'est lent (V8 internals)
-          |
-          v
-  5. Appliquer UNE correction ciblée
-          |
-          v
-  6. MESURER à nouveau  -->  amélioration ?
-          |                        |
-          | non                    | oui
-          v                        v
-  Revenir à l'étape 3         Documenter & commiter
-```
-
-**Règle d'or** : ne jamais optimiser sans preuve mesurable. Le code optimisé
-est souvent plus difficile à lire — il doit donc apporter un gain réel.
-
-**Loi d'Amdahl** : si une fonction représente 5% du temps total, l'optimiser
-de 10x ne donne qu'un gain global de ~4.7%. Concentrez-vous sur les 80%.
-
-```
-  Loi d'Amdahl — Gain maximal
-  =============================
-
-  Temps avant :  [===== 20% hotspot =====][======= 80% reste =======]
-
-  Si on optimise le hotspot de 10x :
-  Temps après :  [2%][============== 80% reste ==============]
-
-  Gain global : 100 / (80 + 20/10) = 100/82 = 1.22x  (seulement 22%)
-
-  Si le hotspot est 80% du temps et optimisé 10x :
-  Temps après :  [8%][==== 20% reste ====]
-
-  Gain global : 100 / (20 + 80/10) = 100/28 = 3.57x  (significatif !)
-```
-
-### 2. Outils de profiling V8 (Node.js CLI)
-
-#### 2.1. `--prof` et `--prof-process`
-
-V8 peut générer un fichier de profiling brut (tick-based sampling) :
-
-```bash
-# Étape 1 : générer le fichier de ticks
-node --prof app.js
-
-# Cela crée un fichier isolate-0x...-v8.log
-
-# Étape 2 : transformer en rapport lisible
-node --prof-process isolate-0x*.log > profile.txt
-```
-
-Le rapport contient :
-- **Statistical profiling result** : répartition du temps CPU
-- **[JavaScript]** : fonctions JS avec pourcentage de ticks
-- **[C++]** : fonctions internes V8 (GC, compilation, etc.)
-- **[Summary]** : répartition globale JS / C++ / GC
-
-```
-  Exemple de sortie --prof-process
-  =================================
-
-  [JavaScript]:
-   ticks  total  nonlib   name
-   1523   45.2%   52.1%  LazyCompile: processData app.js:42
-    892   26.5%   30.5%  LazyCompile: sortItems app.js:78
-    312    9.3%   10.7%  LazyCompile: formatOutput app.js:115
-
-  [C++]:
-   ticks  total  nonlib   name
-    234    6.9%    ---    v8::internal::Runtime_StringAdd
-    156    4.6%    ---    v8::internal::Heap::AllocateRaw
-
-  [Summary]:
-   ticks  total
-   2727   81.0%  JavaScript
-    512   15.2%  C++
-    128    3.8%  GC
-```
-
-#### 2.2. `--cpu-prof` et `--heap-prof`
-
-```bash
-# Profiling CPU (génère un .cpuprofile chargeable dans DevTools)
-node --cpu-prof --cpu-prof-interval=100 app.js
-
-# Profiling mémoire (génère un .heapprofile)
-node --heap-prof app.js
-```
-
-Ces fichiers s'ouvrent directement dans l'onglet **Performance** ou **Memory**
-de Chrome DevTools (chrome://inspect).
-
-#### 2.3. Flags de diagnostic V8
-
-```bash
-# Tracer les déoptimisations
-node --trace-deopt app.js
-
-# Tracer les inline caches (IC)
-node --trace-ic app.js
-
-# Afficher le code optimisé généré
-node --print-opt-code app.js
-
-# Tracer le GC (fréquence, durée, type)
-node --trace-gc app.js
-
-# Exemple de sortie --trace-gc :
-# [12345:0x...]    12 ms: Scavenge 2.1 (6.0) -> 1.8 (7.0) MB, 0.8 ms
-# [12345:0x...]   234 ms: Mark-Compact 14.2 (18.0) -> 8.1 (18.0) MB, 12.3 ms
-```
-
-### 3. Chrome DevTools — Onglet Performance
-
-```
-+-------------------------------------------------------------------+
-| Chrome DevTools — Performance Tab                                 |
-+-------------------------------------------------------------------+
-|  [Record]  [Stop]  [Clear]                                        |
-|                                                                   |
-|  Timeline (ms)                                                    |
-|  0        500       1000      1500      2000                      |
-|  |---------|---------|---------|---------|                         |
-|                                                                   |
-|  === Flame Chart (top-down) ===                                   |
-|  +--[ main() ]------------------------------------------+         |
-|  |  +--[ processData() ]-------------------------+      |         |
-|  |  |  +--[ sort() ]-------+  +--[ render() ]--+ |      |         |
-|  |  |  |  +--[ cmp() ]-+  |  |                 | |      |         |
-|  |  |  |  +------------+  |  +-----------------+ |      |         |
-|  |  |  +-------------------+                      |      |         |
-|  |  +---------------------------------------------+      |         |
-|  +--------------------------------------------------------+         |
-|                                                                   |
-|  === Bottom-Up ===              === Call Tree ===                  |
-|  cmp()        45.2%             main()       100%                 |
-|  sort()       22.1%              processData() 88%                |
-|  render()     18.3%               sort()       52%                |
-|  GC           8.4%                render()     36%                |
-+-------------------------------------------------------------------+
-```
-
-**Flame Chart** : chaque barre horizontale est un appel de fonction.
-Plus la barre est large, plus la fonction a pris de temps CPU.
-Les barres empilées montrent la pile d'appels.
-
-**Bottom-Up** : trie par le temps *self* (temps passé directement dans
-la fonction, hors appels enfants). Idéal pour trouver le hotspot.
-
-**Call Tree** : montre la hiérarchie complète depuis la racine.
-Idéal pour comprendre *comment* on arrive au hotspot.
-
-### 4. Node.js `perf_hooks` et Clinic.js
-
-#### 4.1. `perf_hooks` — API de mesure intégrée
-
-```typescript
-const { performance, PerformanceObserver } = require('node:perf_hooks');
-
-// Observer pour collecter les mesures automatiquement
-const obs = new PerformanceObserver((list: PerformanceObserverEntryList) => {
-  for (const entry of list.getEntries()) {
-    console.log(`${entry.name}: ${entry.duration.toFixed(2)} ms`);
-  }
-});
-obs.observe({ entryTypes: ['measure'] });
-
-// Marquer le début et la fin d'une opération
-performance.mark('start-sort');
-data.sort((a, b) => a - b);
-performance.mark('end-sort');
-
-// Créer la mesure (calcule automatiquement la durée)
-performance.measure('tri-données', 'start-sort', 'end-sort');
-// Output: "tri-données: 142.35 ms"
-```
-
-#### 4.2. Clinic.js — Suite de diagnostic Node.js
-
-```
-+---------------------------------------------+
-|              Clinic.js Suite                 |
-+---------------------------------------------+
-| clinic doctor   | Détecte les problèmes     |
-|                 | d'event loop, I/O, GC     |
-+-----------------+---------------------------+
-| clinic flame    | Génère des flame charts   |
-|                 | (basé sur 0x)             |
-+-----------------+---------------------------+
-| clinic bubbleprof | Visualise les opérations|
-|                 | asynchrones               |
-+-----------------+---------------------------+
-| clinic heapprofiler | Analyse mémoire       |
-+-----------------+---------------------------+
-```
-
-```bash
-# Installation
-npm install -g clinic
-
-# Diagnostic global (event loop delay, CPU, mémoire)
-npx clinic doctor -- node app.js
-
-# Flame chart interactif
-npx clinic flame -- node app.js
-
-# Visualisation des opérations async
-npx clinic bubbleprof -- node app.js
-```
-
-Clinic Doctor génère un rapport HTML avec des recommandations :
-- Event loop delay > 20ms ? Probable calcul CPU bloquant.
-- Mémoire qui croît linéairement ? Probable fuite mémoire.
-- GC fréquent (>10% du temps) ? Trop d'allocations éphémères.
-
-### 5. Anti-patterns de performance
-
-#### 5.1. Accès aux propriétés mégamorphiques
-
-Quand un site d'accès voit trop de formes d'objets différentes (>4 en général),
-V8 abandonne le cache inline et passe en mode **mégamorphique** (lookup dans
-la table de hachage à chaque accès).
-
-```
-  Évolution de l'Inline Cache (IC)
-  ==================================
-
-  1 shape    =>  MONOMORPHIC    (1 vérification, accès direct)
-  2-4 shapes =>  POLYMORPHIC    (chaîne de if/else, encore rapide)
-  5+ shapes  =>  MEGAMORPHIC    (hash table lookup, LENT)
-
-  Coût relatif :
-  MONO:  |==|                          ~1x
-  POLY:  |=====|                       ~2-3x
-  MEGA:  |===================|         ~10-100x
-```
-
-```typescript
-// --- MAUVAIS : mégamorphique ---
-function getX(obj: { x: number; [key: string]: unknown }): number {
-  return obj.x; // ce site voit des dizaines de shapes différentes
-}
-
-getX({ x: 1 });
-getX({ x: 1, y: 2 });
-getX({ a: 0, x: 1 });
-getX({ x: 1, y: 2, z: 3 });
-getX({ w: 0, x: 1 });
-// V8 : "trop de shapes => megamorphic IC"
-
-// --- BON : monomorphique ---
-class Point {
-  x: number;
-  y: number;
-  constructor(x: number, y: number) {
-    this.x = x;
-    this.y = y;
-  }
-}
-
-function getX(point: Point): number {
-  return point.x; // toujours la même hidden class
-}
-
-const p1 = new Point(1, 2);
-const p2 = new Point(3, 4);
-getX(p1); // monomorphic IC
-getX(p2); // même shape => cache hit
-```
-
-#### 5.2. Hidden class thrashing
-
-```typescript
-// --- MAUVAIS : ordre d'initialisation incohérent ---
-function createUser(name: string, age: number): { name: string; age: number } {
-  const obj = {};
-  if (age > 18) {
-    obj.age = age;    // propriété 'age' d'abord
-    obj.name = name;  // puis 'name'
-  } else {
-    obj.name = name;  // propriété 'name' d'abord
-    obj.age = age;    // puis 'age'
-  }
-  return obj;
-  // Résultat : DEUX hidden classes différentes
-  // HC1: {} -> {age} -> {age, name}
-  // HC2: {} -> {name} -> {name, age}
-}
-
-// --- BON : initialisation uniforme ---
-function createUser(name: string, age: number): { name: string; age: number } {
-  return { name, age }; // toujours le même ordre => une seule HC
-}
-```
-
-```
-  Arbre de transitions des Hidden Classes
-  ==========================================
-
-  Version MAUVAISE (2 chemins) :
-
-       HC_0 {}
-      /         \
-  +age          +name
-    |               |
-  HC_1 {age}    HC_2 {name}
-    |               |
-  +name          +age
-    |               |
-  HC_3 {age,name} HC_4 {name,age}   <-- 2 HC différentes !
-
-  Version BONNE (1 seul chemin) :
-
-       HC_0 {}
-         |
-       {name, age}  (littéral objet)
-         |
-       HC_1 {name, age}              <-- 1 seule HC pour tous
-```
-
-#### 5.3. Allocation excessive dans les boucles chaudes
-
-```typescript
-// --- MAUVAIS : allocation dans la boucle ---
-function processPixels(pixels: number[]): void {
-  for (let i = 0; i < pixels.length; i++) {
-    const color = { r: 0, g: 0, b: 0 }; // nouvel objet à chaque itération !
-    color.r = pixels[i] & 0xFF;
-    color.g = (pixels[i] >> 8) & 0xFF;
-    color.b = (pixels[i] >> 16) & 0xFF;
-    applyFilter(color);
-  }
-  // 1 million de pixels => 1 million d'objets éphémères => pression GC
-}
-
-// --- BON : réutilisation d'objet ---
-function processPixels(pixels: number[]): void {
-  const color = { r: 0, g: 0, b: 0 }; // un seul objet, réutilisé
-  for (let i = 0; i < pixels.length; i++) {
-    color.r = pixels[i] & 0xFF;
-    color.g = (pixels[i] >> 8) & 0xFF;
-    color.b = (pixels[i] >> 16) & 0xFF;
-    applyFilter(color);
-  }
-}
-```
-
-```
-  Impact GC : allocation dans hot loop
-  ======================================
-
-  1M objets éphémères (24 bytes chacun) = 24 Mo d'allocations
-
-  Young Generation (semi-space) :
-  +--[plein]--+--[vide]--+
-  | obj obj   |          |   Scavenge déclenché tous les ~4 Mo
-  | obj obj   |          |   => ~6 Scavenges pendant la boucle
-  +-----------+----------+   => 6 pauses GC de 0.5-2ms chacune
-
-  Avec réutilisation : 1 objet de 24 bytes
-  => 0 Scavenge supplémentaire
-```
-
-#### 5.4. Concaténation de chaînes dans les boucles
-
-```typescript
-// --- MAUVAIS : concaténation O(n^2) en mémoire ---
-function buildCSV(rows: string[][]): string {
+```ts
+// families.service.ts — AVANT
+function computeFamilyStats(readings: Reading[]): FamilyStats {
   let csv = '';
-  for (const row of rows) {
-    csv += row.join(',') + '\n'; // chaque += peut copier tout le contenu
-  }
-  return csv;
-}
-// Avec 100 000 lignes : copies intermédiaires massives
-
-// --- BON : array.join() O(n) ---
-function buildCSV(rows: string[][]): string {
-  const lines = new Array(rows.length);
-  for (let i = 0; i < rows.length; i++) {
-    lines[i] = rows[i].join(',');
-  }
-  return lines.join('\n');
-}
-```
-
-> **Note V8** : V8 optimise la concaténation avec des *ConsStrings*
-> (arbres de chaînes à évaluation paresseuse). Mais au-delà de quelques
-> centaines de concaténations, le coût de *flattening* (linéarisation
-> de l'arbre en une vraie chaîne) devient prohibitif.
-
-```
-  ConsString (représentation interne V8)
-  ========================================
-
-  "hello" + " " + "world" + "!"
-
-  Représentation en mémoire (arbre) :
-           ConsString
-          /          \
-     ConsString      "!"
-    /         \
-  ConsString  "world"
-  /        \
-"hello"   " "
-
-  Quand on accède à str[i] ou str.indexOf(), V8 doit "flattenir"
-  l'arbre en une chaîne contiguë => O(n) à chaque flattening.
-```
-
-#### 5.5. `JSON.parse`/`JSON.stringify` dans les chemins chauds
-
-```typescript
-// --- MAUVAIS : deep clone par JSON round-trip ---
-function processItem(template: Record<string, unknown>): void {
-  for (let i = 0; i < 100_000; i++) {
-    const item = JSON.parse(JSON.stringify(template)); // TRÈS coûteux
-    item.id = i;
-    results.push(item);
-  }
-}
-// JSON.stringify : parcours récursif + sérialisation texte
-// JSON.parse : tokenisation + construction d'objets
-// Coût : O(n) par appel, DEUX FOIS
-
-// --- BON : spread (shallow clone) ---
-function processItem(template) {
-  for (let i = 0; i < 100_000; i++) {
-    const item = { ...template, id: i }; // 10-50x plus rapide
-    results.push(item);
-  }
-}
-
-// --- BON : structuredClone (deep clone natif, si nécessaire) ---
-function processItem(template) {
-  for (let i = 0; i < 100_000; i++) {
-    const item = structuredClone(template); // 2-5x plus rapide que JSON
-    item.id = i;
-    results.push(item);
-  }
-}
-```
-
-#### 5.6. I/O synchrone dans la boucle d'événements Node.js
-
-```typescript
-// --- MAUVAIS : bloque l'event loop ---
-const fs = require('node:fs');
-app.get('/config', (req, res) => {
-  const data = fs.readFileSync('/etc/app/config.json', 'utf8'); // SYNC !
-  res.json(JSON.parse(data));
-});
-// Chaque requête bloque le thread principal pendant le I/O disque
-
-// --- BON : asynchrone + cache ---
-const fs = require('node:fs/promises');
-let configCache = null;
-
-app.get('/config', async (req, res) => {
-  if (!configCache) {
-    const data = await fs.readFile('/etc/app/config.json', 'utf8');
-    configCache = JSON.parse(data);
-  }
-  res.json(configCache);
-});
-```
-
-### 6. Object pooling et réutilisation d'objets
-
-Le pattern **object pool** pré-alloue un ensemble d'objets et les recycle
-au lieu de les laisser au garbage collector.
-
-```
-  Object Pool — Cycle de vie
-  ============================
-
-  Initialisation :
-  +-------+-------+-------+-------+-------+
-  | obj_0 | obj_1 | obj_2 | obj_3 | obj_4 |   Pool (pré-alloué)
-  | libre | libre | libre | libre | libre |   size = 5
-  +-------+-------+-------+-------+-------+
-
-  Après acquire() x3 :
-  +-------+-------+-------+-------+-------+
-  |       |       |       | obj_3 | obj_4 |   Pool restant
-  |       |       |       | libre | libre |   size = 2
-  +-------+-------+-------+-------+-------+
-   obj_0   obj_1   obj_2
-   (utilisés par le code client)
-
-  Après release(obj_1) :
-  +-------+-------+-------+-------+-------+
-  |       |       | obj_1 | obj_3 | obj_4 |   Pool restant
-  |       |       | reset | libre | libre |   size = 3
-  +-------+-------+-------+-------+-------+
-```
-
-```typescript
-class ObjectPool<T> {
-  private _factory: () => T;
-  private _reset: (obj: T) => void;
-  private _pool: T[];
-  private _size: number;
-
-  constructor(factory: () => T, reset: (obj: T) => void, initialSize: number = 100) {
-    this._factory = factory;
-    this._reset = reset;
-    this._pool = new Array(initialSize);
-    this._size = initialSize;
-    for (let i = 0; i < initialSize; i++) {
-      this._pool[i] = factory();
-    }
-  }
-
-  acquire(): T {
-    if (this._size > 0) {
-      return this._pool[--this._size];
-    }
-    // Pool vide : fallback allocation (éviter de crasher)
-    return this._factory();
-  }
-
-  release(obj: T): void {
-    this._reset(obj);
-    if (this._size < this._pool.length) {
-      this._pool[this._size++] = obj;
-    }
-    // Si le pool est plein, on laisse le GC récupérer l'objet
-  }
-
-  get available() { return this._size; }
-}
-
-// Exemple : pool de vecteurs 3D pour une simulation physique
-interface Vec3 { x: number; y: number; z: number }
-const vecPool = new ObjectPool<Vec3>(
-  () => ({ x: 0, y: 0, z: 0 }),         // factory
-  (v) => { v.x = 0; v.y = 0; v.z = 0; }, // reset
-  1000
-);
-
-function simulate(particles: { x: number; y: number; z: number; vx: number; vy: number; vz: number }[], dt: number): void {
-  for (const p of particles) {
-    const vel = vecPool.acquire();
-    vel.x = p.vx * dt;
-    vel.y = p.vy * dt;
-    vel.z = p.vz * dt;
-    p.x += vel.x;
-    p.y += vel.y;
-    p.z += vel.z;
-    vecPool.release(vel);
-  }
-  // Zéro allocation dans la boucle => pas de pression GC
-}
-```
-
-### 7. Itération efficace : benchmarks et internals V8
-
-```
-  Coût relatif (V8, tableau dense PACKED_SMI, 10M éléments)
-  ===========================================================
-
-  Boucle              Temps relatif   Mécanisme interne
-  -----------------   -------------   ---------------------------------
-  for (i=0;i<n;i++)      1.0x        Accès direct par index compilé,
-                                       bounds check éliminé par TurboFan,
-                                       pas de frame supplémentaire
-
-  while (i < n)           1.0x        Identique au for classique après
-                                       compilation
-
-  for...of                ~1.1-1.3x   Protocole itérateur : V8 crée un
-                                       objet iterator, appelle .next()
-                                       à chaque pas. Optimisé pour les
-                                       tableaux mais léger overhead.
-
-  forEach                 ~1.5-2.5x   Appel de callback par élément :
-                                       nouveau frame de pile à chaque
-                                       itération. TurboFan peut inliner
-                                       le callback si la taille est
-                                       raisonnable.
-
-  for...in                ~5-20x      Conçu pour les clés d'objet.
-                                       Énumère les clés chaîne + remonte
-                                       la chaîne prototype.
-                                       NE JAMAIS utiliser sur les arrays.
-```
-
-> **Attention** : ces chiffres varient selon la version de V8, le type
-> d'éléments du tableau (SMI, DOUBLE, PACKED, HOLEY) et la nature du
-> travail dans la boucle. Toujours mesurer sur votre cas réel.
-
-### 8. Optimisation des tableaux
-
-#### 8.1. Tableaux pré-alloués
-
-```typescript
-// --- LENT : le tableau grandit dynamiquement ---
-const result = [];
-for (let i = 0; i < 1_000_000; i++) {
-  result.push(computeValue(i));
-  // V8 réalloue le backing store quand la capacité est atteinte
-  // Réallocations typiques : 4 -> 8 -> 16 -> 32 -> ... -> 1M
-  // Chaque réallocation copie TOUS les éléments existants
-}
-
-// --- RAPIDE : taille connue à l'avance ---
-const result = new Array(1_000_000);
-for (let i = 0; i < 1_000_000; i++) {
-  result[i] = computeValue(i); // pas de réallocation
-}
-
-// ATTENTION : new Array(n) crée un tableau HOLEY (éléments non définis).
-// V8 utilise un chemin d'accès plus lent pour les tableaux HOLEY car il
-// doit vérifier la présence de "holes" à chaque accès d'index.
-// Si la performance d'itération post-remplissage est critique, préférez :
-//   const result = Array.from({ length: 1_000_000 }, (_, i) => computeValue(i));
-// Cela crée un tableau PACKED dès le départ (pas de hole check).
-// Voir : https://v8.dev/blog/elements-kinds
-```
-
-#### 8.2. Typed Arrays pour le travail numérique
-
-```typescript
-// Typed Arrays : mémoire contiguë, pas de boxing, accès direct par offset
-const positions = new Float64Array(3 * numParticles);
-const velocities = new Float64Array(3 * numParticles);
-// Layout : [x0, y0, z0, x1, y1, z1, ...]
-
-for (let i = 0; i < numParticles; i++) {
-  const base = i * 3;
-  positions[base]     += velocities[base]     * dt; // x
-  positions[base + 1] += velocities[base + 1] * dt; // y
-  positions[base + 2] += velocities[base + 2] * dt; // z
-}
-// V8/TurboFan génère du code machine quasi-natif pour ce pattern :
-// - Accès par offset fixe (pas de lookup de propriété)
-// - Pas de type check (Float64 garanti)
-// - Cache CPU friendly (données contiguës en mémoire)
-```
-
-```
-  Mémoire : Array classique vs TypedArray
-  =========================================
-
-  Array classique (PACKED_DOUBLE) :
-  +---------+---------+---------+---------+
-  | Header  | Elem[0] | Elem[1] | Elem[2] |   Chaque élément peut
-  | (map,   | 64-bit  | 64-bit  | 64-bit  |   être n'importe quel
-  |  length,| double  | double  | double  |   type JS (boxed si
-  |  elems) |         |         |         |   nécessaire)
-  +---------+---------+---------+---------+
-
-  Float64Array :
-  +--------+-----------------------------+
-  | Header | ArrayBuffer (mémoire brute) |
-  +--------+-----------------------------+
-           | 64-bit | 64-bit | 64-bit |
-           | float  | float  | float  |
-           +--------+--------+--------+
-           Accès direct par offset mémoire
-           Pas de vérification de type par élément
-           Compatible SharedArrayBuffer (multi-thread)
-```
-
-### 9. Web Workers pour le travail CPU-intensif
-
-```
-  Thread principal              Worker Thread
-  ==================            =================
-  |                             |
-  | postMessage(data) --------> |
-  |                             | // calcul lourd
-  | (event loop libre,         | // sur thread séparé
-  |  UI réactive,              | // propre heap V8
-  |  I/O traités)              |
-  |                             |
-  | <-------- postMessage(res)  |
-  | onmessage(result)          |
-  |                             | terminate()
-```
-
-```typescript
-// main.js (navigateur)
-const worker = new Worker('heavy-compute.js');
-
-worker.postMessage({ pixels: imageData, filter: 'blur' });
-
-worker.onmessage = (e) => {
-  console.log('Résultat reçu en', e.data.duration, 'ms');
-  applyResult(e.data.output);
-};
-
-worker.onerror = (e) => {
-  console.error('Erreur Worker:', e.message);
-};
-```
-
-```typescript
-// heavy-compute.js (Worker)
-self.onmessage = (e) => {
-  const start = performance.now();
-  const output = applyFilter(e.data.pixels, e.data.filter);
-  const duration = performance.now() - start;
-  self.postMessage({ output, duration });
-};
-
-function applyFilter(pixels, type) {
-  // Travail CPU-intensif qui ne bloque PAS le thread principal
-  const result = new Uint8ClampedArray(pixels.length);
-  for (let i = 0; i < pixels.length; i += 4) {
-    const avg = (pixels[i] + pixels[i+1] + pixels[i+2]) / 3;
-    result[i] = result[i+1] = result[i+2] = avg;
-    result[i+3] = pixels[i+3]; // alpha inchangé
-  }
-  return result;
-}
-```
-
----
-
-## Démonstration
-
-### Démo 1 — Mesurer avec `performance.mark` / `performance.measure`
-
-```typescript
-// demo-perf-marks.mjs
-import { performance, PerformanceObserver } from 'node:perf_hooks';
-
-const obs = new PerformanceObserver((list) => {
-  for (const entry of list.getEntries()) {
-    console.log(`  ${entry.name}: ${entry.duration.toFixed(3)} ms`);
-  }
-});
-obs.observe({ entryTypes: ['measure'] });
-
-// --- Fonction naïve : boucle ---
-function sumNaive(n: number): number {
-  let total = 0;
-  for (let i = 0; i < n; i++) {
-    total += i;
-  }
-  return total;
-}
-
-// --- Fonction optimisée : formule de Gauss ---
-function sumGauss(n: number): number {
-  return (n * (n - 1)) / 2;
-}
-
-const N = 100_000_000;
-
-performance.mark('naive-start');
-const r1 = sumNaive(N);
-performance.mark('naive-end');
-performance.measure('sumNaive (boucle)', 'naive-start', 'naive-end');
-
-performance.mark('gauss-start');
-const r2 = sumGauss(N);
-performance.mark('gauss-end');
-performance.measure('sumGauss (formule)', 'gauss-start', 'gauss-end');
-
-console.log(`Résultats identiques : ${r1 === r2}`);
-obs.disconnect();
-```
-
-### Démo 2 — Détecter le hidden class thrashing avec `--trace-ic`
-
-```typescript
-// demo-hidden-class-thrash.mjs
-// Lancer avec : node --trace-ic demo-hidden-class-thrash.mjs 2>&1 | head -50
-
-function readName(obj: { name: string }): string {
-  return obj.name;
-}
-
-// Scénario 1 : monomorphique — même shape à chaque appel
-console.log('=== Scénario monomorphique ===');
-for (let i = 0; i < 1000; i++) {
-  readName({ name: 'Alice', age: 30 });
-}
-
-// Scénario 2 : mégamorphique — shapes variées
-console.log('=== Scénario mégamorphique ===');
-const shapes = [
-  { name: 'A' },
-  { name: 'B', x: 1 },
-  { name: 'C', x: 1, y: 2 },
-  { name: 'D', x: 1, y: 2, z: 3 },
-  { name: 'E', a: 1, b: 2, c: 3, d: 4 },
-  { q: 0, name: 'F' },
-];
-
-for (let i = 0; i < 1000; i++) {
-  readName(shapes[i % shapes.length]);
-}
-
-console.log('Vérifiez la sortie --trace-ic :');
-console.log('  MONOMORPHIC => rapide (1 check, accès direct)');
-console.log('  MEGAMORPHIC => lent (hash table lookup)');
-```
-
-### Démo 3 — Concaténation de chaînes : benchmark comparatif
-
-```typescript
-// demo-string-concat.mjs
-import { performance } from 'node:perf_hooks';
-
-const ROWS = 200_000;
-const data = Array.from({ length: ROWS }, (_, i) =>
-  [i, `item_${i}`, Math.random().toFixed(4)]
-);
-
-function benchConcatenation(data: (string | number)[][]): string {
-  let csv = '';
-  for (const row of data) {
-    csv += row.join(',') + '\n';
-  }
-  return csv;
-}
-
-function benchArrayJoin(data: (string | number)[][]): string {
-  const lines = new Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    lines[i] = data[i].join(',');
-  }
-  return lines.join('\n');
-}
-
-// Warmup (permettre à V8 de compiler les fonctions)
-benchConcatenation(data.slice(0, 100));
-benchArrayJoin(data.slice(0, 100));
-
-// Benchmark
-const t1 = performance.now();
-const r1 = benchConcatenation(data);
-const t2 = performance.now();
-const r2 = benchArrayJoin(data);
-const t3 = performance.now();
-
-console.log(`Concaténation (+=)  : ${(t2 - t1).toFixed(1)} ms`);
-console.log(`Array.join()        : ${(t3 - t2).toFixed(1)} ms`);
-console.log(`Ratio               : ${((t2 - t1) / (t3 - t2)).toFixed(2)}x plus lent`);
-console.log(`Tailles résultat    : ${r1.length} vs ${r2.length}`);
-```
-
-### Démo 4 — Object pool vs allocation libre
-
-```typescript
-// demo-object-pool.mjs
-import { performance } from 'node:perf_hooks';
-
-class VecPool {
-  pool: { x: number; y: number; z: number }[];
-  idx: number;
-  constructor(size: number) {
-    this.pool = new Array(size);
-    this.idx = size;
-    for (let i = 0; i < size; i++) {
-      this.pool[i] = { x: 0, y: 0, z: 0 };
-    }
-  }
-  acquire(): { x: number; y: number; z: number } {
-    return this.idx > 0 ? this.pool[--this.idx] : { x: 0, y: 0, z: 0 };
-  }
-  release(v: { x: number; y: number; z: number }): void {
-    v.x = 0; v.y = 0; v.z = 0;
-    this.pool[this.idx++] = v;
-  }
-}
-
-const ITERATIONS = 5_000_000;
-
-// --- Sans pool : allocation à chaque itération ---
-const t1 = performance.now();
-let sum1 = 0;
-for (let i = 0; i < ITERATIONS; i++) {
-  const v = { x: i, y: i * 2, z: i * 3 };
-  sum1 += v.x + v.y + v.z;
-}
-const t2 = performance.now();
-
-// --- Avec pool : un seul objet recyclé ---
-const pool = new VecPool(1);
-const t3 = performance.now();
-let sum2 = 0;
-for (let i = 0; i < ITERATIONS; i++) {
-  const v = pool.acquire();
-  v.x = i; v.y = i * 2; v.z = i * 3;
-  sum2 += v.x + v.y + v.z;
-  pool.release(v);
-}
-const t4 = performance.now();
-
-console.log(`Sans pool : ${(t2 - t1).toFixed(1)} ms`);
-console.log(`Avec pool : ${(t4 - t3).toFixed(1)} ms`);
-console.log(`Ratio     : ${((t2 - t1) / (t4 - t3)).toFixed(2)}x`);
-console.log(`Checksums : ${sum1 === sum2}`);
-```
-
-### Démo 5 — Profiler, identifier, optimiser (workflow complet)
-
-```typescript
-// demo-profile-optimize.mjs
-// Lancer avec : node --cpu-prof demo-profile-optimize.mjs
-// Puis ouvrir le .cpuprofile dans Chrome DevTools > Performance
-import { performance } from 'node:perf_hooks';
-
-// =============================================
-// Version LENTE (volontairement mal écrite)
-// =============================================
-function processDataSlow(records: { name: string; score: number }[]): string[] {
-  let output = '';
-  for (let i = 0; i < records.length; i++) {
-    // Anti-pattern 1 : deep clone par JSON round-trip
-    const copy = JSON.parse(JSON.stringify(records[i]));
-    // Anti-pattern 2 : concaténation de chaîne
-    output += `${copy.name}:${copy.score}\n`;
-  }
-  // Anti-pattern 3 : split + re-tri (travail redondant)
-  const lines = output.split('\n').filter(Boolean);
-  lines.sort(); // tri lexicographique (incorrect pour des scores numériques)
-  return lines;
-}
-
-// =============================================
-// Version RAPIDE (optimisée)
-// =============================================
-function processDataFast(records: { name: string; score: number }[]): string[] {
-  // Pré-allouer le tableau de sortie
-  const entries = new Array(records.length);
-  for (let i = 0; i < records.length; i++) {
-    // Pas de clone : accès direct aux propriétés nécessaires
-    entries[i] = { name: records[i].name, score: records[i].score };
-  }
-  // Tri numérique correct, en une seule passe
-  entries.sort((a, b) => a.score - b.score);
-  // Construction du résultat en une seule opération
-  return entries.map(e => `${e.name}:${e.score}`);
-}
-
-// Générer des données de test réalistes
-const N = 100_000;
-const records = Array.from({ length: N }, (_, i) => ({
-  name: `user_${String(i).padStart(6, '0')}`,
-  score: Math.floor(Math.random() * 10000),
-  email: `user${i}@example.com`,
-  metadata: { created: Date.now(), tags: ['a', 'b'] },
-}));
-
-console.log('--- Version lente ---');
-const t1 = performance.now();
-const r1 = processDataSlow(records);
-const t2 = performance.now();
-console.log(`  Durée : ${(t2 - t1).toFixed(1)} ms, lignes : ${r1.length}`);
-
-console.log('--- Version rapide ---');
-const t3 = performance.now();
-const r2 = processDataFast(records);
-const t4 = performance.now();
-console.log(`  Durée : ${(t4 - t3).toFixed(1)} ms, lignes : ${r2.length}`);
-console.log(`  Accélération : ${((t2 - t1) / (t4 - t3)).toFixed(1)}x`);
-```
-
----
-
-### V8 vs SpiderMonkey (Firefox)
-
-Les anti-patterns de performance décrits dans ce module sont **universels** — ils s'appliquent à tous les moteurs JS. En revanche, les **outils de profiling** diffèrent selon le navigateur ou le runtime.
-
-**Outils de profiling comparés :**
-
-| Fonctionnalité | Chrome / Node.js (V8) | Firefox (SpiderMonkey) |
-|---|---|---|
-| Profiling CPU | Chrome DevTools → Performance tab | **Firefox Profiler** (profiler.firefox.com) |
-| Flame charts | DevTools Performance → flame chart | Firefox Profiler → flame chart |
-| Node.js CLI profiling | `node --prof` + `--prof-process` | *(non applicable — spécifique V8/Node)* |
-| Profiling GC | `node --trace-gc` | `about:memory` + compteurs GC internes |
-| Suite de diagnostic Node | **Clinic.js** (doctor, flame, bubbleprof) | *(non applicable — spécifique V8/Node)* |
-| Inline Cache diagnostic | `node --trace-ic` | `about:config` → flags JIT internes |
-
-**Points clés :**
-
-- **Chrome DevTools Performance tab vs Firefox Profiler** : les deux offrent des flame charts, des vues bottom-up et call tree, et la possibilité d'enregistrer des traces de performance. L'interface est différente, mais les concepts sont les mêmes.
-- **`--prof` est spécifique à V8/Node.js.** Il n'existe pas d'équivalent direct pour SpiderMonkey en ligne de commande. Firefox utilise son propre **Gecko Profiler** intégré.
-- **Clinic.js est spécifique à Node.js** (et donc à V8). Il n'y a pas d'équivalent pour les applications Firefox.
-- **Les anti-patterns sont universels** : l'allocation excessive dans les boucles chaudes, la concaténation de chaînes en boucle, les IC mégamorphiques, le JSON round-trip pour le clonage — tout cela nuit à la performance dans **tous** les moteurs.
-
-> **À retenir** : apprends la méthodologie (mesurer → identifier → corriger → re-mesurer) et les anti-patterns. Les outils changent d'un navigateur à l'autre, mais la démarche est identique.
-
----
-
-## Points clés
-
-1. **Toujours mesurer avant d'optimiser** — le profiler est votre allié, l'intuition est votre ennemi.
-2. **V8 fournit des outils puissants** : `--prof`, `--cpu-prof`, `--trace-deopt`, `--trace-ic` permettent de voir exactement ce que fait le moteur.
-3. **Chrome DevTools Performance** offre trois vues complémentaires : flame chart (vue d'ensemble), bottom-up (trouver le hotspot), call tree (comprendre le contexte).
-4. **Les IC mégamorphiques** tuent la performance : gardez des formes d'objets uniformes dans les chemins chauds.
-5. **L'allocation dans les boucles chaudes** crée une pression GC massive : réutilisez les objets ou utilisez un pool.
-6. **La concaténation de chaînes** en boucle crée des ConsStrings coûteuses à linéariser : préférez `Array.join()`.
-7. **`JSON.parse(JSON.stringify())`** est le pire moyen de cloner dans un chemin chaud : préférez le spread ou `structuredClone`.
-8. **Les Typed Arrays** offrent un accès mémoire contigu et des performances proches du natif pour le travail numérique.
-9. **Le choix de boucle compte** dans les chemins chauds : `for` classique > `for...of` > `forEach` > `for...in`.
-10. **L'object pooling** élimine la pression GC dans les scénarios à haute fréquence d'allocation/désallocation.
-
----
-
----
-
-## Pour aller plus loin
-
-- [V8 Blog — Optimizing V8 Memory Consumption](https://v8.dev/blog/optimizing-v8-memory)
-- [V8 Blog — Fast Properties](https://v8.dev/blog/fast-properties)
-- [V8 Blog — Éléments Kinds in V8](https://v8.dev/blog/elements-kinds)
-- [Chrome DevTools — Analyze Runtime Performance](https://developer.chrome.com/docs/devtools/performance)
-- [Node.js — perf_hooks documentation](https://nodejs.org/api/perf_hooks.html)
-- [Clinic.js — Documentation](https://clinicjs.org/documentation/)
-- [MDN — Web Workers API](https://developer.mozilla.org/fr/docs/Web/API/Web_Workers_API)
-- [MDN — TypedArray](https://developer.mozilla.org/fr/docs/Web/JavaScript/Reference/Global_Objects/TypedArray)
-- [web.dev — Optimize Long Tasks](https://web.dev/articles/optimize-long-tasks)
-- [TC39 — ECMA-262: Array Objects](https://tc39.es/ecma262/#sec-array-objects)
-
----
-
-## Défi
-
-Considérez cette fonction qui traite un flux de données de capteurs :
-
-```typescript
-function processSensorData(readings: { ts: number; val: number; max: number; id: string }[]): { id: string; avg: number; report: string }[] {
-  const results: { timestamp: number; value: number; normalized: number; label: string }[] = [];
-  for (const reading of readings) {
-    const point = {
-      timestamp: reading.ts,
-      value: reading.val,
-      normalized: reading.val / reading.max,
-      label: `sensor-${reading.id}-${reading.ts}`,
-    };
-    results.push(point);
-  }
-
   const summary: Record<string, { sum: number; count: number }> = {};
-  for (const r of results) {
-    const key = r.label.split('-')[1]; // extraire l'id du sensor
-    if (!summary[key]) {
-      summary[key] = { sum: 0, count: 0 };
-    }
-    summary[key].sum += r.normalized;
+
+  for (const r of readings) {
+    // 1 objet éphémère par lecture — 10 000 lectures = 10 000 objets
+    const point = {
+      memberId: r.memberId,
+      normalized: r.value / r.max,
+      label: `member-${r.memberId}-${r.ts}`,
+    };
+    csv += point.label + '\n';                 // concat en boucle
+    const key = point.label.split('-')[1];     // re-parse ce qu'on vient de construire
+    (summary[key] ??= { sum: 0, count: 0 });
+    summary[key].sum += point.normalized;
     summary[key].count++;
   }
 
-  return Object.keys(summary).map(k => ({
-    id: k,
+  return Object.keys(summary).map((k) => ({
+    memberId: k,
     avg: summary[k].sum / summary[k].count,
-    report: JSON.stringify(summary[k]),
   }));
 }
 ```
 
-**Question** : Cette fonction est appelée 60 fois par seconde avec 10 000
-lectures à chaque appel. Identifiez **au moins 5 problèmes de performance**
-et proposez une version optimisée.
+**Trois questions avant de toucher quoi que ce soit :**
+1. Où passe réellement le temps ? Le GC ? La construction des chaînes ? Le `split` ? On ne sait pas — personne n'a profilé.
+2. Le collègue a changé la boucle sans mesurer : il a optimisé un truc qui ne coûtait rien.
+3. Combien d'objets et de chaînes éphémères cette boucle alloue-t-elle par requête ? (Réponse : ~30 000, à 60 req/s ça fait 1,8 M d'allocations/s.)
 
-<details>
-<summary>Réponse</summary>
+Ce module te donne la méthode : **profiler → trouver le hot path → corriger la vraie cause → re-mesurer**. Jamais l'inverse.
 
-**5 problèmes identifiés :**
+---
 
-1. **Allocation massive dans la boucle** : `point = { ... }` crée 10 000
-   objets par appel, soit 600 000 objets/seconde. Chaque objet a 4 propriétés.
-   Solution : traiter directement sans objet intermédiaire.
+## 2. Théorie complète, concise
 
-2. **Template literal + split** : `` `sensor-${id}-${ts}` `` crée 10 000
-   chaînes, puis `split('-')` crée 30 000 sous-chaînes pour retrouver l'id.
-   Solution : utiliser `reading.id` directement sans passer par une chaîne.
+### 2.1 La règle unique : mesurer avant d'optimiser
 
-3. **Double itération inutile** : on crée le tableau `results` puis on le
-   parcourt pour construire `summary`. Solution : fusionner en une seule passe.
+Le cerveau humain est un mauvais profileur. On croit toujours savoir où est le goulot ; on se trompe presque toujours. Le workflow non négociable :
 
-4. **`JSON.stringify` dans le résultat final** : sérialisation inutile si
-   les consommateurs travaillent en JavaScript. Solution : retourner les
-   objets directement.
+```
+1. Reproduire le scénario lent (charge réaliste)
+2. MESURER avec un profiler (--prof, --cpu-prof, DevTools)
+3. Identifier le hot path (la fonction qui mange ≥ 80 % du temps self)
+4. Comprendre POURQUOI (allocation ? megamorphic ? algo ?)
+5. Appliquer UNE correction ciblée
+6. RE-MESURER — gain réel ? sinon revenir à l'étape 3
+```
 
-5. **`Object.keys().map()`** : crée un tableau intermédiaire de clés string.
-   Solution : utiliser une `Map` et itérer directement avec `for...of`.
+**Loi d'Amdahl.** Optimiser une fonction qui pèse 5 % du temps, même de 10×, ne rend l'ensemble que ~4,7 % plus rapide. On ne touche qu'au hot path prouvé. Optimiser à l'aveugle, c'est ajouter de la complexité (code plus dur à lire) sans contrepartie mesurable.
 
-**Bonus** : `results.push()` cause des réallocations dynamiques du backing
-store. Avec `new Array(readings.length)` + assignation par index, on évite
-ces réallocations.
+### 2.2 Profiler un programme Node
 
-**Version optimisée :**
+Deux outils suffisent au quotidien.
 
-```typescript
-// Réutiliser le Map entre les appels (pas de réallocation)
-const summaryCache = new Map<string, { sum: number; count: number }>();
+```bash
+# 1. Tick sampling — vue "quelle fonction mange le CPU"
+node --prof app.js
+node --prof-process isolate-*.log > profile.txt
+# Lire la section [Summary] : part JS / C++ / GC.
+# GC élevé (>10 %) => trop d'allocations éphémères.
 
-function processSensorDataFast(readings: { val: number; max: number; id: string }[]): { id: string; avg: number; sum: number; count: number }[] {
-  summaryCache.clear();
+# 2. CPU profile chargeable dans Chrome DevTools
+node --cpu-prof app.js
+# Ouvrir le .cpuprofile dans DevTools > Performance.
+```
 
-  // Une seule passe, pas d'objet intermédiaire, pas de chaîne
+Dans Chrome DevTools (onglet Performance), trois vues complémentaires :
+- **Flame chart** : la pile d'appels dans le temps ; barre large = temps CPU élevé.
+- **Bottom-Up** : trié par temps *self* (hors enfants) — c'est là qu'on lit le hot path.
+- **Call Tree** : la hiérarchie depuis la racine — pour comprendre *comment* on y arrive.
+
+Flags de diagnostic ciblés : `--trace-gc` (fréquence/durée des pauses GC), `--trace-ic` (états d'inline cache, rappel module 11), `--trace-deopt` (déoptimisations).
+
+### 2.3 Écrire un micro-benchmark qui ne ment pas
+
+Un micro-benchmark naïf donne des chiffres faux. Quatre pièges à neutraliser :
+
+**a) Warm-up JIT.** Les premières exécutions tournent en interprété (Ignition), puis baseline (Sparkplug), puis optimisé (TurboFan). Si tu mesures les 100 premières itérations, tu mesures le compilateur, pas le code. Il faut *chauffer* la fonction avant de chronométrer.
+
+**b) Dead-code elimination.** Si le résultat n'est pas utilisé, TurboFan peut supprimer tout le calcul. Ton benchmark mesure alors zéro. Il faut *consommer* le résultat (l'accumuler, le logger).
+
+**c) `performance.now()` et pas `Date.now()`.** `performance.now()` est monotone et sub-milliseconde ; `Date.now()` a une résolution ms et peut reculer (NTP).
+
+**d) Constantes repliées.** `bench(() => 2 + 2)` mesure une constante calculée à la compilation. Passer des entrées variables (issues d'un tableau) pour empêcher le constant folding.
+
+```ts
+import { performance } from 'node:perf_hooks';
+
+function bench(label: string, fn: () => number, iters = 1_000_000): void {
+  // (a) warm-up : laisser TurboFan optimiser
+  for (let i = 0; i < 10_000; i++) fn();
+
+  let sink = 0;                        // (b) accumulateur anti dead-code
+  const t0 = performance.now();        // (c) horloge monotone
+  for (let i = 0; i < iters; i++) sink += fn();
+  const dt = performance.now() - t0;
+
+  if (sink === Number.MAX_VALUE) console.log('never');  // force l'usage de sink
+  console.log(`${label}: ${dt.toFixed(2)} ms`);
+}
+```
+
+> Un micro-benchmark reste local. Il te dit qu'une opération isolée est plus rapide, pas que ton appli l'est. La vérité finale, c'est le profil de bout en bout sous charge réaliste.
+
+### 2.4 Choisir la structure de données
+
+| Besoin | Bon choix | Pourquoi |
+|---|---|---|
+| Clés dynamiques / arbitraires | `Map` | Pas de hidden-class thrashing, pas de collision avec le prototype, `.size` O(1) |
+| Forme fixe et connue | objet / classe | Hidden class stable, accès par offset (module 11) |
+| Test d'appartenance | `Set` | `.has()` O(1), dé-duplication gratuite |
+| Nombres homogènes en masse | typed array (`Float64Array`…) | Mémoire contiguë, pas de boxing, cache-friendly |
+
+Le piège classique : utiliser un objet `{}` comme dictionnaire à clés dynamiques (`obj[userInput] = …`). Chaque nouvelle clé fait muter la hidden class ; les sites d'accès deviennent megamorphic. `Map` est fait exactement pour ça.
+
+```ts
+// ❌ objet comme dictionnaire dynamique — hidden class instable + risque __proto__
+const counts: Record<string, number> = {};
+for (const id of ids) counts[id] = (counts[id] ?? 0) + 1;
+
+// ✅ Map — conçu pour des clés dynamiques
+const counts = new Map<string, number>();
+for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+```
+
+### 2.5 Typed arrays pour le numérique
+
+Un `Array` classique de nombres stocke des valeurs *tagged* (chaque élément peut être n'importe quel type JS). Un `Float64Array` stocke des doubles bruts, contigus, sans header par élément.
+
+```ts
+// Layout SoA : [x0,y0,z0, x1,y1,z1, ...] — mémoire contiguë
+const positions = new Float64Array(3 * n);
+const velocities = new Float64Array(3 * n);
+
+for (let i = 0; i < n; i++) {
+  const b = i * 3;
+  positions[b]     += velocities[b]     * dt;
+  positions[b + 1] += velocities[b + 1] * dt;
+  positions[b + 2] += velocities[b + 2] * dt;
+}
+// TurboFan génère un accès par offset fixe, sans type-check par élément.
+```
+
+Bonus : un typed array est alloué une fois. Zéro pression GC pendant la boucle, contrairement à un `Array<{x,y,z}>` qui alloue N objets.
+
+### 2.6 Éviter les allocations en hot path (churn GC)
+
+Chaque objet/chaîne/tableau créé dans une boucle chaude finit dans la *young generation*. Trop d'éphémères ⇒ Scavenges fréquents ⇒ micro-pauses. C'est le **churn GC** : le coût n'est pas l'allocation, c'est la collecte.
+
+```ts
+// ❌ 1 objet par itération — 1 M pixels = 1 M objets éphémères
+for (let i = 0; i < pixels.length; i++) {
+  const color = { r: pixels[i] & 0xff, g: (pixels[i] >> 8) & 0xff, b: (pixels[i] >> 16) & 0xff };
+  applyFilter(color);
+}
+
+// ✅ 1 objet réutilisé — 0 allocation dans la boucle
+const color = { r: 0, g: 0, b: 0 };
+for (let i = 0; i < pixels.length; i++) {
+  color.r = pixels[i] & 0xff;
+  color.g = (pixels[i] >> 8) & 0xff;
+  color.b = (pixels[i] >> 16) & 0xff;
+  applyFilter(color);
+}
+```
+
+Corollaire : éviter `JSON.parse(JSON.stringify(x))` pour cloner en boucle (deux parcours + une chaîne intermédiaire). Préférer un spread `{ ...x }` (shallow) ou `structuredClone(x)` (deep natif) selon le besoin.
+
+### 2.7 Packed vs holey arrays (V8)
+
+V8 classe les tableaux par *elements kind*. Un tableau **PACKED** (dense, sans trou) a un chemin d'accès rapide ; un tableau **HOLEY** (avec des trous) force un check de trou + une remontée du prototype à chaque accès indexé. La transition PACKED → HOLEY est irréversible.
+
+```ts
+// ❌ HOLEY dès la création — new Array(n) crée n trous
+const out = new Array(1_000_000);
+for (let i = 0; i < out.length; i++) out[i] = compute(i);
+
+// ✅ PACKED — rempli d'entrée, aucun trou
+const out = Array.from({ length: 1_000_000 }, (_, i) => compute(i));
+
+// Ce qui rend un tableau HOLEY : new Array(n), arr[1000]=x sur un petit tableau,
+// [1, , 3] (trou littéral), delete arr[i].
+```
+
+### 2.8 String building
+
+Concaténer avec `+=` en boucle crée des *ConsStrings* (arbres de chaînes paresseux). Tant qu'on n'y touche pas c'est bon marché, mais tout `indexOf`, `str[i]` ou envoi réseau force un *flattening* O(n) de l'arbre. Sur des dizaines de milliers de concaténations, c'est prohibitif.
+
+```ts
+// ❌ concat en boucle — flattening répété
+let csv = '';
+for (const row of rows) csv += row.join(',') + '\n';
+
+// ✅ collecter puis join une seule fois
+const lines = new Array(rows.length);
+for (let i = 0; i < rows.length; i++) lines[i] = rows[i].join(',');
+const csv = lines.join('\n');
+```
+
+### 2.9 Éviter les sites megamorphic (rappel module 11)
+
+Un site d'accès `obj.x` qui voit ≥ 5 hidden classes différentes passe **megamorphic** : V8 abandonne l'inline cache et fait un lookup générique (~5-10× plus lent). En hot path, garde des formes d'objets uniformes : même constructeur, mêmes propriétés, même ordre, pas de `delete`, pas de changement de type. C'est le lien direct avec le module 11 — la performance d'accès aux propriétés dépend de la stabilité des Maps.
+
+---
+
+## 3. Worked examples
+
+### Exemple 1 — Profiler puis corriger l'endpoint stats (TribuZen)
+
+Reprise du cas concret, **méthode complète**.
+
+**Étape 1-2 : mesurer.** On lance le handler sous charge et on profile.
+
+```bash
+node --cpu-prof --trace-gc bench-stats.mjs
+# --trace-gc montre des Scavenges toutes les ~4 Mo, en rafale.
+# Le .cpuprofile (Bottom-Up dans DevTools) révèle le temps self :
+#   Runtime_StringAdd      31 %   <- la concat csv += ...
+#   String.split           18 %   <- le re-parse du label
+#   (GC)                    14 %   <- les 30 000 éphémères / requête
+#   computeFamilyStats      12 %
+```
+
+**Étape 3-4 : le hot path est le triptyque allocation + concat + split**, pas la boucle. Le collègue avait tort de toucher au `for`.
+
+**Étape 5 : corriger la vraie cause.**
+
+```ts
+// families.service.ts — APRÈS
+function computeFamilyStats(readings: Reading[]): FamilyStats {
+  // Map réutilisable : clés dynamiques (memberId) sans hidden-class thrashing
+  const summary = new Map<string, { sum: number; count: number }>();
+
+  // Une seule passe. Aucun objet "point", aucune chaîne, aucun split.
   for (let i = 0; i < readings.length; i++) {
     const r = readings[i];
-    const normalized = r.val / r.max;
-    const id = r.id; // accès direct, pas de template + split
-
-    let entry = summaryCache.get(id);
+    const normalized = r.value / r.max;
+    let entry = summary.get(r.memberId);          // accès direct à l'id
     if (entry === undefined) {
       entry = { sum: 0, count: 0 };
-      summaryCache.set(id, entry);
+      summary.set(r.memberId, entry);
     }
     entry.sum += normalized;
     entry.count++;
   }
 
-  // Pré-allouer le tableau de sortie
-  const output = new Array(summaryCache.size);
+  // Sortie pré-allouée et PACKED
+  const out = new Array(summary.size);
   let idx = 0;
-  for (const [id, entry] of summaryCache) {
-    output[idx++] = {
-      id,
-      avg: entry.sum / entry.count,
-      sum: entry.sum,
-      count: entry.count,
-    };
+  for (const [memberId, entry] of summary) {
+    out[idx++] = { memberId, avg: entry.sum / entry.count };
   }
-  return output;
+  return out;
 }
 ```
 
-**Gains estimés** :
-- Allocations : ~40 000 objets/appel vers ~N_capteurs objets/appel
-- Chaînes : 40 000 chaînes/appel vers 0
-- Itérations : 2 passes vers 1 passe
-- JSON.stringify : supprimé
-- `Map` au lieu d'objet plain pour les clés dynamiques (pas de hidden class thrashing)
-- Accélération attendue : **5-15x** selon le nombre de capteurs uniques
+**Étape 6 : re-mesurer.** Nouveau profil : le GC retombe sous 3 %, `StringAdd` et `split` disparaissent. p95 passe de 120 ms à ~18 ms. Gain **prouvé**, pas supposé.
 
-</details>
+Ce qui a changé et pourquoi :
+- Objet `point` éphémère supprimé → ~10 000 allocations/req en moins.
+- `label` + `split` supprimés → ~20 000 chaînes/req en moins (on avait l'`id` sous la main).
+- Objet `{}` dictionnaire remplacé par `Map` → clés dynamiques sans instabilité de hidden class.
+- Sortie via `new Array(size)` + index → tableau dense, pré-alloué.
+
+### Exemple 2 — Benchmark fiable : concat vs join
+
+On veut *prouver* que `Array.join` bat `+=` sur de gros volumes, sans se faire piéger par le JIT.
+
+```ts
+import { performance } from 'node:perf_hooks';
+
+const rows = Array.from({ length: 200_000 }, (_, i) => [i, `item_${i}`, Math.random().toFixed(4)]);
+
+function withConcat(data: (string | number)[][]): string {
+  let csv = '';
+  for (const row of data) csv += row.join(',') + '\n';
+  return csv;
+}
+function withJoin(data: (string | number)[][]): string {
+  const lines = new Array(data.length);
+  for (let i = 0; i < data.length; i++) lines[i] = data[i].join(',');
+  return lines.join('\n');
+}
+
+// Warm-up : petite tranche, plusieurs fois, pour laisser TurboFan compiler.
+for (let i = 0; i < 5; i++) { withConcat(rows.slice(0, 500)); withJoin(rows.slice(0, 500)); }
+
+// Mesure — on consomme .length pour empêcher la dead-code elimination.
+const t0 = performance.now(); const a = withConcat(rows);
+const t1 = performance.now(); const b = withJoin(rows);
+const t2 = performance.now();
+
+console.log(`concat += : ${(t1 - t0).toFixed(1)} ms`);
+console.log(`join      : ${(t2 - t1).toFixed(1)} ms`);
+console.log(`ratio     : ${((t1 - t0) / (t2 - t1)).toFixed(2)}x`);
+console.log(`sanity    : ${a.length} / ${b.length}`);  // usage réel des résultats
+```
+
+Sans le warm-up, la première fonction mesurée paierait la compilation et paraîtrait injustement lente. Sans le `console.log` des `.length`, TurboFan pourrait éliminer les appels.
 
 ---
 
-<!-- parcours-recommande -->
+## 4. Pièges & misconceptions
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 12 performance](../screencasts/screencast-12-performance.md)
-2. **Lab** : [lab-12-performance-profiling](../labs/lab-12-performance-profiling/README)
-3. **Quiz** : [quiz 12 performance](../quizzes/quiz-12-performance.html)
-:::
+### PIÈGE #1 — Optimiser sans profiler
+
+Changer une boucle `.map()` en `for`, remplacer `let` par `const`, « parce que c'est plus rapide ». Sans profil, tu ne sais pas si ça touche le hot path. **Correct :** profiler d'abord ; ne toucher qu'à la fonction qui domine le temps *self*. 95 % des micro-optimisations de syntaxe n'ont aucun effet mesurable.
+
+### PIÈGE #2 — Le micro-benchmark sans warm-up
+
+```ts
+// ❌ mesure la compilation, pas le code
+const t0 = performance.now();
+for (let i = 0; i < 100; i++) doWork();
+console.log(performance.now() - t0);
+```
+
+Les 100 premières itérations tournent en interprété/baseline. **Correct :** chauffer (des milliers d'appels) avant de chronométrer, puis mesurer sur un grand nombre d'itérations.
+
+### PIÈGE #3 — Le benchmark dont le résultat est jeté
+
+```ts
+// ❌ TurboFan supprime tout : le résultat n'est jamais lu
+for (let i = 0; i < 1e7; i++) Math.sqrt(i);
+```
+
+Le calcul est *dead code*. Ton chrono affiche ~0 et tu conclus « c'est gratuit ». **Correct :** accumuler dans un `sink` et l'utiliser après la boucle.
+
+### PIÈGE #4 — Confondre `Map` et objet
+
+Utiliser un objet `{}` pour des clés qui viennent de l'extérieur (`obj[req.query.key]`) : hidden class qui mute, sites megamorphic, et faille `__proto__`/`constructor`. Inversement, utiliser une `Map` pour une forme fixe et connue est du gaspillage (une classe est plus rapide et plus lisible). **Règle :** clés dynamiques → `Map` ; forme fixe → objet/classe.
+
+### PIÈGE #5 — Croire que `new Array(n)` optimise
+
+`new Array(n)` semble « pré-allouer », mais crée un tableau **HOLEY** (n trous) → chemin d'accès lent et irréversible. **Correct :** `Array.from({ length: n }, fn)` pour un tableau PACKED, ou remplir par index un `new Array(n)` *immédiatement et intégralement* si tu contrôles le remplissage complet.
+
+### PIÈGE #6 — Réutiliser un objet partagé qui fuit
+
+L'astuce « un seul objet réutilisé dans la boucle » (§2.6) est fausse si tu **stockes** cet objet quelque part (`results.push(color)`) : toutes les entrées pointeraient le même objet muté. La réutilisation ne vaut que si l'objet est consommé *dans* l'itération et jamais retenu. **Correct :** réutiliser pour passer à une fonction ; allouer un objet neuf si tu dois le conserver.
+
+---
+
+## 5. Ancrage TribuZen
+
+Le hot path de ce module vit dans l'API TribuZen (NestJS), côté agrégation de données famille.
+
+**`families.service.ts` → `computeFamilyStats()`** (`src/families/families.service.ts`) — l'endpoint `GET /families/:id/stats`. C'est le cas concret : profilé avec `--cpu-prof`, on découvre que le coût est l'allocation d'objets/chaînes éphémères et le churn GC, pas la boucle. Correction : `Map` pour l'agrégat à clés dynamiques (`memberId`), suppression des `label`/`split`, sortie pré-allouée PACKED.
+
+**`members` numériques** — la timeline de scores de bien-être (des milliers de points `{ ts, value }` par famille) part en `Float64Array` (`[ts0, value0, ts1, value1, …]`) pour les calculs de moyenne glissante : mémoire contiguë, zéro allocation par point, pas de pression GC.
+
+**Liste des membres** — l'array des membres d'une famille est construit dense (PACKED) via `Array.from`, jamais `new Array(n)` puis remplissage partiel, pour garder le chemin d'accès rapide lors des rendus de listes.
+
+Méthode imposée sur le projet : **tout PR de perf joint un avant/après profilé** (`--cpu-prof` ou `--trace-gc`). Pas de « je pense que c'est plus rapide » — un chiffre mesuré, ou rien.
+
+Fichiers cibles dans `smaurier/tribuzen` :
+```
+tribuzen/src/
+  families/
+    families.service.ts       # computeFamilyStats — hot path profilé
+    families.controller.ts     # GET /families/:id/stats
+  members/
+    scores.timeseries.ts       # Float64Array pour la timeline de scores
+  common/
+    bench/bench.ts             # helper de micro-benchmark (warm-up + sink)
+```
+
+---
+
+## 6. Points clés
+
+1. Ne jamais optimiser sans profil : mesurer → hot path → cause → correction → re-mesurer.
+2. Loi d'Amdahl : seul le hot path prouvé (≥ 80 % du temps self) mérite qu'on le touche.
+3. Profiler avec `--prof`/`--prof-process`, `--cpu-prof` (DevTools), `--trace-gc` ; lire la vue Bottom-Up pour le temps self.
+4. Un micro-benchmark fiable exige : warm-up JIT, anti dead-code elimination (sink consommé), `performance.now()`, entrées variables.
+5. Clés dynamiques → `Map` (hidden class stable) ; forme fixe → objet/classe ; appartenance → `Set`.
+6. Typed arrays (`Float64Array`…) pour le numérique en masse : contigu, sans boxing, sans allocation par élément.
+7. Les allocations en hot path créent le churn GC : réutiliser un objet (sans le retenir) ou passer en typed array.
+8. Tableaux : rester PACKED (`Array.from`), fuir HOLEY (`new Array(n)`, trous, `delete`) — transition irréversible.
+9. String building : collecter dans un tableau puis `join` une fois, plutôt que `+=` en boucle (flattening des ConsStrings).
+10. En hot path, garder des formes d'objets uniformes pour éviter les sites megamorphic (module 11).
+
+---
+
+## 7. Seeds Anki
+
+```
+Quelle est la première étape avant toute optimisation de performance ?|Profiler pour localiser le hot path réel (--cpu-prof, --prof, DevTools Bottom-Up). Le cerveau est un mauvais profileur : on ne touche qu'à la fonction qui domine le temps self, jamais à l'aveugle.
+Que dit la loi d'Amdahl pour l'optimisation ?|Optimiser une fonction qui pèse X % du temps total plafonne le gain global à ~X %. Optimiser un hot path à 5 % même de 10x ne gagne que ~4,7 %. On concentre l'effort sur les 80 %.
+Cite les 4 conditions d'un micro-benchmark fiable en JS.|(1) Warm-up JIT avant de chronométrer, (2) consommer le résultat pour empêcher la dead-code elimination, (3) performance.now() (monotone) pas Date.now(), (4) entrées variables pour éviter le constant folding.
+Pourquoi le warm-up est-il indispensable dans un benchmark JS ?|Les premières exécutions tournent en interprété (Ignition) puis baseline (Sparkplug) avant TurboFan. Sans warm-up on mesure le compilateur, pas le code optimisé. Il faut chauffer par milliers d'appels puis mesurer.
+Quand choisir Map plutôt qu'un objet {} ?|Pour des clés dynamiques/arbitraires : Map garde une structure stable, .size en O(1), pas de collision prototype (__proto__), pas de hidden-class thrashing ni de sites megamorphic. Un objet {} convient pour une forme fixe et connue.
+Pourquoi un typed array (Float64Array) bat un Array de nombres en hot path numérique ?|Mémoire contiguë de doubles bruts, pas de boxing ni de header par élément, accès par offset fixe compilé par TurboFan, et allocation unique donc zéro pression GC pendant la boucle.
+Qu'est-ce que le churn GC et comment l'éviter en hot path ?|C'est le coût de collecter des milliers d'objets éphémères (Scavenges young-gen fréquents). On l'évite en réutilisant un objet dans la boucle (sans le retenir) ou en passant à des typed arrays.
+Packed vs holey array en V8 : quelle différence et quel piège ?|PACKED = dense, accès rapide ; HOLEY = avec trous, check de trou + remontée prototype à chaque accès, transition irréversible. Piège : new Array(n) crée un tableau HOLEY. Préférer Array.from({length:n}, fn) pour rester PACKED.
+Pourquoi éviter la concaténation += en boucle pour construire une grosse chaîne ?|+= crée des ConsStrings (arbres paresseux) ; tout accès/envoi force un flattening O(n) répété. Sur des dizaines de milliers de concats c'est prohibitif. Collecter dans un tableau puis join() une seule fois.
+```
+
+---
+
+## Pont vers le lab
+
+> Lab associé : `01-js-runtime/labs/lab-12-performance-profiling/README.md`. Profiler un script Node volontairement lent avec `--cpu-prof` / `--trace-gc`, localiser le hot path, appliquer une correction ciblée (typed array / Map / réutilisation), puis re-mesurer le gain. Corrigé complet inline + variante J+30 + portage TribuZen.

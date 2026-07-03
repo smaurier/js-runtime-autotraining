@@ -1,1170 +1,542 @@
-# Module 08 — Les Fuites Mémoire (Memory Leaks)
-
-> **Objectif** : Identifier, diagnostiquer et corriger les fuites mémoire en JavaScript, tant dans le navigateur que dans Node.js, en maîtrisant les 5 patterns classiques de rétention involontaire, les outils de profilage (Chrome DevTools Heap Snapshots, Allocation Timeline, méthode des 3 snapshots), et les stratégies de mitigation (WeakMap, WeakSet, WeakRef).
-
-> **Difficulté** : ⭐⭐⭐ (Avancé)
-
+---
+titre: Les fuites mémoire (memory leaks)
+cours: 01-js-runtime
+notions: [fuite = objet atteignable mais inutile, sources classiques (listeners, timers, closures, caches non bornés, références globales), noeuds DOM détachés en navigateur, Map/collection qui grossit sans borne, diagnostic par heap snapshots, méthode des 3 snapshots, allocation timeline, arbre des retainers, shallow size vs retained size, fix par cleanup explicite, WeakMap et WeakRef, cache LRU borné, AbortController pour les listeners]
+outcomes: [distinguer une fuite (objet retenu mais inutile) d'une croissance normale ou d'une croissance bornée, diagnostiquer une fuite avec la méthode des 3 heap snapshots et remonter l'arbre des retainers, corriger chaque source de fuite avec le bon outil (cleanup, AbortController, WeakMap, cache LRU borné)]
+prerequis: [07-garbage-collector]
+next: 09-v8-architecture
+libs: []
+tribuzen: fuite réelle de l'API TribuZen (cache de familles non borné + listener non retiré) détectée au 3-snapshot puis corrigée (LRU + cleanup), plus une fuite React de subscription non désabonnée
+last-reviewed: 2026-07
 ---
 
-## Prérequis
+# Les fuites mémoire (memory leaks)
 
-- Module 07 — Garbage Collector (mark-and-sweep, générations, tri-color marking, WeakRef)
-- Familiarité avec Chrome DevTools (onglets Performance et Memory)
-- Notions de base DOM (createElement, addEventListener, removeChild)
-- Expérience Node.js (process.memoryUsage, flags V8)
+> **Outcomes — tu sauras FAIRE :** distinguer une vraie fuite (objet retenu mais inutile) d'une croissance normale ou bornée, diagnostiquer une fuite avec la méthode des 3 heap snapshots et l'arbre des retainers, corriger chaque source avec le bon outil (cleanup explicite, `AbortController`, `WeakMap`, cache LRU borné).
+> **Difficulté :** :star::star::star:
 
----
+> **Note de vérification (2026-07) :** Context7 non sollicité ici — le sujet porte sur des concepts moteur/DevTools stables, pas sur une API de lib versionnée. Les faits (méthode des 3 snapshots, retained size, `AbortController`, `v8.writeHeapSnapshot`) proviennent de la source v0 auditée `cours/08-memory-leaks.md` et des docs Chrome DevTools / Node.js citées en fin de module. À revérifier au prochain passage si l'UI DevTools change.
 
-## Théorie
+## 1. Cas concret d'abord
 
-> **Analogie pour débuter** : Une fuite mémoire, c'est comme un robinet qui goutte. Chaque goutte est minuscule, mais si on ne répare pas, la baignoire finit par déborder (crash). En JavaScript, le « robinet » ce sont les références que tu oublies de nettoyer.
+L'API TribuZen (Node.js/NestJS) tourne en prod depuis 3 jours. Le graphe de RSS du conteneur monte **en escalier** : chaque redéploiement repart bas, puis le `heapUsed` grimpe régulièrement sans jamais redescendre, et au bout de ~20 h le pod est tué par l'OOM killer (`FATAL ERROR: Reached heap limit — Allocation failed`). Le trafic, lui, est constant. Ce n'est donc pas la charge : c'est une **fuite**.
 
-### 1. Qu'est-ce qu'une fuite mémoire dans un langage à GC ?
-
-En C/C++, une fuite mémoire signifie : de la mémoire allouée sans jamais être désallouée (appel `free()` manquant).
-
-En JavaScript, le GC libère automatiquement la mémoire **non atteignable**. Une fuite mémoire signifie donc :
-
-> **De la mémoire qui reste atteignable (référencée) depuis les racines GC alors qu'elle n'est plus nécessaire au programme.**
-
-Le GC fait parfaitement son travail — c'est le **développeur** qui maintient involontairement des références vers des objets qui ne servent plus.
-
-```
-  Mémoire normale :                     Fuite mémoire :
-
-  Racine GC                             Racine GC
-     │                                     │
-     ▼                                     ▼
-  [Objet utile]                         [Objet utile]
-     │                                     │
-     ▼                                     ├──────────────────┐
-  [Objet utile]                         [Objet utile]      [Objet INUTILE]
-                                                              │
-  Les objets inutiles                                      [Encore plus de
-  sont automatiquement                                      données inutiles]
-  collectés car non                                           │
-  atteignables.                         Tout ce sous-arbre est
-                                        retenu → la mémoire
-                                        croît indéfiniment.
-```
-
-**Symptômes typiques** :
-- Le processus Node.js est tué par l'OOM killer après quelques heures.
-- L'onglet Chrome consomme 2 Go de RAM après une longue session.
-- Le temps de réponse se dégrade progressivement (pauses GC de plus en plus longues sur un tas de plus en plus gros).
-
-### 2. Les 5 patterns classiques de fuites mémoire
-
-#### Pattern 1 : Timers oubliés (setInterval sans clearInterval)
+Tu isoles le suspect n°1 : le service qui sert les familles garde un cache et écoute un bus d'événements.
 
 ```js
-// FUITE : le callback et ses références vivent indéfiniment
-function startPolling(element) {
-  const heavyData = loadLargeDataset(); // 50 Mo de données
+// families.service.js — version qui FUIT (extrait)
+const bus = require('../events/bus'); // EventEmitter global, vit toute la durée du process
 
-  setInterval(() => {
-    // Ce callback référence 'heavyData' via la closure
-    // Tant que le timer existe, heavyData ne peut pas être collecté
-    element.textContent = heavyData.getSummary();
-  }, 1000);
+class FamiliesService {
+  constructor() {
+    this.cache = new Map(); // (1) cache indexé par familyId — jamais borné, jamais vidé
+  }
 
-  // Aucun clearInterval() → la closure (et heavyData) survit pour toujours
+  async getFamily(id) {
+    if (this.cache.has(id)) return this.cache.get(id);
+
+    const family = await this.repo.load(id); // objet lourd : membres, events, médias
+
+    // (2) un listener AJOUTÉ À CHAQUE requête, jamais retiré
+    bus.on('family:updated', (evt) => {
+      if (evt.id === id) this.cache.set(id, evt.family);
+    });
+
+    this.cache.set(id, family); // le cache ne fait que grandir
+    return family;
+  }
 }
 ```
 
-```
-  Chaîne de rétention :
+Deux fuites cohabitent : le `Map` grossit à chaque `id` unique jamais évincé **(1)**, et chaque appel empile un listener supplémentaire sur un `EventEmitter` qui vit aussi longtemps que le process **(2)** — chaque listener retient sa closure, donc `id`, donc l'entrée de cache correspondante. Après 100 000 requêtes : 100 000 listeners (`MaxListenersExceededWarning`) et un cache de plusieurs centaines de Mo.
 
-  GC Root (Timers list)
-     │
-     ▼
-  [setInterval handler]
-     │
-     ├──> closure context
-     │       │
-     │       ├──> heavyData (50 Mo !)
-     │       └──> element (DOM node)
-     │
-     └── Le timer n'est jamais supprimé
-         → toute la chaîne est retenue indéfiniment
+Ce module te donne la méthode pour **prouver** que c'est bien ça (3 heap snapshots + retainers) et les outils pour **corriger** (cache LRU borné + cleanup du listener). On reproduit puis on répare cette fuite exacte dans le lab.
+
+> **Audit d'abord, fix ensuite.** Le réflexe « je vois un `Map`, je le passe en `WeakMap` » sans mesurer est faux la moitié du temps (ici la clé est un `string`, `WeakMap` est impossible). On diagnostique avant de toucher au code.
+
+---
+
+## 2. Théorie complète, concise
+
+### 2.1 Ce qu'est (et n'est pas) une fuite dans un langage à GC
+
+En C/C++, fuite = mémoire allouée jamais `free()`. En JavaScript, le GC (module 07) libère automatiquement tout ce qui est **inatteignable depuis un root**. Une fuite JS a donc une définition précise :
+
+> **De la mémoire qui reste atteignable (référencée depuis un root) alors qu'elle n'est plus utile au programme.**
+
+Le GC fonctionne parfaitement. C'est **ton code** qui maintient involontairement une arête vers des objets morts pour la logique mais vivants pour le graphe. C'est le prolongement direct du PIÈGE #2 du module 07 : « plus utilisé » ≠ « inatteignable ».
+
+Trois régimes à ne pas confondre :
+
+| Régime | Le heap… | Fuite ? |
+|---|---|---|
+| Sain | monte puis **redescend** après GC (dents de scie) | Non |
+| Croissance bornée | monte jusqu'à un plafond puis se stabilise (cache LRU plein, buffer circulaire) | Non |
+| Fuite | monte **en escalier**, ne redescend jamais même après GC | **Oui** |
+
+Symptômes typiques d'une fuite : OOM killer après quelques heures en Node, onglet Chrome à 2 Go après une longue session, latence qui se dégrade progressivement (pauses GC de plus en plus longues sur un tas de plus en plus gros — cf. module 07 : la pause croît avec le nombre d'objets vivants).
+
+### 2.2 Les sources classiques de rétention involontaire
+
+#### Source 1 — Timers non nettoyés (`setInterval`/`setTimeout`)
+
+Un timer actif est une **racine GC** : tant qu'il n'est pas annulé, sa callback — et tout ce qu'elle capture — reste vivant.
+
+```js
+function startPolling(element) {
+  const heavyData = loadLargeDataset(); // 50 Mo
+  setInterval(() => {
+    element.textContent = heavyData.getSummary(); // la closure retient heavyData + element
+  }, 1000);
+  // Aucun clearInterval -> heavyData vit pour toujours, même si element est retiré du DOM
+}
 ```
 
-**Correction** :
+Fix : garder l'`id` et `clearInterval`, ou s'auto-arrêter :
 
 ```js
 function startPolling(element) {
   const heavyData = loadLargeDataset();
-
-  const intervalId = setInterval(() => {
-    if (!document.body.contains(element)) {
-      clearInterval(intervalId);  // Arrêter si l'élément n'existe plus
-      return;
-    }
+  const id = setInterval(() => {
+    if (!element.isConnected) { clearInterval(id); return; } // stop si l'élément a disparu
     element.textContent = heavyData.getSummary();
   }, 1000);
-
-  // Retourner une fonction de nettoyage explicite
-  return () => clearInterval(intervalId);
+  return () => clearInterval(id); // cleanup explicite renvoyé à l'appelant
 }
-
-const cleanup = startPolling(myElement);
-// Plus tard, quand le composant est démonté :
-cleanup();
 ```
 
-#### Pattern 2 : Noeuds DOM détachés (Detached DOM nodes)
+#### Source 2 — Event listeners non retirés
 
-Un noeud DOM retiré du document mais encore référencé en JavaScript :
+`addEventListener` sur une cible à longue durée de vie (`window`, `document`, un `EventEmitter` global) retient le handler, donc le `this` qu'il capture, donc toute l'instance.
 
 ```js
-const elements = [];
-
-function createListItem(text) {
-  const li = document.createElement('li');
-  li.textContent = text;
-  document.getElementById('list').appendChild(li);
-  elements.push(li);  // Référence stockée dans un tableau
-}
-
-function clearList() {
-  document.getElementById('list').innerHTML = '';
-  // Les noeuds sont retirés du DOM...
-  // MAIS 'elements' contient encore les références !
-  // → noeuds DOM détachés = fuite mémoire
+class ChatWidget {
+  constructor(container) {
+    this.container = container;
+    window.addEventListener('resize', this.onResize.bind(this)); // .bind crée une NOUVELLE fn
+  }
+  destroy() {
+    this.container.remove();
+    // FUITE : impossible de retirer le listener — on n'a pas gardé la référence bindée
+  }
 }
 ```
 
-```
-  Avant clearList() :
-
-  DOM Tree                         JS Array
-  ┌──────────┐                    ┌──────────────┐
-  │  <ul>    │                    │ elements[]   │
-  │   <li>1  │◄──── reference ───┤ [0] ─> <li>1 │
-  │   <li>2  │◄──── reference ───┤ [1] ─> <li>2 │
-  │   <li>3  │◄──── reference ───┤ [2] ─> <li>3 │
-  └──────────┘                    └──────────────┘
-
-  Après clearList() (innerHTML = '') :
-
-  DOM Tree                         JS Array
-  ┌──────────┐                    ┌──────────────┐
-  │  <ul>    │                    │ elements[]   │
-  │  (vide)  │                    │ [0] ─> <li>1 │ ← DÉTACHÉ
-  └──────────┘                    │ [1] ─> <li>2 │ ← DÉTACHÉ
-                                  │ [2] ─> <li>3 │ ← DÉTACHÉ
-                                  └──────────────┘
-  Les <li> ne sont plus dans le DOM mais ne peuvent pas être
-  collectés car elements[] les retient. Chaque noeud détaché
-  retient aussi ses enfants, styles, attributs, etc.
-```
-
-**Correction** :
+Fix historique : stocker la référence bindée. Fix moderne : **`AbortController`**, un seul `abort()` retire tous les listeners liés au signal.
 
 ```js
-function clearList() {
-  document.getElementById('list').innerHTML = '';
-  elements.length = 0;  // Supprimer les références JS aussi
+class ChatWidget {
+  #ac = new AbortController();
+  constructor(container) {
+    this.container = container;
+    const { signal } = this.#ac;
+    window.addEventListener('resize', () => this.onResize(), { signal });
+    document.addEventListener('keydown', (e) => this.onKeyDown(e), { signal });
+  }
+  destroy() {
+    this.#ac.abort(); // retire TOUS les listeners d'un coup
+    this.container.remove();
+  }
 }
 ```
 
-#### Pattern 3 : Closures capturant des scopes volumineux
+#### Source 3 — Closures qui retiennent un gros scope
+
+Plusieurs closures créées dans la même fonction **partagent le même objet de scope**. Si une seule survit, tout le scope survit — y compris les grosses variables que les autres closures utilisaient.
 
 ```js
 function createHandlers() {
   const hugeData = new Array(1_000_000).fill('x'); // ~8 Mo
   const config = { debug: true };
-
-  const handler1 = function () {
-    return config.debug; // référence 'config' seulement
-  };
-
-  const handler2 = function () {
-    return hugeData.length; // référence 'hugeData'
-  };
-
-  // handler1 et handler2 partagent le MÊME objet de scope (context)
-  // → si handler1 survit, hugeData survit aussi !
-  return handler1; // handler2 est jeté, mais hugeData survit via le scope
+  const useConfig = () => config.debug;   // n'utilise que config...
+  const useHuge   = () => hugeData.length; // ...mais partage le scope de hugeData
+  return useConfig; // useHuge est jeté, MAIS hugeData survit via le scope partagé
 }
 ```
 
-```
-  Scope partagé de createHandlers()
-  ┌────────────────────────────────────┐
-  │  hugeData: [... 1M items, ~8 Mo]  │◄── Retenu car le scope est partagé
-  │  config:   { debug: true }         │◄── Référencé par handler1
-  │                                    │
-  │  handler1: function() {...}        │──► retourné (vivant)
-  │  handler2: function() {...}        │──► non retourné (mort)
-  └────────────────────────────────────┘
-         │
-         └── Le scope entier survit car handler1 est vivant.
-
-  NOTE : V8 optimise ce cas dans les scénarios simples — il effectue
-  une analyse des variables capturées (context analysis) et ne retient
-  que les variables réellement utilisées. Mais dans les cas complexes
-  (eval, with, debugger attaché, multiples closures partageant un
-  scope), V8 est contraint de retenir tout le scope.
-```
-
-**Correction** :
+Fix : isoler le gros calcul dans son propre scope (IIFE ou fonction dédiée) pour qu'il ne soit pas capturé par la closure qui survit.
 
 ```js
 function createHandlers() {
   const config = { debug: true };
-
-  // Isoler les gros traitements dans leur propre scope
   (function () {
     const hugeData = new Array(1_000_000).fill('x');
-    processData(hugeData); // utilisé et libéré
+    processData(hugeData); // utilisé et libéré ici
   })();
-
-  const handler1 = function () {
-    return config.debug;
-  };
-
-  return handler1; // hugeData n'est pas dans le même scope → collecté
+  return () => config.debug; // hugeData n'est plus dans le scope capturé -> collecté
 }
 ```
 
-#### Pattern 4 : Collections qui grandissent indéfiniment (Map/Array sans cleanup)
+> C'est le pont direct avec le module 02 (scope & closures) : une closure est une **arête de référence vers son scope lexical**. Le GC ne peut pas savoir que tu n'utiliseras plus `hugeData` — il voit seulement que la closure vivante peut y accéder.
+
+#### Source 4 — Collections / caches non bornés
+
+Un `Map`, un `Array` ou un objet qui ne fait que `set`/`push` sans jamais évincer croît linéairement. Classique du cache mémoïsé par clé unique (timestamps, UUID, URL avec query).
 
 ```js
-// Cache sans limite de taille ni TTL
-const responseCache = new Map();
-
-async function handleRequest(req) {
-  const key = req.url + JSON.stringify(req.query);
-
-  if (responseCache.has(key)) {
-    return responseCache.get(key);
-  }
-
-  const data = await fetchFromDB(req);
-
-  // Le cache croît indéfiniment :
-  // - Chaque URL unique ajoute une entrée
-  // - Rien n'est jamais supprimé
-  // - Après 10M requêtes avec des URLs uniques → centaines de Mo
-  responseCache.set(key, data);
-
-  return data;
+const cache = new Map();
+function handle(req) {
+  const key = req.url + JSON.stringify(req.query); // souvent unique -> jamais de hit
+  if (!cache.has(key)) cache.set(key, expensive(req)); // le cache ne fait que grandir
+  return cache.get(key);
 }
 ```
 
-```
-  Croissance du cache dans le temps :
+Fix : borne la taille. Cache **LRU** (Least Recently Used) qui évince le plus ancien quand il atteint sa capacité (implémenté en 2.5).
 
-  Mémoire (Mo)
-  250 │                                     /
-  200 │                                   /
-  150 │                               /
-  100 │                          /
-   50 │                    /
-   25 │             /
-   10 │       /
-      └──────────────────────────────────
-       0h    1h    2h    4h    8h    12h
+#### Source 5 — Références globales
 
-  → Croissance linéaire = signe classique de fuite.
-  → Après le GC, le heap ne diminue pas car tout est référencé.
-```
+Une variable attachée au global (`globalThis`, module-level, singleton) est une racine permanente. Tout ce qu'elle référence vit jusqu'à la fin du process. Une faute de frappe suffit (`this.data = ...` dans du code non-strict crée `globalThis.data`).
 
-**Correction** : cache LRU avec éviction :
+#### Source 6 (navigateur) — Nœuds DOM détachés
+
+Un nœud retiré du DOM mais encore référencé en JS est **détaché** : hors de l'arbre document, mais non collectable car un tableau/une closure le retient — avec tous ses enfants, styles, attributs.
 
 ```js
+const rows = [];
+function addRow(text) {
+  const li = document.createElement('li');
+  document.getElementById('list').appendChild(li);
+  rows.push(li); // référence JS conservée
+}
+function clear() {
+  document.getElementById('list').innerHTML = ''; // retiré du DOM...
+  // ...mais rows[] retient encore chaque <li> -> nœuds détachés = fuite
+}
+```
+
+Fix : couper aussi la référence JS — `rows.length = 0`.
+
+### 2.3 Diagnostic — la méthode des 3 heap snapshots
+
+La technique la plus fiable pour **prouver** une fuite et l'identifier. Elle exploite un principe simple : après un GC, tout ce qui subsiste et qui a été créé par une action répétée mais terminée est **suspect**.
+
+```
+  MÉTHODE DES 3 SNAPSHOTS
+
+  [Snap A]  état de repos (page chargée / serveur démarré, au repos)
+     │
+     │  exécuter l'action suspecte N fois
+     │  (ouvrir/fermer un modal x10, naviguer A<->B x10, 1000 requêtes...)
+     ▼
+  [Snap B]  juste après les N actions
+     │
+     │  forcer un GC (icône poubelle DevTools / global.gc() en Node)
+     ▼
+  [Snap C]  après le GC
+
+  Vue "Comparison" : comparer C par rapport à A
+    -> tout objet avec Delta positif a survécu au GC alors que l'action
+       est terminée -> c'est ta fuite (ou un candidat sérieux)
+```
+
+Le GC entre B et C est **crucial** : il élimine tout le déchet légitime. Ce qui reste dans C au-dessus de A ne peut pas être « en cours d'utilisation » puisque les actions sont finies — donc c'est retenu à tort.
+
+### 2.4 Lire un heap snapshot — retained size et retainers
+
+Deux notions à ne jamais confondre :
+
+```
+  [Objet A] shallow 100 o ──ref──> [Objet B] 10 000 o (retenu UNIQUEMENT par A)
+
+  Shallow size  = taille de l'objet seul (ses champs propres)
+  Retained size = ce qui serait libéré si on collectait A
+                  = A + tout ce que A retient exclusivement (ici 10 100 o)
+```
+
+On **trie par retained size** pour trouver les plus gros « retenteurs ». Puis, sur un objet suspect, on ouvre l'**arbre des retainers** (« qui te retient ? ») et on remonte jusqu'à un root :
+
+```
+  [Object @123]            <- pourquoi vivant ?
+    ↑ retained by
+  [Array].elements[42]
+    ↑ retained by
+  [FamiliesService].cache  <- LE coupable : le Map de cache
+    ↑ retained by
+  [global]                 <- racine GC
+```
+
+Le chemin complet **est** le diagnostic : il nomme la propriété fautive (`.cache`) et l'objet qui la porte. C'est l'outil n°1, plus que n'importe quel graphe.
+
+**Allocation timeline** (complément) : DevTools → Memory → « Allocation instrumentation on timeline ». Chaque allocation est une barre ; les barres qui restent **bleues** (vivantes) sans jamais griser au fil du temps révèlent quelles allocations s'accumulent, avec la stack d'allocation.
+
+### 2.5 Fix — le bon outil selon la source
+
+| Source | Fix |
+|---|---|
+| Timer | garder l'`id`, `clearInterval`/`clearTimeout` au cleanup |
+| Listener | `removeEventListener` avec la même réf, ou **`AbortController`** + `{ signal }` |
+| Closure lourde | isoler le gros scope, ne capturer que le nécessaire |
+| Cache non borné, clé objet | **`WeakMap`** (clé faible, entrée collectée avec l'objet) |
+| Cache non borné, clé primitive | **cache LRU borné** (WeakMap impossible sur string/number) |
+| DOM détaché | couper la référence JS (`arr.length = 0`, `ref = null`) |
+
+**`WeakMap` / `WeakRef`** (revus au module 07) référencent sans maintenir vivant. Mais `WeakMap` exige une **clé objet** — inutilisable quand tu indexes par `familyId` (string). Dans ce cas, il faut une éviction explicite : le **cache LRU**.
+
+```js
+// Cache LRU borné : profite de l'ordre d'insertion garanti de Map
 class LRUCache {
   #map = new Map();
-  #maxSize;
-
-  constructor(maxSize = 1000) {
-    this.#maxSize = maxSize;
-  }
+  #max;
+  constructor(max = 1000) { this.#max = max; }
 
   get(key) {
     if (!this.#map.has(key)) return undefined;
-    const value = this.#map.get(key);
-    // Déplacer en fin (le plus récent) : supprimer et ré-insérer
-    this.#map.delete(key);
-    this.#map.set(key, value);
-    return value;
+    const v = this.#map.get(key);
+    this.#map.delete(key); this.#map.set(key, v); // ré-insère en fin = "récemment utilisé"
+    return v;
   }
 
   set(key, value) {
-    if (this.#map.has(key)) {
-      this.#map.delete(key);
-    } else if (this.#map.size >= this.#maxSize) {
-      // Supprimer le plus ancien (premier élément de Map, insertion order)
-      const oldestKey = this.#map.keys().next().value;
-      this.#map.delete(oldestKey);
+    if (this.#map.has(key)) this.#map.delete(key);
+    else if (this.#map.size >= this.#max) {
+      this.#map.delete(this.#map.keys().next().value); // évince le plus ancien (tête du Map)
     }
     this.#map.set(key, value);
   }
 
-  get size() {
-    return this.#map.size;
-  }
+  get size() { return this.#map.size; }
 }
 ```
 
-#### Pattern 5 : Event listeners non supprimés
+La clé : un `Map` **itère dans l'ordre d'insertion**. Le premier `keys().next().value` est donc l'entrée la plus anciennement utilisée → on l'évince. La taille est plafonnée → croissance bornée, pas de fuite.
+
+### 2.6 Diagnostic côté Node.js
+
+Sans DevTools, la trousse Node :
 
 ```js
-class ChatWidget {
-  constructor(container) {
-    this.container = container;
-    this.messages = [];
-
-    // Chaque .bind(this) crée une NOUVELLE fonction anonyme
-    window.addEventListener('resize', this.onResize.bind(this));
-    document.addEventListener('keydown', this.onKeyDown.bind(this));
-  }
-
-  onResize() {
-    this.container.style.height = `${window.innerHeight - 100}px`;
-  }
-
-  onKeyDown(event) {
-    if (event.key === 'Enter') this.sendMessage();
-  }
-
-  destroy() {
-    this.container.remove();
-    // FUITE : les listeners sur window et document persistent !
-    // On ne peut pas les supprimer car on n'a pas gardé de référence
-    // vers les fonctions retournées par .bind()
-  }
-}
-```
-
-```
-  Chaîne de rétention après destroy() :
-
-  GC Root (window)
-     │
-     ├──> resize listener list
-     │       │
-     │       └──> bound onResize function
-     │               │
-     │               └──> this (ChatWidget instance)
-     │                       │
-     │                       ├──> container (DOM node détaché !)
-     │                       └──> messages[] (potentiellement gros)
-     │
-     └──> Le widget "détruit" est toujours en mémoire.
-          Chaque new ChatWidget() + destroy() ajoute des listeners
-          sans jamais les supprimer → fuite cumulative.
-```
-
-**Correction** :
-
-```js
-class ChatWidget {
-  constructor(container) {
-    this.container = container;
-    this.messages = [];
-
-    // Stocker les références bound pour pouvoir les supprimer
-    this._onResize = this.onResize.bind(this);
-    this._onKeyDown = this.onKeyDown.bind(this);
-
-    window.addEventListener('resize', this._onResize);
-    document.addEventListener('keydown', this._onKeyDown);
-  }
-
-  // ... méthodes ...
-
-  destroy() {
-    window.removeEventListener('resize', this._onResize);
-    document.removeEventListener('keydown', this._onKeyDown);
-    this.container.remove();
-    this.messages = null;
-  }
-}
-
-// Alternative moderne et plus propre : AbortController
-class ModernWidget {
-  #controller = new AbortController();
-
-  constructor(container) {
-    this.container = container;
-    const signal = this.#controller.signal;
-
-    window.addEventListener('resize', () => this.onResize(), { signal });
-    document.addEventListener('keydown', (e) => this.onKeyDown(e), { signal });
-    // N'importe quel nombre de listeners — un seul abort() les supprime tous
-  }
-
-  destroy() {
-    this.#controller.abort(); // Supprime TOUS les listeners d'un coup
-    this.container.remove();
-  }
-}
-```
-
-### 3. Détection avec Chrome DevTools — Heap Snapshots
-
-#### La méthode des 3 snapshots
-
-C'est la technique la plus fiable pour identifier les fuites :
-
-```
-  ┌────────────────────────────────────────────────────────────────┐
-  │  MÉTHODE DES 3 HEAP SNAPSHOTS                                  │
-  │                                                                │
-  │  Étape 1 : Prendre le Snapshot A (état initial, après charge-  │
-  │            ment complet de la page ou démarrage du serveur)     │
-  │                                                                │
-  │  Étape 2 : Effectuer l'action suspecte N fois                   │
-  │            (ex: ouvrir/fermer un modal 5 fois, naviguer entre   │
-  │            deux pages 5 fois, envoyer 1000 requêtes, etc.)      │
-  │                                                                │
-  │  Étape 3 : Prendre le Snapshot B                                │
-  │                                                                │
-  │  Étape 4 : Forcer un GC (cliquer sur l'icône poubelle dans     │
-  │            DevTools, ou global.gc() en Node.js)                 │
-  │                                                                │
-  │  Étape 5 : Prendre le Snapshot C                                │
-  │                                                                │
-  │  Étape 6 : Vue "Comparison" : comparer C vs A                   │
-  │            → Objets avec Delta positif = objets créés par        │
-  │              l'action répétée qui n'ont PAS été collectés         │
-  │            → Ce sont vos fuites                                  │
-  │                                                                │
-  │  Timeline :                                                     │
-  │  ──[A]──── action x N ────[B]──── GC ────[C]──                 │
-  │    │                                       │                    │
-  │    └────────── Comparison view ────────────┘                    │
-  │                Delta > 0 = fuite                                │
-  └────────────────────────────────────────────────────────────────┘
-```
-
-#### Comprendre Retained Size vs Shallow Size
-
-```
-  ┌──────────────┐
-  │   Objet A     │ Shallow Size : 100 octets (A seul)
-  │   size: 100   │ Retained Size : 10 100 octets (A + tout ce qu'il retient)
-  │               │
-  │   ┌─────────┐ │
-  │   │ ref ────┼─┼──> [Objet B: 10 000 octets]
-  │   └─────────┘ │     (retenu UNIQUEMENT par A)
-  └──────────────┘
-
-  Shallow Size  = taille de l'objet lui-même (ses champs propres)
-  Retained Size = taille qui serait libérée si cet objet était collecté
-                  (inclut tous les objets retenus exclusivement par lui)
-
-  → Trier par Retained Size pour trouver les plus gros "retenteurs"
-```
-
-#### L'arbre des Retainers
-
-```
-  Dans un Heap Snapshot, sélectionner un objet suspect et voir "Retainers" :
-
-  [Object @12345] ← Pourquoi cet objet est-il vivant ?
-    ↑ retained by
-  [Array @67890].elements[42]
-    ↑ retained by
-  [Object @11111].cache
-    ↑ retained by
-  [Window / global] (racine GC)
-
-  → Le chemin complet explique POURQUOI l'objet n'est pas collecté.
-  → Remonter jusqu'à la racine révèle la référence fautive.
-```
-
-#### Allocation Timeline
-
-```
-  Chrome DevTools → Memory → Allocation instrumentation on timeline
-
-  Temps →
-  ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██   ← barres BLEUES (vivants)
-  ░░ ░░    ░░    ░░ ░░    ░░            ← barres GRISES (collectés)
-
-  Si les barres bleues ne font que s'accumuler dans le temps
-  sans que les grises compensent → fuite probable.
-
-  Cliquer sur un segment bleu pour voir quels objets ont été
-  alloués pendant cette période et pourquoi ils sont encore vivants.
-```
-
-### 4. Détection en Node.js
-
-#### process.memoryUsage()
-
-```js
-function printMemory(label) {
-  const mem = process.memoryUsage();
-  const fmt = (b) => (b / 1024 / 1024).toFixed(2) + ' Mo';
-  console.log(`[${label}]`);
-  console.log(`  RSS          : ${fmt(mem.rss)}`);         // resident set size
-  console.log(`  Heap Total   : ${fmt(mem.heapTotal)}`);   // heap alloué
-  console.log(`  Heap Used    : ${fmt(mem.heapUsed)}`);    // heap utilisé
-  console.log(`  External     : ${fmt(mem.external)}`);    // C++ objects liés
-  console.log(`  ArrayBuffers : ${fmt(mem.arrayBuffers)}`);// Buffers alloués
-}
-```
-
-#### v8.getHeapStatistics()
-
-```js
+process.memoryUsage().heapUsed;   // tas V8 utilisé — le plus parlant, à échantillonner
 const v8 = require('v8');
-
-function printHeapStats() {
-  const stats = v8.getHeapStatistics();
-  console.log(`  Total heap size     : ${(stats.total_heap_size / 1024 / 1024).toFixed(2)} Mo`);
-  console.log(`  Used heap size      : ${(stats.used_heap_size / 1024 / 1024).toFixed(2)} Mo`);
-  console.log(`  Heap size limit     : ${(stats.heap_size_limit / 1024 / 1024).toFixed(0)} Mo`);
-  console.log(`  Malloced memory     : ${(stats.malloced_memory / 1024 / 1024).toFixed(2)} Mo`);
-  console.log(`  Native contexts     : ${stats.number_of_native_contexts}`);
-  // ↑ Un nombre croissant de native_contexts est souvent signe de fuite !
-  // (chaque iframe, worker, ou vm.createContext() crée un contexte)
-}
+v8.getHeapStatistics().number_of_native_contexts; // croissant = fuite de contextes (vm, worker)
+v8.writeHeapSnapshot('snap.heapsnapshot');          // dump analysable dans Chrome DevTools
 ```
 
-#### --max-old-space-size
+`v8.writeHeapSnapshot()` produit un fichier `.heapsnapshot` qu'on **ouvre dans Chrome DevTools → Memory → Load** : on applique alors exactement la méthode des 3 snapshots et l'arbre des retainers, même pour un serveur sans navigateur. `--max-old-space-size=<Mo>` abaisse la limite du tas pour faire crasher (donc détecter) une fuite plus vite en dev.
 
-```bash
-# Limiter le heap à 512 Mo
-node --max-old-space-size=512 server.js
-
-# NOTE : la valeur par défaut du heap V8 dépend de la version de Node.js.
-# - Node.js < 12 : ~1.5 Go sur 64-bit, ~700 Mo sur 32-bit (valeurs fixes)
-# - Node.js 12+ : la limite est dynamique et peut atteindre ~4 Go sur 64-bit,
-#   ajustée en fonction de la mémoire système disponible.
-# Vérifiez votre limite avec : node -e "console.log(v8.getHeapStatistics().heap_size_limit)"
-
-# Utilité :
-# - Détecter les fuites plus tôt (crash OOM plus rapide en dev)
-# - Limiter la consommation en production (conteneurs Docker avec cgroup limits)
-# - Éviter que le GC passe trop de temps à gérer un immense heap
-
-```
-
-### 5. WeakMap, WeakSet, WeakRef comme outils de mitigation
-
-```
-  ┌───────────────┬──────────────────────────────────────────────────┐
-  │ Outil         │ Cas d'usage                                      │
-  ├───────────────┼──────────────────────────────────────────────────┤
-  │ WeakMap       │ Métadonnées associées à des objets (DOM nodes,   │
-  │               │ instances de classes). La clé est faible : quand │
-  │               │ l'objet-clé est collecté, l'entrée disparaît.    │
-  ├───────────────┼──────────────────────────────────────────────────┤
-  │ WeakSet       │ Suivre l'appartenance d'objets à un ensemble     │
-  │               │ sans les retenir (ex: "objets déjà visités").    │
-  ├───────────────┼──────────────────────────────────────────────────┤
-  │ WeakRef       │ Cache ou la valeur peut être collectée si la     │
-  │               │ mémoire est sous pression. Combiner avec         │
-  │               │ FinalizationRegistry pour le nettoyage.          │
-  └───────────────┴──────────────────────────────────────────────────┘
-```
-
-```js
-// Exemple : métadonnées pour des DOM nodes avec WeakMap
-const nodeMetadata = new WeakMap();
-
-function trackNode(node) {
-  nodeMetadata.set(node, {
-    clicks: 0,
-    lastAccess: Date.now(),
-  });
-}
-
-// Quand le node est retiré du DOM et qu'aucune autre référence forte n'existe,
-// l'entrée WeakMap est automatiquement supprimée par le GC.
-// Zéro code de nettoyage nécessaire — pas de risque de fuite.
-```
-
-### 6. Patterns réels de fuites en production
-
-#### Connection pools sans drain
-
-```js
-// FUITE : les connexions ne sont jamais libérées
-const connections = [];
-
-function getConnection() {
-  const conn = createDBConnection();
-  connections.push(conn); // référence retenue dans un tableau global
-  return conn;
-}
-
-// Même après utilisation, la connexion et ses buffers internes
-// restent dans le tableau. Après 10 000 requêtes → 10 000 connexions
-// avec leurs buffers de lecture/écriture en mémoire.
-```
-
-#### Caches sans TTL (Time-To-Live)
-
-```js
-// FUITE : memoize sans limite
-const memo = {};
-
-function memoize(fn) {
-  return function (...args) {
-    const key = JSON.stringify(args);
-    if (memo[key] === undefined) {
-      memo[key] = fn(...args);
-    }
-    return memo[key];
-  };
-}
-
-// Si fn est appelée avec des arguments uniques (timestamps, UUIDs, requêtes),
-// le cache croît indéfiniment sans jamais libérer d'entrées.
-```
-
-#### Global registries (EventEmitter abuse)
-
-```js
-// FUITE : listeners accumulés sur un EventEmitter global
-const eventBus = new EventEmitter();
-
-class UserSession {
-  constructor(userId) {
-    this.userId = userId;
-    this.data = loadUserData(userId); // gros objet
-
-    // Listener ajouté à chaque nouvelle session
-    eventBus.on('broadcast', (msg) => {
-      this.handleBroadcast(msg); // closure retient 'this'
-    });
-    // Jamais supprimé → chaque session passée reste en mémoire
-  }
-}
-
-// Après 1000 connexions/déconnexions → 1000 listeners + 1000 UserSession
-// Symptôme : Node.js affiche MaxListenersExceededWarning
-```
+> **Prod :** jamais `global.gc()` (pause stop-the-world forcée). Pour la prod, `--heapsnapshot-signal=SIGUSR2` ou `v8.writeHeapSnapshot()` déclenché sur un endpoint d'admin suffit à capturer sans forcer de pause.
 
 ---
 
-## Démonstration
+## 3. Worked examples
 
-### Demo 1 : Provoquer et mesurer chaque pattern de fuite
+### Exemple 1 — Prouver la fuite TribuZen au 3-snapshot, puis la corriger
 
-```js
-// demo-leak-patterns.mjs
-// Lancer : node --expose-gc demo-leak-patterns.mjs
-
-function formatMB(bytes) {
-  return (bytes / 1024 / 1024).toFixed(2);
-}
-
-function measureLeak(name, setup, iterations = 100) {
-  global.gc();
-  const before = process.memoryUsage().heapUsed;
-
-  setup(iterations);
-
-  global.gc();
-  const after = process.memoryUsage().heapUsed;
-  const leaked = after - before;
-
-  console.log(
-    `[${name.padEnd(30)}] ` +
-    `Avant: ${formatMB(before).padStart(8)} Mo | ` +
-    `Après: ${formatMB(after).padStart(8)} Mo | ` +
-    `Fuite: ${formatMB(leaked).padStart(8)} Mo`
-  );
-}
-
-console.log('=== Provoquer les 5 patterns de fuite ===\n');
-
-// --- Pattern 1 : Timers (simulé avec callbacks stockés) ---
-const timerCallbacks = [];
-measureLeak('1. Timers (callbacks)', (n) => {
-  for (let i = 0; i < n; i++) {
-    const payload = { id: i, data: new Array(10_000).fill(0) };
-    timerCallbacks.push(() => payload.data[0]);
-  }
-});
-
-// --- Pattern 2 : DOM détaché (simulé avec objets) ---
-const detachedNodes = [];
-measureLeak('2. Noeuds détachés (simulé)', (n) => {
-  for (let i = 0; i < n; i++) {
-    const node = {
-      tagName: 'div',
-      innerHTML: 'x'.repeat(1000),
-      children: [{ tagName: 'span' }, { tagName: 'span' }],
-    };
-    detachedNodes.push(node);
-  }
-});
-
-// --- Pattern 3 : Closures volumineuses ---
-const closures = [];
-measureLeak('3. Closures volumineuses', (n) => {
-  for (let i = 0; i < n; i++) {
-    const bigData = new Array(50_000).fill(`data-${i}`);
-    closures.push(() => bigData.length);
-  }
-});
-
-// --- Pattern 4 : Cache Map sans eviction ---
-const cache = new Map();
-measureLeak('4. Cache sans eviction', (n) => {
-  for (let i = 0; i < n; i++) {
-    cache.set(`request-${i}`, {
-      response: new Array(20_000).fill('x'),
-      timestamp: Date.now(),
-    });
-  }
-});
-
-// --- Pattern 5 : Event listeners (simulé avec un registre) ---
-const listenerRegistry = [];
-measureLeak('5. Listeners non supprimés', (n) => {
-  for (let i = 0; i < n; i++) {
-    const widget = {
-      data: new Array(5_000).fill(i),
-      handler: function () { return this.data[0]; },
-    };
-    listenerRegistry.push(widget);
-  }
-});
-
-// --- Nettoyage et vérification ---
-console.log('\n=== Nettoyage de toutes les fuites ===\n');
-timerCallbacks.length = 0;
-detachedNodes.length = 0;
-closures.length = 0;
-cache.clear();
-listenerRegistry.length = 0;
-
-global.gc();
-global.gc();
-
-const finalHeap = process.memoryUsage().heapUsed;
-console.log(`Heap après nettoyage total : ${formatMB(finalHeap)} Mo`);
-console.log('La mémoire a été récupérée car toutes les références ont été supprimées.');
-```
-
-### Demo 2 : Détecter une fuite via la tendance du heap
+On reprend le cas concret. Objectif : mesurer, identifier, réparer — dans cet ordre.
 
 ```js
-// demo-leak-detection.mjs
-// Lancer : node --expose-gc demo-leak-detection.mjs
-
-const leakyStore = [];
-
-function simulateRequest() {
-  leakyStore.push({
-    timestamp: Date.now(),
-    payload: Buffer.alloc(1024), // 1 Ko par requête
-    headers: { 'content-type': 'application/json', 'x-request-id': Math.random().toString(36) },
-  });
-}
-
-function detectLeak(samples) {
-  let increasing = 0;
-  for (let i = 1; i < samples.length; i++) {
-    if (samples[i] > samples[i - 1]) {
-      increasing++;
-    }
-  }
-  const ratio = increasing / (samples.length - 1);
-  return {
-    isLeak: ratio > 0.8,
-    ratio: (ratio * 100).toFixed(1) + '%',
-    growth: ((samples[samples.length - 1] - samples[0]) / 1024 / 1024).toFixed(2) + ' Mo',
-  };
-}
-
-const heapSamples = [];
-
-console.log('=== Simulation de requêtes avec fuite ===\n');
-console.log('  Batch | Heap (Mo) | Entrees');
-console.log('  ------+-----------+--------');
-
-for (let batch = 0; batch < 20; batch++) {
-  for (let i = 0; i < 500; i++) {
-    simulateRequest();
-  }
-
-  global.gc();
-  heapSamples.push(process.memoryUsage().heapUsed);
-
-  const heapMB = (heapSamples[heapSamples.length - 1] / 1024 / 1024).toFixed(2);
-  console.log(`    ${String(batch + 1).padStart(2)}  |  ${heapMB.padStart(7)} |  ${leakyStore.length}`);
-}
-
-console.log('\n=== Analyse automatique ===');
-const analysis = detectLeak(heapSamples);
-console.log(`  Fuite détectée       : ${analysis.isLeak ? 'OUI' : 'NON'}`);
-console.log(`  Croissance monotone  : ${analysis.ratio} des échantillons`);
-console.log(`  Croissance totale    : ${analysis.growth}`);
-```
-
-### Demo 3 : Corriger avec WeakMap vs Map
-
-```js
-// demo-weakmap-fix.mjs
-// Lancer : node --expose-gc demo-weakmap-fix.mjs
-
-function formatMB(bytes) {
-  return (bytes / 1024 / 1024).toFixed(2);
-}
-
-// --- Version qui fuit (Map) ---
-console.log('=== Test avec Map (fuite) ===');
-const mapCache = new Map();
-
-global.gc();
-const mapBefore = process.memoryUsage().heapUsed;
-
-for (let i = 0; i < 10_000; i++) {
-  const obj = { id: i, data: new Array(100).fill(i) };
-  mapCache.set(obj, { computed: i * 2, timestamp: Date.now() });
-}
-
-global.gc();
-const mapAfter = process.memoryUsage().heapUsed;
-console.log(`  Avant: ${formatMB(mapBefore)} Mo | Après: ${formatMB(mapAfter)} Mo`);
-console.log(`  Map.size: ${mapCache.size} (toutes les entrées retenues)`);
-
-// --- Version corrigée (WeakMap) ---
-console.log('\n=== Test avec WeakMap (pas de fuite) ===');
-const weakCache = new WeakMap();
-let refs = [];
-
-global.gc();
-const weakBefore = process.memoryUsage().heapUsed;
-
-for (let i = 0; i < 10_000; i++) {
-  const obj = { id: i, data: new Array(100).fill(i) };
-  weakCache.set(obj, { computed: i * 2, timestamp: Date.now() });
-  refs.push(obj); // garder temporairement une référence forte
-}
-
-// Supprimer toutes les références fortes
-refs = null;
-
-global.gc();
-global.gc();
-const weakAfter = process.memoryUsage().heapUsed;
-console.log(`  Avant: ${formatMB(weakBefore)} Mo | Après: ${formatMB(weakAfter)} Mo`);
-console.log(`  WeakMap : les entrées sans référence forte ont été collectées`);
-
-// --- Comparaison ---
-console.log('\n=== Comparaison ===');
-const mapRetained = (mapAfter - mapBefore) / 1024 / 1024;
-const weakRetained = (weakAfter - weakBefore) / 1024 / 1024;
-console.log(`  Map retient      : ${mapRetained.toFixed(2)} Mo`);
-console.log(`  WeakMap retient  : ${weakRetained.toFixed(2)} Mo`);
-```
-
-### Demo 4 : Heap snapshot programmatique en Node.js
-
-```js
-// demo-heap-snapshot.mjs
-// Lancer : node --expose-gc demo-heap-snapshot.mjs
-
+// leak-repro.js — lancer : node --expose-gc leak-repro.js
 const v8 = require('v8');
-const path = require('path');
+const mb = (n) => (n / 1024 / 1024).toFixed(2) + ' Mo';
+const heap = () => process.memoryUsage().heapUsed;
 
-function takeSnapshot(label) {
-  const filename = v8.writeHeapSnapshot(
-    path.join(process.cwd(), `heap-${label}-${Date.now()}.heapsnapshot`)
-  );
-  console.log(`  Snapshot "${label}" → ${filename}`);
-  return filename;
+// EventEmitter global qui vit tout le process (comme le bus TribuZen)
+const { EventEmitter } = require('events');
+const bus = new EventEmitter();
+bus.setMaxListeners(0); // on désactive le warning pour observer la fuite "pure"
+
+class FamiliesServiceLeaky {
+  cache = new Map();
+  async getFamily(id) {
+    if (this.cache.has(id)) return this.cache.get(id);
+    const family = { id, members: new Array(200).fill({ role: 'member' }) }; // objet lourd
+    bus.on('family:updated', (evt) => {                 // (2) listener jamais retiré
+      if (evt.id === id) this.cache.set(id, evt.family); // capture id -> capture l'entrée
+    });
+    this.cache.set(id, family);                          // (1) cache jamais borné
+    return family;
+  }
 }
 
-function fmt(bytes) {
-  return (bytes / 1024 / 1024).toFixed(2);
+async function hammer(service, n) {
+  for (let i = 0; i < n; i++) await service.getFamily(`fam-${i}`); // ids uniques -> 0 hit
 }
 
-// Étape 1 : baseline
-global.gc();
-console.log('=== Snapshot 1 : baseline ===');
-console.log(`  Heap: ${fmt(process.memoryUsage().heapUsed)} Mo`);
-takeSnapshot('baseline');
+(async () => {
+  const svc = new FamiliesServiceLeaky();
 
-// Étape 2 : créer la fuite
-console.log('\n=== Créer une fuite (10k entrées de cache sans TTL) ===');
-const leakyCache = new Map();
-for (let i = 0; i < 10000; i++) {
-  leakyCache.set(`key-${i}`, {
-    data: new Array(100).fill(`value-${i}`),
-    metadata: { created: Date.now(), ttl: null },
-  });
-}
-console.log(`  Heap: ${fmt(process.memoryUsage().heapUsed)} Mo | Cache: ${leakyCache.size}`);
-takeSnapshot('with-leak');
+  // --- Snapshot A : au repos ---
+  global.gc();
+  console.log(`Snap A (repos)        : ${mb(heap())}`);
+  v8.writeHeapSnapshot('A.heapsnapshot');
 
-// Étape 3 : GC sans corriger
-global.gc();
-console.log('\n=== Après GC (pas de correction) ===');
-console.log(`  Heap: ${fmt(process.memoryUsage().heapUsed)} Mo (inchangé — tout est référencé)`);
-takeSnapshot('after-gc-still-leaking');
+  // --- Action répétée : 50 000 requêtes ---
+  await hammer(svc, 50_000);
+  console.log(`Snap B (après 50k req): ${mb(heap())}`);
+  v8.writeHeapSnapshot('B.heapsnapshot');
 
-// Étape 4 : corriger et GC
-leakyCache.clear();
-global.gc();
-console.log('\n=== Après correction (clear + GC) ===');
-console.log(`  Heap: ${fmt(process.memoryUsage().heapUsed)} Mo (mémoire récupérée)`);
-takeSnapshot('after-fix');
-
-console.log('\n--- Ouvrir les .heapsnapshot dans Chrome DevTools → Memory tab ---');
-console.log('--- Utiliser la vue Comparison pour voir les deltas ---');
+  // --- GC puis Snapshot C ---
+  global.gc();
+  console.log(`Snap C (après GC)     : ${mb(heap())}`); // NE redescend PAS -> fuite prouvée
+  console.log(`  cache.size          : ${svc.cache.size}`);
+  console.log(`  listeners sur bus   : ${bus.listenerCount('family:updated')}`);
+  v8.writeHeapSnapshot('C.heapsnapshot');
+})();
 ```
 
-### Demo 5 : Monitoring mémoire automatisé avec alerte
+**Raisonnement pas à pas :**
+1. Snap A capture le repos. Les 50 000 `getFamily` créent le déchet + la rétention.
+2. Après GC (Snap C), `heapUsed` **ne revient pas** au niveau de A : c'est la signature d'une fuite (à comparer avec le régime sain du module 07 où le tas redescend).
+3. `cache.size === 50000` et `listenerCount === 50000` : les deux compteurs confirment les deux sources. Dans DevTools, on chargerait `A` et `C`, vue **Comparison C vs A** : delta énorme sur `Map (elements)` et sur les closures `family:updated`. L'arbre des retainers pointe `FamiliesService.cache` et la liste de listeners du `bus`.
+4. On répare **les deux** (mesure d'abord, fix ensuite) :
 
 ```js
-// demo-memory-monitor.mjs
-// Lancer : node --expose-gc demo-memory-monitor.mjs
-
-class MemoryLeakDetector {
-  #samples = [];
-  #intervalId;
-  #windowSize;
-
-  constructor(windowSize = 10) {
-    this.#windowSize = windowSize;
+// families.service.js — version CORRIGÉE
+class FamiliesService {
+  constructor(bus) {
+    this.bus = bus;
+    this.cache = new LRUCache(500); // (1) borné : au plus 500 familles en mémoire
+    // (2) UN SEUL listener, au niveau du service, pas un par requête
+    this.onUpdated = (evt) => this.cache.set(evt.id, evt.family);
+    this.bus.on('family:updated', this.onUpdated);
   }
 
-  start(intervalMs = 1000) {
-    console.log(`Monitoring démarré (fenêtre glissante: ${this.#windowSize} échantillons)\n`);
-
-    this.#intervalId = setInterval(() => {
-      global.gc();
-      const heapUsed = process.memoryUsage().heapUsed;
-      this.#samples.push(heapUsed);
-
-      // Garder seulement les N derniers échantillons
-      if (this.#samples.length > this.#windowSize) {
-        this.#samples.shift();
-      }
-
-      const heapMB = (heapUsed / 1024 / 1024).toFixed(2);
-      const trend = this.#analyzeTrend();
-
-      console.log(
-        `  Heap: ${heapMB.padStart(8)} Mo | ` +
-        `Tendance: ${trend.direction.padEnd(8)} | ` +
-        `Pente: ${trend.slope > 0 ? '+' : ''}${trend.slope.toFixed(2)} Mo/échantillon`
-      );
-
-      if (trend.isLeak) {
-        console.log('  >>> ALERTE : fuite mémoire probable détectée ! <<<');
-      }
-    }, intervalMs);
+  async getFamily(id) {
+    const hit = this.cache.get(id);
+    if (hit) return hit;
+    const family = await this.repo.load(id);
+    this.cache.set(id, family); // LRU évince le plus ancien au-delà de 500
+    return family;
   }
 
-  stop() {
-    clearInterval(this.#intervalId);
-    console.log('\nMonitoring arrêté.');
-  }
-
-  #analyzeTrend() {
-    if (this.#samples.length < 3) {
-      return { direction: 'N/A', slope: 0, isLeak: false };
-    }
-
-    // Régression linéaire simple
-    const n = this.#samples.length;
-    let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
-    for (let i = 0; i < n; i++) {
-      const y = this.#samples[i] / 1024 / 1024; // en Mo
-      sumX += i;
-      sumY += y;
-      sumXY += i * y;
-      sumXX += i * i;
-    }
-
-    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
-    const direction = slope > 0.1 ? 'HAUSSE' : slope < -0.1 ? 'BAISSE' : 'STABLE';
-    const isLeak = slope > 0.5; // plus de 0.5 Mo par echantillon = suspect
-
-    return { direction, slope, isLeak };
+  dispose() {
+    this.bus.off('family:updated', this.onUpdated); // cleanup explicite
+    this.cache = null;
   }
 }
-
-// Simuler une fuite progressive
-const detector = new MemoryLeakDetector(10);
-detector.start(500);
-
-const leakyData = [];
-let round = 0;
-
-const leakInterval = setInterval(() => {
-  for (let i = 0; i < 2000; i++) {
-    leakyData.push(Buffer.alloc(512));
-  }
-  round++;
-  if (round >= 15) {
-    clearInterval(leakInterval);
-    setTimeout(() => detector.stop(), 2000);
-  }
-}, 500);
 ```
 
----
+Deux corrections orthogonales : cache **LRU borné** (source 4, clé string → pas de WeakMap possible) et **un seul listener** enregistré une fois, retiré dans `dispose()` (source 2). Le tas retombe désormais après GC.
 
-### V8 vs SpiderMonkey (Firefox)
+### Exemple 2 — La même fuite côté React : subscription non désabonnée
 
-Les fuites mémoire sont **indépendantes du moteur JavaScript** — les 5 patterns classiques (timers oubliés, noeuds DOM détachés, closures volumineuses, collections sans éviction, event listeners non supprimés) s'appliquent à **tous** les moteurs JS : V8, SpiderMonkey (Firefox), JavaScriptCore (Safari), etc. Le GC de chaque moteur a ses propres heuristiques, mais le problème fondamental (références non intentionnelles) est universel.
+Le pattern se transpose au front. Un composant s'abonne à un store/WebSocket et oublie de se désabonner au démontage : à chaque montage/démontage (navigation), un abonnement de plus reste vivant, retenant l'instance et son state.
 
-**Outils de diagnostic par navigateur :**
+```tsx
+// FamilyLive.tsx — version qui FUIT
+import { useEffect, useState } from 'react';
+import { familyBus } from '@/lib/familyBus';
 
-| Fonctionnalité | Chrome DevTools | Firefox DevTools |
-|---|---|---|
-| Heap Snapshots | Memory tab → « Heap snapshot » | Memory tab → « Take snapshot » |
-| Allocation Timeline | Memory tab → « Allocation instrumentation on timeline » | Memory tab → « Record allocation stacks » |
-| Retained Size / Retainers | Vue « Containment » + arbre Retainers | Vue « Tree Map » pour visualisation mémoire |
-| Détails bas-niveau | `chrome://tracing` | `about:memory` (détails complets par onglet, workers, etc.) |
-| Comparaison de snapshots | Vue « Comparison » entre deux snapshots | Vue « Diff » entre deux snapshots |
+function FamilyLive({ id }: { id: string }) {
+  const [family, setFamily] = useState<Family | null>(null);
 
-**Spécificités Firefox :**
+  useEffect(() => {
+    familyBus.subscribe(id, setFamily); // abonnement...
+    // ...aucun retour de cleanup -> l'abonnement survit au démontage
+  }, [id]); // FUITE : chaque navigation empile un abonnement mort qui retient setFamily
 
-- **`about:memory`** : une page interne Firefox qui affiche une ventilation détaillée de la mémoire de chaque onglet, worker, et composant interne. Très utile pour un premier diagnostic sans ouvrir DevTools.
-- **Tree Map** : Firefox propose une vue « Tree Map » dans l'onglet Memory qui donne une représentation visuelle proportionnelle de la mémoire — les gros blocs sont immédiatement visibles.
-- **Mêmes concepts, UI différente** : la méthode des 3 snapshots fonctionne exactement de la même manière dans Firefox — seule l'interface change.
+  return <FamilyCard family={family} />;
+}
+```
 
-> **À retenir** : si tu apprends à diagnostiquer les fuites dans Chrome DevTools, tu sauras le faire dans Firefox. Les concepts (retained size, retainers, comparison) sont les mêmes partout.
+**Fix — la fonction de cleanup de `useEffect` :**
 
----
+```tsx
+useEffect(() => {
+  const unsubscribe = familyBus.subscribe(id, setFamily);
+  return () => unsubscribe(); // React l'appelle au démontage ET avant re-run si id change
+}, [id]);
+```
 
-## Points clés
+Même diagnostic 3-snapshot dans Chrome : Snap A sur la page, naviguer entrer/sortir de `FamilyLive` 10 fois, GC, Snap C, Comparison → on voit N `FamilyLive` closures / `setFamily` retenus par la liste d'abonnés de `familyBus`. Le `return () => unsubscribe()` est le cleanup canonique : **tout abonnement, timer ou listener ouvert dans un effet doit être fermé dans son cleanup**.
 
-1. Une fuite mémoire en JS = **référence non intentionnelle** vers des données obsolètes, empêchant le GC de les collecter.
-2. Les **5 patterns classiques** : timers oubliés, noeuds DOM détachés, closures capturant de gros scopes, collections sans éviction, event listeners non supprimés.
-3. La **méthode des 3 snapshots** est la technique la plus fiable : snapshot baseline, actions répétées, GC, snapshot de vérification, comparaison.
-4. **Retained Size** (pas Shallow Size) révèle l'impact réel d'un objet sur la mémoire.
-5. L'arbre des **Retainers** dans un Heap Snapshot montre le chemin exact de rétention — c'est l'outil principal de diagnostic.
-6. En Node.js, `process.memoryUsage()` + `v8.getHeapStatistics()` + `v8.writeHeapSnapshot()` forment la trousse à outils complète.
-7. `--max-old-space-size` permet de limiter le heap et de détecter les fuites plus tôt.
-8. **WeakMap** est la solution idiomatique pour les caches et métadonnées associés à des objets.
-9. **AbortController** avec `{ signal }` sur `addEventListener` simplifie le nettoyage des listeners.
-10. Un `number_of_native_contexts` croissant dans `v8.getHeapStatistics()` est un signe de fuite de contextes (iframes, workers, vm.createContext).
+> **Fading — à toi (J+0) :** reprends `startPolling` (source 1) et écris sa version React : un `useEffect` qui lance un `setInterval` et le `clearInterval` dans son cleanup. Vérifie mentalement qu'après 5 démontages il reste 0 timer actif.
 
 ---
 
----
+## 4. Pièges & misconceptions
 
-## Pour aller plus loin
-
-- [Chrome DevTools — Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems/)
-- [Chrome DevTools — Record heap snapshots](https://developer.chrome.com/docs/devtools/memory-problems/heap-snapshots/)
-- [V8 Blog — Trash talk: the Orinoco garbage collector](https://v8.dev/blog/trash-talk)
-- [Node.js Docs — process.memoryUsage()](https://nodejs.org/api/process.html#processmemoryusage)
-- [Node.js Docs — v8.getHeapStatistics()](https://nodejs.org/api/v8.html#v8getheapstatistics)
-- [Node.js Docs — v8.writeHeapSnapshot()](https://nodejs.org/api/v8.html#v8writeheapsnapshotfilename)
-- [MDN — WeakMap](https://developer.mozilla.org/fr/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)
-- [MDN — WeakSet](https://developer.mozilla.org/fr/docs/Web/JavaScript/Reference/Global_Objects/WeakSet)
-- [Nolan Lawson — Fixing memory leaks in web applications](https://nolanlawson.com/2020/02/19/fixing-memory-leaks-in-web-applications/)
-
----
-
-## Défi
-
-Ce composant React fuit mémoire à chaque navigation. Après 50 allers-retours entre les pages, l'onglet consomme 2 Go. Trouvez **toutes les fuites** (il y en a 4) et écrivez le code de nettoyage complet.
+### PIÈGE #1 — Confondre croissance non bornée et fuite
 
 ```js
-class DataDashboard extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { data: [], connected: false };
-    this.chartInstances = [];
-  }
-
-  componentDidMount() {
-    // Fuite 1
-    this.ws = new WebSocket('wss://api.example.com/stream');
-    this.ws.onmessage = (event) => {
-      const newData = JSON.parse(event.data);
-      this.setState((prev) => ({
-        data: [...prev.data, newData], // accumulation infinie
-      }));
-    };
-
-    // Fuite 2
-    this.resizeHandler = () => this.handleResize();
-    window.addEventListener('resize', this.resizeHandler);
-
-    // Fuite 3
-    this.pollInterval = setInterval(() => {
-      fetch('/api/health').then((r) => r.json()).then(console.log);
-    }, 5000);
-
-    // Fuite 4
-    this.renderCharts();
-  }
-
-  renderCharts() {
-    const container = document.getElementById('charts');
-    for (let i = 0; i < 10; i++) {
-      const canvas = document.createElement('canvas');
-      container.appendChild(canvas);
-      const chart = new Chart(canvas, this.getChartConfig(i));
-      this.chartInstances.push(chart);
-    }
-  }
-
-  componentWillUnmount() {
-    // Que manque-t-il ici ?
-  }
-
-  // ...
-}
+this.messages = [...this.messages, incoming]; // grandit sans limite
 ```
 
-<details>
-<summary>Réponse</summary>
+Ce n'est **pas une fuite au sens strict** si les données sont réellement utilisées (affichées, traitées) : c'est une **croissance non bornée**. La fuite concerne des objets *retenus mais inutiles*. La distinction change le fix : une fuite se corrige par un cleanup (on supprime la rétention) ; une croissance non bornée se corrige par une **borne** (`messages.slice(-1000)`, fenêtre glissante, pagination). Diagnostiquer lequel des deux avant de coder.
 
-**Les 4 fuites et leurs mécanismes de rétention :**
-
-1. **WebSocket non fermé** : `this.ws` reste ouvert après démontage. Le callback `onmessage` capture `this` (l'instance du composant) via la closure. Même après démontage du composant, le WebSocket continue de recevoir des messages et d'accumuler des données dans `this.state.data` (qui ne fait que croître avec le spread `[...prev.data, newData]`). Chaîne de rétention : GC root → WebSocket → onmessage closure → this → state.data + chartInstances + container.
-
-2. **Event listener `resize` non supprimé** : `this.resizeHandler` est enregistré sur `window` (racine GC permanente) mais jamais supprimé dans `componentWillUnmount`. L'instance entière du composant (et toutes ses données) reste en mémoire via la closure du handler.
-
-3. **`setInterval` non arrêté** : `this.pollInterval` continue de s'exécuter après démontage. Le callback retient une référence vers le scope de `componentDidMount` et le `this` via la closure de la méthode `fetch`.
-
-4. **Instances Chart.js non détruites** : `this.chartInstances` contient des objets Chart qui allouent des buffers Canvas 2D/WebGL internes. Sans appel à `chart.destroy()`, les contextes graphiques (ctx) et leurs buffers GPU ne sont jamais libérés.
-
-**Le `componentWillUnmount` corrigé :**
+### PIÈGE #2 — « Passer en `WeakMap` corrige tout »
 
 ```js
-componentWillUnmount() {
-  // 1. Fermer le WebSocket et supprimer le handler
-  if (this.ws) {
-    this.ws.onmessage = null;
-    this.ws.close();
-    this.ws = null;
-  }
-
-  // 2. Supprimer le listener resize
-  window.removeEventListener('resize', this.resizeHandler);
-
-  // 3. Arreter le polling
-  clearInterval(this.pollInterval);
-
-  // 4. Détruire les instances Chart.js
-  for (const chart of this.chartInstances) {
-    chart.destroy();
-  }
-  this.chartInstances = [];
-}
+const cache = new WeakMap();
+cache.set(familyId, data); // ❌ TypeError : une clé WeakMap doit être un objet
 ```
 
-**Bonus** : `[...prev.data, newData]` n'est pas une fuite à proprement parler — c'est un problème de **croissance non bornée**. L'accumulation est intentionnelle (chaque message est ajouté) mais sans limite. La différence avec une fuite : ici les données sont utilisées (pour l'affichage), tandis qu'une fuite concerne des données retenues mais inutilisées. La correction serait de garder seulement les N derniers messages : `data: [...prev.data.slice(-1000), newData]`.
+`WeakMap` n'accepte que des **objets** en clé et rend faible la **clé**, pas la valeur. Elle est parfaite pour attacher des métadonnées à un objet dont tu ne contrôles pas la vie (cf. module 07). Elle est **inutilisable** pour un cache indexé par une primitive (`familyId: string`) : là, il faut une éviction explicite (LRU). Choisir l'outil d'après la clé, pas par réflexe.
 
-</details>
+### PIÈGE #3 — Croire que `= null` libère immédiatement
+
+```js
+this.cache = null; // ne libère RIEN tout de suite
+```
+
+Mettre à `null` **coupe une arête**. La mémoire n'est récupérée qu'au **prochain GC**, et seulement si aucune autre arête n'atteint l'objet. Dans le cas concret, `cache = null` ne suffirait pas tant que le `bus` retient encore les closures qui pointent vers les entrées : il faut d'abord retirer les listeners. Toujours couper **toutes** les arêtes, en remontant l'arbre des retainers.
+
+### PIÈGE #4 — Diagnostiquer sur un seul snapshot
+
+Un heap snapshot isolé montre un gros `Map`… qui est peut-être parfaitement légitime. Sans **comparaison** après une action répétée + GC, tu ne sais pas si l'objet *croît anormalement* ou s'il est stable. La méthode des 3 snapshots (delta C vs A) est ce qui transforme une intuition en preuve. Un seul snapshot = spéculation.
+
+### PIÈGE #5 — `global.gc()` ou snapshots en production
+
+`global.gc()` force une pause stop-the-world ; prendre un heap snapshot fige aussi le thread le temps du dump. Utiles en dev/bench, **jamais** dans le chemin chaud de prod. En prod : capturer un snapshot à la demande (signal, endpoint admin) puis l'analyser hors-ligne dans DevTools.
 
 ---
 
-<!-- parcours-recommande -->
+## 5. Ancrage TribuZen
 
-::: tip Parcours recommandé
-1. **Screencast** : [screencast 08 memory leaks](../screencasts/screencast-08-memory-leaks.md)
-2. **Lab** : [lab-08-memory-leak-detection](../labs/lab-08-memory-leak-detection/README)
-3. **Quiz** : [quiz 08 memory leaks](../quizzes/quiz-08-memory-leaks.html)
-:::
+La fuite du cas concret est **la** fuite type d'une API stateful comme TribuZen : un service qui cache des agrégats lourds (familles avec membres, events, médias) et qui écoute un bus d'événements.
+
+**La fuite réelle (deux sources cumulées).** `FamiliesService` gardait un `Map` de familles jamais borné **et** ajoutait un listener `family:updated` par requête sur un `EventEmitter` global. En 20 h de trafic, le tas montait en escalier jusqu'à l'OOM. Diagnostic : `v8.writeHeapSnapshot()` sur trois points (repos / après charge `autocannon` sur `GET /families/:id` / après GC), chargés dans Chrome DevTools, vue Comparison → delta sur `Map (elements)` et sur les closures `family:updated`, retainers pointant `FamiliesService.cache` et la liste de listeners du bus.
+
+**Le fix.** Cache **LRU borné** (500 familles max — clé `familyId` string, donc `WeakMap` exclue) + **un seul** listener enregistré au constructeur et retiré dans `dispose()` (cycle de vie NestJS `onModuleDestroy`). Le tas redevient des dents de scie qui redescendent après GC (régime sain du module 07).
+
+**La fuite React (front admin).** Le composant `FamilyLive` s'abonnait au bus temps réel sans retourner de cleanup dans son `useEffect` → chaque navigation laissait un abonnement mort retenant l'instance. Fix : `return () => unsubscribe()`.
+
+Fichiers cibles dans `smaurier/tribuzen` :
+
+```
+tribuzen/
+  apps/api/src/families/
+    families.service.ts         # LRUCache borné + un listener retiré dans onModuleDestroy
+    lru-cache.ts                # LRUCache réutilisable (module-level util)
+  apps/web/src/features/family/
+    FamilyLive.tsx              # useEffect avec return () => unsubscribe()
+  apps/api/src/common/observability/
+    heap-probe.ts               # writeHeapSnapshot à la demande (dev/admin), jamais global.gc en prod
+```
+
+---
+
+## 6. Points clés
+
+1. Une fuite JS = objet **atteignable depuis un root mais inutile** au programme ; le GC est correct, c'est ton code qui retient.
+2. Trois régimes : sain (le tas redescend), croissance **bornée** (plafonne), fuite (escalier qui ne redescend jamais) — distinguer avant de corriger.
+3. Sources classiques : timers non annulés, listeners non retirés, closures qui retiennent un gros scope, caches/collections non bornés, références globales, nœuds DOM détachés (navigateur).
+4. La **méthode des 3 snapshots** (repos → N actions → GC → snapshot, puis Comparison delta) transforme une intuition en preuve ; un seul snapshot ne suffit pas.
+5. On trie par **retained size** et on remonte l'**arbre des retainers** jusqu'à un root : le chemin nomme la propriété fautive.
+6. Fix par source : `clearInterval` (timer), `AbortController`/`removeEventListener` (listener), isoler le scope (closure), `WeakMap` (cache à clé objet), **cache LRU borné** (cache à clé primitive), couper la réf JS (DOM détaché).
+7. `WeakMap` exige une clé **objet** et n'accepte pas les primitives — pas un fix universel ; `= null` ne libère qu'au prochain GC.
+8. Côté React, tout abonnement/timer/listener ouvert dans un `useEffect` doit être fermé dans sa **fonction de cleanup** (`return () => ...`).
+9. En Node : `process.memoryUsage().heapUsed`, `v8.getHeapStatistics()`, `v8.writeHeapSnapshot()` — jamais `global.gc()` ni snapshot dans le chemin chaud de prod.
+
+---
+
+## 7. Seeds Anki
+
+```
+Quelle est la définition précise d'une fuite mémoire en JavaScript ?|De la mémoire qui reste atteignable depuis un root (donc non collectée par le GC) alors qu'elle n'est plus utile au programme. Le GC fonctionne correctement ; c'est le code qui maintient involontairement une référence vers des objets morts logiquement.
+Comment distinguer une fuite d'une croissance non bornée ?|Une fuite retient des objets inutiles -> fix = supprimer la rétention (cleanup). Une croissance non bornée accumule des données réellement utilisées -> fix = borner (slice, fenêtre glissante, pagination). Au heap : la fuite ne redescend jamais après GC ; un cache LRU plein plafonne.
+Décris la méthode des 3 heap snapshots.|Snap A au repos ; exécuter l'action suspecte N fois ; Snap B ; forcer un GC ; Snap C. Puis vue Comparison C vs A : tout objet à delta positif a survécu au GC alors que l'action est finie -> c'est la fuite. Le GC entre B et C élimine le déchet légitime.
+Différence entre shallow size et retained size dans un heap snapshot ?|Shallow size = taille de l'objet seul (ses champs propres). Retained size = ce qui serait libéré si on le collectait, incluant tout ce qu'il retient exclusivement. On trie par retained size pour trouver les plus gros retenteurs.
+À quoi sert l'arbre des retainers ?|À répondre "pourquoi cet objet est-il encore vivant ?" : il remonte la chaîne de références de l'objet jusqu'à un root GC, nommant chaque propriété du chemin (ex: FamiliesService.cache). Le chemin complet EST le diagnostic de la référence fautive.
+Pourquoi WeakMap n'est-il pas un fix universel de cache ?|WeakMap exige une clé OBJET (pas de string/number) et rend faible la clé, pas la valeur. Pour un cache indexé par une primitive (familyId), WeakMap est impossible : il faut une éviction explicite, typiquement un cache LRU borné.
+Comment un cache LRU borné évite-t-il la fuite ?|Il plafonne le nombre d'entrées. Comme Map itère dans l'ordre d'insertion, la première clé est la plus anciennement utilisée ; à capacité pleine on l'évince avant d'insérer. La taille est bornée -> croissance bornée, pas de fuite.
+Pourquoi un event listener ou un setInterval non nettoyé fuit-il ?|La cible (window, document, EventEmitter, liste de timers) est une racine GC qui retient le handler/callback, donc la closure et le this capturés, donc toute l'instance. Fix : removeEventListener / AbortController pour les listeners, clearInterval pour les timers.
+Comment se manifeste et se corrige une fuite de subscription en React ?|Un useEffect qui s'abonne (store, WebSocket, bus) sans retourner de cleanup laisse un abonnement vivant à chaque démontage, retenant l'instance. Fix : retourner la fonction de désabonnement — return () => unsubscribe() — que React appelle au démontage et avant chaque re-run de l'effet.
+Comment diagnostiquer une fuite dans un serveur Node sans navigateur ?|Échantillonner process.memoryUsage().heapUsed (escalier = suspect), et appeler v8.writeHeapSnapshot() à trois points (repos / après charge / après GC). On charge les .heapsnapshot dans Chrome DevTools et on applique la méthode des 3 snapshots + retainers. Jamais global.gc() en prod.
+```
+
+---
+
+## Pont vers le lab
+
+> Lab associé : `01-js-runtime/labs/lab-08-memory-leak-detection/README.md`. Reproduire la fuite TribuZen (cache de familles non borné + listener par requête), la **prouver** avec `v8.writeHeapSnapshot()` + la méthode des 3 snapshots, puis la corriger (cache LRU borné + cleanup du listener). Corrigé complet inline + variante J+30 + application TribuZen.
