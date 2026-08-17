@@ -1,5 +1,9 @@
 # JavaScript Runtime — Comprendre le moteur sous le capot
 
+![VitePress](https://img.shields.io/badge/-VitePress-646CFF?style=flat-square&logo=vite&logoColor=white)
+![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
+[![fullstack-autotraining](https://img.shields.io/badge/curriculum-fullstack--autotraining-4C1?style=flat-square)](https://github.com/smaurier/fullstack-autotraining)
+
 Formation avancée sur le fonctionnement interne du runtime JavaScript (V8, event loop, mémoire, JIT).
 
 **Ce cours n'est PAS un cours de syntaxe.** Tu maîtrises déjà JavaScript. Ici on ouvre le capot pour comprendre **comment** et **pourquoi** les choses fonctionnent.
