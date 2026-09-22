@@ -8,7 +8,9 @@
     "lab:01": "vitest run --root lab-01-profil-de-perf",
     "solution:01": "vitest run --root lab-01-profil-de-perf --config vitest.solution.config.ts",
     "lab:02": "vitest run --root lab-02-fuite-memoire",
-    "solution:02": "vitest run --root lab-02-fuite-memoire --config vitest.solution.config.ts"
+    "solution:02": "vitest run --root lab-02-fuite-memoire --config vitest.solution.config.ts",
+    "lab:03": "vitest run --root lab-03-event-loop-bloque",
+    "solution:03": "vitest run --root lab-03-event-loop-bloque --config vitest.solution.config.ts"
   },
   "engines": {
     "node": ">=20.0.0"
