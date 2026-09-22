@@ -1,0 +1,20 @@
+{
+  "name": "js-runtime-labs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Oracles exécutables des labs JS Runtime (règle : un lab = un geste métier complet). Les gains de performance sont mesurés en vrai (performance.now, warm-up JIT), jamais supposés.",
+  "type": "module",
+  "scripts": {
+    "lab:01": "vitest run --root lab-01-profil-de-perf",
+    "solution:01": "vitest run --root lab-01-profil-de-perf --config vitest.solution.config.ts"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "5.0.1"
+  }
+}
