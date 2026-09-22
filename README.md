@@ -11,12 +11,12 @@ Formation avancée sur le fonctionnement interne du runtime JavaScript (V8, even
 <!-- labs-gestes:start -->
 ## Labs — refonte du 22/09/2026 : un lab = un geste métier complet
 
-> Règle qualité 5 du parcours : chaque lab est **un geste métier complet**, sous deux formes — **Zéro** (construire de zéro un artefact réel et entier) ou **Intervention** (modifier de l'existant avec consommateurs, findings avant code, non-régression). Un lab n'entre en file qu'avec un **oracle exécutable** (`src/` starter · `test/` · `solution/` séparée). Les labs historiques de ce cours (un concept par lab, sans oracle) restent dans `labs/` jusqu'à remplacement et **ne sont plus la file**. Cible détaillée : [`docs/gestes-complets.md`](../docs/gestes-complets.md). État : **1/3 avec oracle**.
+> Règle qualité 5 du parcours : chaque lab est **un geste métier complet**, sous deux formes — **Zéro** (construire de zéro un artefact réel et entier) ou **Intervention** (modifier de l'existant avec consommateurs, findings avant code, non-régression). Un lab n'entre en file qu'avec un **oracle exécutable** (`src/` starter · `test/` · `solution/` séparée). Les labs historiques de ce cours (un concept par lab, sans oracle) restent dans `labs/` jusqu'à remplacement et **ne sont plus la file**. Cible détaillée : [`docs/gestes-complets.md`](../docs/gestes-complets.md). État : **2/3 avec oracle**.
 
 | # | Lab | Forme | Geste | Oracle |
 |---|-----|-------|-------|--------|
 | 01 | [`lab-01-profil-de-perf`](labs/lab-01-profil-de-perf/README.md) | Zéro | mesurer, trouver, corriger, prouver au chiffre | ✅ vérifié |
-| 02 | `lab-02-fuite-memoire` | Intervention | dans un composant existant | · à écrire |
+| 02 | [`lab-02-fuite-memoire`](labs/lab-02-fuite-memoire/README.md) | Intervention | dans un composant existant | ✅ vérifié |
 | 03 | `lab-03-event-loop-bloque` | Intervention | en prod, diagnostic et correction | · à écrire |
 
 <!-- labs-gestes:end -->
