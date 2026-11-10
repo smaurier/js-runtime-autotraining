@@ -10,7 +10,9 @@
     "lab:02": "vitest run --root lab-02-fuite-memoire",
     "solution:02": "vitest run --root lab-02-fuite-memoire --config vitest.solution.config.ts",
     "lab:03": "vitest run --root lab-03-event-loop-bloque",
-    "solution:03": "vitest run --root lab-03-event-loop-bloque --config vitest.solution.config.ts"
+    "solution:03": "vitest run --root lab-03-event-loop-bloque --config vitest.solution.config.ts",
+    "lab:16": "vitest run --root lab-16-iterateurs-et-ressources",
+    "solution:16": "vitest run --root lab-16-iterateurs-et-ressources --config vitest.solution.config.ts"
   },
   "engines": {
     "node": ">=20.0.0"
